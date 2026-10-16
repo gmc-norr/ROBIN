@@ -252,6 +252,9 @@ def merge_modkit_files(
                 )
                 gr = pr.PyRanges(pr_df.to_pandas()[["Chromosome", "Start", "End"]])
                 inter = gr.intersect(filter_ranges).df
+                # No sites on the panel: PyRanges returns a DataFrame with no columns
+                if inter.empty:
+                    continue
 
                 # Join in Polars: keep only rows whose (chrom, chromStart) are in the intersection.
                 # Cast join keys to match pl_df (str + UInt32); from_pandas can infer Categorical for chrom.
