@@ -176,3 +176,6 @@ Desktop.ini
 src/robin/models/general.zip
 src/robin/models/Capper_et_al_NN.pkl
 src/robin/models/pancan_devel_v5i_NN.pkl 
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
