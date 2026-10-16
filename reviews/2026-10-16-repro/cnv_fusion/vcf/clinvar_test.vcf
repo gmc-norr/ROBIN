@@ -1,0 +1,5 @@
+##fileformat=VCFv4.1
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+2	208248388	375891	C	T	.	.	CLNSIG=Pathogenic;GENEINFO=IDH1:3417;CLNDN=Glioma
+2	208248388	376280	C	A	.	.	CLNSIG=Likely_pathogenic;GENEINFO=IDH1:3417;CLNDN=not_provided
+7	140753336	13961	A	T	.	.	CLNSIG=Conflicting_classifications_of_pathogenicity;GENEINFO=BRAF:673
