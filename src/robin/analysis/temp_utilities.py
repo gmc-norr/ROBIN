@@ -65,6 +65,29 @@ def _exclusive_file_lock(lock_path: str):
         lock_file.close()
 
 
+def _merge_failure_diagnostics(pl_df=None, gr=None, inter=None) -> str:
+    """Describe merge state for a failed file: versions, shapes and contig names only (no positions or values)."""
+    parts = [
+        f"module={__file__}",
+        f"pandas={pd.__version__}",
+        f"polars={pl.__version__}",
+        f"pyranges={getattr(globals().get('pr'), '__version__', 'not imported')}",
+    ]
+    checks = [
+        ("rows", lambda: pl_df.height),
+        ("schema", lambda: dict(pl_df.schema)),
+        ("contigs", lambda: sorted(map(str, pl_df["chrom"].unique().to_list()))[:40]),
+        ("ranges", lambda: len(gr)),
+        ("intersect", lambda: f"{type(inter).__name__} rows={len(inter)} columns={list(inter.columns)}"),
+    ]
+    for name, get in checks:
+        try:
+            parts.append(f"{name}={get()}")
+        except Exception:
+            pass
+    return "; ".join(parts)
+
+
 def merge_modkit_files(
     new_files: List[str],
     existing_file: str,
@@ -215,6 +238,7 @@ def merge_modkit_files(
         # Process new files: read with Polars, filter to CPG set, then combine
         new_frames: List[pl.DataFrame] = []
         for bed in new_files:
+            pl_df = gr = inter = None
             try:
                 if bed.endswith(".parquet"):
                     # Matkit wrote 8-column parquet; read directly (no CSV parse, types already correct)
@@ -269,7 +293,11 @@ def merge_modkit_files(
                 filt = pl_df.join(inter_pl, on=["chrom", "chromStart"], how="inner")
                 new_frames.append(filt)
             except Exception as e:
-                logging.error(f"Error processing file {bed}: {str(e)}")
+                logging.error(
+                    f"Error processing file {bed}: {str(e)} "
+                    f"[{_merge_failure_diagnostics(pl_df, gr, inter)}]",
+                    exc_info=True,
+                )
                 continue
 
         if not new_frames:

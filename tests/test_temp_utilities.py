@@ -55,3 +55,30 @@ def test_file_with_no_panel_sites_is_skipped_without_error(tmp_path, caplog):
     assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
     merged = pl.read_parquet(output_file)
     assert merged.select("chrom", "chromStart").rows() == [("chr1", 100)]
+
+
+def test_failed_file_logs_traceback_and_diagnostics(tmp_path, caplog):
+    filter_bed = tmp_path / "panel.bed"
+    filter_bed.write_text("chr1\t100\t101\tcg0001\n")
+
+    broken = tmp_path / "broken.parquet"
+    pl.DataFrame({"chrom": ["chr1"], "chromStart": [100]}).write_parquet(broken)
+
+    output_file = tmp_path / "out.parquet"
+    with caplog.at_level(logging.ERROR):
+        merge_modkit_files(
+            new_files=[str(broken)],
+            existing_file=str(output_file),
+            output_file=str(output_file),
+            filter_bed_file=str(filter_bed),
+            sample_id="sample",
+            output_dir=str(tmp_path),
+            mnpflex_config=None,
+            num_bam_files_seen=1,
+        )
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any(r.exc_info for r in errors), "error should carry a traceback"
+    diagnostics = " ".join(r.getMessage() for r in errors)
+    assert "pyranges=" in diagnostics
+    assert "temp_utilities.py" in diagnostics
