@@ -3,7 +3,8 @@
 **Date:** 2026-10-16\
 **Code reviewed:** `main` at `493f53f` (LooseLab/ROBIN, forked to gmc-norr/ROBIN)\
 **Scope:** all of `src/robin` (91 Python files, about 82,000 lines), plus packaging, resources and CI config.\
-**Prepared with:** Claude Code (an AI-assisted review). Treat each finding as a lead to check, not as a final verdict.
+**Prepared with:** Claude Code (an AI-assisted review). Treat each finding as a lead to check, not as a final verdict.\
+**Updated:** 2026-10-16, after a second review (Codex): the CNV-1 and GUI-1 fix sizes are corrected, the status lines are brought up to date, and the reproduction scripts are added.
 
 ## How this was done, and its limits
 
@@ -25,7 +26,7 @@
   - **Confirmed:** traced end to end, or reproduced.
   - **Plausible:** a strong reading of the code, but not fully traced (usually because it depends on timing or on Ray scheduling).
 
-The reproduction scripts lived in a temporary folder and were not kept. Each finding names the inputs that were used, so it can be reproduced again.
+The reproduction scripts are in [`2026-10-16-repro/`](2026-10-16-repro/README.md), with a table of which script shows which finding. They are scripts, not regression tests yet. A "Confirmed" label only becomes repeatable evidence once its script is turned into a test in `tests/`.
 
 ---
 
@@ -37,18 +38,18 @@ The pipeline has a sound shape: a file watcher feeds a job graph, each sample ke
 2. **State lives in places that go stale.** There are caches inside long-lived Ray workers, the CNV control reference gets modified by every patient, the GUI keeps per-page state on a shared object, and there is one "waiting" slot per classifier for all samples.
 3. **Errors are swallowed at every layer.** Failed jobs are counted as "completed", and error details are never sent to the GUI. This is why the "Error processing file" log line never showed up in the frontend.
 
-There are no tests and no CI that runs code on `main`.
+Only two tests exist (added after this review), and no CI runs them.
 
 ### Fix first
 
 | # | Problem | What goes wrong | Where | Size of fix |
 |---|---|---|---|---|
 | 1 | Methylation % is averaged without weighting by coverage | Every classifier gets biased input, and adding depth doesn't make it better | `analysis/temp_utilities.py:285-391` | Small |
-| 2 | CNV control reference is modified by every patient's reads | Real gains and losses fade over a run; false events appear in the next patient | `analysis/cnv_analysis.py:118-145` | Small (deepcopy) |
+| 2 | CNV control reference is modified by every patient's reads | Real gains and losses fade over a run; false events appear in the next patient | `analysis/cnv_analysis.py:118-145` | Medium (build the control profile without patient reads) |
 | 3 | One waiting slot per classifier type, shared by all samples | In multi-sample runs, a sample's final classification can silently never run | `workflow_ray.py:2462-2535` | Medium |
-| 4 | Classification panel freezes if any classifier is disabled | GUI keeps showing the first result for the rest of the run | `gui/components/classification.py:1006-1022` | One line |
+| 4 | Classification panel freezes if any classifier is disabled | GUI keeps showing the first result for the rest of the run | `gui/components/classification.py:1003-1021` | Small (two loops) |
 | 5 | Refresh timers are switched off on any brief reconnect | An open page shows hours-old results, with no sign that they are stale | 8 GUI components | Small |
-| 6 | Ray dashboard open on all network interfaces, with no password | Anyone on the network can run code as the ROBIN user | `cli.py:2435-2449` | One line |
+| 6 | Ray dashboard open on all network interfaces, with no password | Anyone on the network can run code as the ROBIN user | `cli.py:1725-1731`, `2435-2449` | Small (two places) |
 | 7 | 60-second idle timeout (a test value) left in | A sample is marked Complete and finalised too early; SNP calls cover only part of the data | `gui_launcher.py:420` | One line |
 | 8 | matkit counts failed calls in coverage; NanoDX drops minus-strand calls | Methylation pushed down; about half the reads never reach NanoDX | `utilities/matkit.py`, `nanodx_analysis.py` | Medium |
 | 9 | ClinVar handling | IDH1 R132H-type hotspot alleles lost; "conflicting" calls shown as pathogenic; a stale index silently returns nothing | `lightweight_gene_analysis.py`, `snp_processing.py`, `clinvar_manager.py`, `reporting/sections/variants.py` | Small to medium |
@@ -147,7 +148,7 @@ There are no tests and no CI that runs code on `main`.
 **METH-9 · low/medium · Confirmed (mechanism)**: One BAM failing in a batch is skipped and its data deleted.
 - **Where:** `temp_utilities.py:268-270`, `bed_conversion.py:252-262, 323-329`
 - **What's wrong:** Per-file errors in the merge are logged and the loop goes on. All the per-BAM parquets are then deleted, including the failed one, and the job reports success.
-- **Context:** this is the path behind the original "Error processing file … ['Chromosome', 'Start']" message. That case is fixed on branch `fix/empty-panel-intersection`, and it lost no data.
+- **Context:** this is the path behind the original "Error processing file … ['Chromosome', 'Start']" message. That case is fixed on `main` (commit `d02add2`), and it lost no data. Commit `5be9e04` makes this log line include a traceback and safe diagnostics.
 
 **METH-10 · low · Confirmed**: The MGMT site table can show 0.43% as 43%.
 - **Where:** `mgmt_analysis.py:336-347`; the GUI copy is at `gui/components/mgmt.py:226-235`
@@ -177,7 +178,8 @@ There are no tests and no CI that runs code on `main`.
 - **Simulated effect:**
   - Within one patient, a 3-copy gain reads +1.04 after the first batch, +0.49 when the patient has as many reads as the control, and +0.28 at 2.5× the control. A partial-purity gain drops below the ±0.4 call threshold, so events like 1p/19q or +7/−10 can disappear as the run goes on.
   - Across patients, a normal patient processed after another one showed mirror-image false events.
-- **Fix:** `copy.deepcopy` the reference on every call. Better: re-bin the stored control counts in numpy, instead of reading the patient BAM a second time.
+- **Fix:** build the reference profile from the stored control counts only, by re-binning them to the sample's bin width in numpy. Never pass a dict that must stay clean to `iterate_bam_file`.
+- **Not enough on its own:** a `copy.deepcopy` per call is only a stopgap. It stops patients polluting each other, but each call still adds the current BAM to the copy, so the reference still contains that BAM's reads.
 
 **CNV-2 · high · Plausible**: Per-sample CNV counts are cached per Ray worker and never invalidated.
 - **Where:** `cnv_analysis.py:1137-1178, 1446-1484, 1245, 1620`, `workflow_ray.py:392-394, 2037-2068`
@@ -362,9 +364,9 @@ This is why "Error processing file" showed up in the backend log but never in th
 ## 6. GUI
 
 **GUI-1 · critical · Confirmed (spot-checked)**: The classification panel stops updating when any classifier is disabled.
-- **Where:** `gui/components/classification.py:1006-1022`
+- **Where:** `gui/components/classification.py:1003-1021`
 - **What's wrong:** The loop goes over all four tools in `tool_to_file`, but `charts` only has entries for the enabled ones. So `charts['PanNanoDX']` raises KeyError on every tick after the first. The panel keeps showing the first result, while the summary card moves on.
-- **Fix:** loop over `charts.items()`.
+- **Fix:** in both loops of `_refresh_classification` (lines 1003-1008 and 1019-1021), loop over `charts` instead of `tool_to_file`, or skip tools that aren't in `charts`. The third loop (1041-1047) is already guarded.
 
 **GUI-2 · critical · Confirmed (against NiceGUI 3.6 source)**: A brief websocket drop permanently stops every refresh timer.
 - **Where:** `summary.py:352`, `classification.py:1068`, `coverage.py:6917`, `mgmt.py:721`, `cnv.py:2467`, `fusion.py:3421`, `mnpflex.py:860`, `bed_coverage.py:456`
@@ -517,7 +519,7 @@ This is why "Error processing file" showed up in the backend log but never in th
 
 **PKG-2 · medium · Confirmed**: There are no tests and no CI for code on `main`.
 - **What's wrong:**
-  - pytest points at a `tests/` folder that doesn't exist on main.
+  - pytest's `tests/` folder holds only the two tests added after this review (`tests/test_temp_utilities.py`).
   - CI only builds the docs, on Python 3.11.
   - The mypy and black configs still target Python 3.8.
 
@@ -602,34 +604,36 @@ This is why "Error processing file" showed up in the backend log but never in th
 
 ## Suggested order of work
 
-1. **Quick wins (each a few lines; each deserves a regression test):**
-   - GUI-1: loop over `charts.items()`
+Make each step below its own change, with its own regression test. The scripts in `2026-10-16-repro/` are the starting point for those tests.
+
+1. **Quick wins (each a few lines). Do SEC-1 first:**
+   - SEC-1: Ray dashboard on 127.0.0.1
+   - GUI-1: guard both loops in `_refresh_classification`
    - REP-1: the RF config key
    - JOB-6: change 60 to 3600, and make it configurable
-   - SEC-1: Ray dashboard on 127.0.0.1
-   - CNV-1: deepcopy the reference
    - GUI-4: stop reading the counter file
    - CNV-5: drop the last change point
    - GUI-2: use `on_delete`
    - VAR-3: force-rebuild the tabix index
    - VAR-7: keep all panel regions
-2. **The methylation maths, as one change with a test against `modkit pileup --combine-strands`:**
+2. **CNV-1:** build the control profile without patient reads (see CNV-1; a deepcopy alone is not enough).
+3. **The methylation maths, as one change with a test against `modkit pileup --combine-strands`:**
    - METH-1 and METH-2: aggregate always, and recompute % from counts
    - METH-5: semi-join, and dedupe the panel
    - METH-6: drop the `Start-1`
    - METH-3: matkit denominator
    - METH-4: combine strands
    - METH-7: pass coverage through
-3. **Make failures visible:**
+4. **Make failures visible:**
    - ERR-1: failures counted, and forwarded to the GUI
    - METH-8: classifiers raise instead of logging
    - VAR-4, REP-6: "not available" instead of a negative result
-4. **Scheduling state:**
+5. **Scheduling state:**
    - JOB-1: per-sample dirty flags
    - JOB-2: a persistent file ledger
    - CNV-2: no worker caches, and atomic writes
    - JOB-3, JOB-4, JOB-5, JOB-7
-5. **Security hardening:** SEC-2 to SEC-6.
-6. **Pin and record versions** (PKG-1), **add CI with a test suite** (PKG-2), then start on the architecture items. Delete dead code first (ARCH-4), because it is cheap and stops fixes from landing in the wrong copy.
+6. **Security hardening:** SEC-2 to SEC-6.
+7. **Pin and record versions** (PKG-1), **add CI with a test suite** (PKG-2), then start on the architecture items. Delete dead code first (ARCH-4), because it is cheap and stops fixes from landing in the wrong copy.
 
-Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `gmc-norr/ROBIN` branch `fix/empty-panel-intersection` (commit `d02add2`), with a test.
+Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix.
