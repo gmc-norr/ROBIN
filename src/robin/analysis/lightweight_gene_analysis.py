@@ -1684,7 +1684,8 @@ def lga_results_belong_to_sample(json_path: str, sample_folder: str) -> bool:
 def pick_lga_results(
     candidates: list[str], sample_folder: str
 ) -> tuple[Optional[str], bool]:
-    """Return the first results file that can be shown, and whether any is stale.
+    """Return the first results file that can be shown, and, when there is
+    none, whether a stale one is on disk.
 
     ``candidates`` are the paths a results file may live at, best location
     first. The first one that exists *and* proves it used this sample's own BAM

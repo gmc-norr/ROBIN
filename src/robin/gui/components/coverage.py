@@ -4839,11 +4839,15 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             _display_lga_results(json_report_fallback)
                         elif found_untrusted:
                             # Older versions could use another sample's BAM (VAR-9)
+                            # Drop any earlier render: a results panel must never
+                            # outlive the file it describes.
+                            lga_results_container.clear()
                             lga_results_status.set_text(
                                 "Old variant results can't be confirmed as this "
                                 "sample's. Run the variant analysis again."
                             )
                         else:
+                            lga_results_container.clear()
                             lga_results_status.set_text(
                                 "No lightweight variant analysis results found"
                             )
