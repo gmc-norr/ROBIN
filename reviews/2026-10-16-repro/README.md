@@ -20,6 +20,8 @@ python reviews/2026-10-16-repro/appshell/repro_unique_bed.py "$(mktemp -d)"
 
 `appshell/stale_tbi.sh` also needs `bcftools`.
 
+The independent review's suite (IR-01 to IR-11) is in [`independent/`](independent/README.md). It is a single `unittest` file that also needs pysam.
+
 ## Which script shows which finding
 
 | Script | Finding | Re-checked |

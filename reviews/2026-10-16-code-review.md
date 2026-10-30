@@ -1,10 +1,28 @@
 # ROBIN code review
 
 **Date:** 2026-10-16\
-**Code reviewed:** `main` at `493f53f` (LooseLab/ROBIN, forked to gmc-norr/ROBIN)\
+**Code reviewed:** `main` at `493f53f` (LooseLab/ROBIN, forked to gmc-norr/ROBIN); the independent review's findings were checked at `5be9e04`.\
 **Scope:** all of `src/robin` (91 Python files, about 82,000 lines), plus packaging, resources and CI config.\
-**Prepared with:** Claude Code (an AI-assisted review). Treat each finding as a lead to check, not as a final verdict.\
-**Updated:** 2026-10-16, after a second review (Codex): the CNV-1 and GUI-1 fix sizes are corrected, the status lines are brought up to date, and the reproduction scripts are added.
+**Prepared with:** Claude Code (an AI-assisted review), plus a correction pass by Codex and an independent review by GPT 6.1 Sol. Treat each finding as a lead to check, not as a final verdict.\
+**Updated:** 2026-10-16. The independent review's 11 findings are merged in; each keeps its original number (IR-01 to IR-11) next to its new ID. The CNV-1, GUI-1 and SEC-1 fix sizes are corrected, the status lines are up to date, and the reproduction scripts are added.\
+**Updated:** 2026-10-30. SEC-9 is added. Fixes made in our fork are listed under "This fork and the original ROBIN", and each fixed finding has a **Status** line.
+
+## This fork and the original ROBIN
+
+This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [gmc-norr/ROBIN](https://github.com/gmc-norr/ROBIN), now has fixes that the original does not, so the two have diverged. **Every finding below is still open in the original ROBIN** unless LooseLab fixes it themselves. A finding fixed in our fork has a **Status** line.
+
+| Change in gmc-norr/ROBIN | Finding | Commits | What users notice |
+|---|---|---|---|
+| Skip modkit files with no panel sites | The "Error processing file … ['Chromosome', 'Start']" log line (context under METH-9) | `d02add2` | That error no longer appears for those files |
+| Traceback and safe diagnostics when a modkit file fails to merge | — | `5be9e04` | A longer log line, with no patient positions or values |
+| Ray dashboard off by default, and on 127.0.0.1 when turned on | SEC-1 | `3623e93` | Turn it on with `--ray-dashboard`. `workflow_ray` takes `--ray-dashboard` instead of `--no-ray-dashboard` |
+| Ray workers get their own empty NiceGUI storage folder | Found after this review | `3623e93` | The `storage-general.json.tmp` error is gone |
+| GUI storage moves from `./.nicegui` to `~/.robin/nicegui` | Found after this review | `c51e65d`, `944dbee` | Everyone sees the disclaimer and logs in again once |
+| MGMT runs R without a shell | SEC-8 | `2d3577e`, `0873744` | Nothing |
+| Watched file names reach command templates as data | SEC-9 | `4f26cf0`, `75485ce` | Inside a nested `sh -c`, `eval` or `ssh` command, use `"$ROBIN_FILE"` instead of `{file}` |
+| Exact pins: numpy 1.26.4, pandas 2.1.4, scikit-learn 1.8.0; Python 3.12 only | PKG-3, part of PKG-6 | `43db1df` | Installs refuse Python 3.13 and later |
+
+Every change has a regression test in `tests/`. The details are in `CHANGELOG.md` under `[Unreleased]`. Add a row here each time a fix lands.
 
 ## How this was done, and its limits
 
@@ -17,49 +35,62 @@
   - PDF reports
   - packaging and design
 - **Evidence.** Every finding was checked against the code, including whether anything actually calls it. Many were reproduced with small scripts on synthetic data, or by running the real ROBIN functions with Ray and NiceGUI stubbed out.
-- **My own spot-checks.** I re-read about ten of the most serious findings myself; all of them held up. They are marked *(spot-checked)*.
+- **My own spot-checks.** I re-read about fifteen of the most serious findings myself; all of them held up. They are marked *(spot-checked)*.
+- **Independent review.** GPT 6.1 Sol looked separately at:
+  - sample identity
+  - the lightweight variant check
+  - target coverage and BAM accumulation
+  - methylation read processing
+  - the MGMT command
+  - the CNV→master-BED handoff
+
+  Each of its 11 findings has a test that runs the real ROBIN functions on small synthetic BAMs with pysam. I re-ran all 11 (11 of 11 reproduced) and read the code for five of them.
 - **Not done:**
-  - Nothing was run on real BAMs.
-  - Ray, NiceGUI, pysam, torch and cnv_from_bam were not installed.
+  - Nothing was run on real patient BAMs.
+  - Ray, NiceGUI, torch and cnv_from_bam were not installed. pysam was used only for the independent review's tests.
   - The `nanoDX` and `hv_rapidCNS2` submodules were not checked out, so the R and NN code inside them was not reviewed.
 - **Confidence labels:**
   - **Confirmed:** traced end to end, or reproduced.
   - **Plausible:** a strong reading of the code, but not fully traced (usually because it depends on timing or on Ray scheduling).
 
-The reproduction scripts are in [`2026-10-16-repro/`](2026-10-16-repro/README.md), with a table of which script shows which finding. They are scripts, not regression tests yet. A "Confirmed" label only becomes repeatable evidence once its script is turned into a test in `tests/`.
+The reproduction scripts are in [`2026-10-16-repro/`](2026-10-16-repro/README.md), with a table of which script shows which finding. The independent review's test suite is in [`2026-10-16-repro/independent/`](2026-10-16-repro/independent/README.md). They are scripts, not regression tests yet. A "Confirmed" label only becomes repeatable evidence once its script is turned into a test in `tests/`.
 
 ---
 
 ## Read this first
 
-The pipeline has a sound shape: a file watcher feeds a job graph, each sample keeps its state on disk, and the analyses are pluggable. The main problems are not crashes. **Most of the serious problems give wrong or stale results with no warning.** Three patterns cause most of them:
+The pipeline has a sound shape: a file watcher feeds a job graph, each sample keeps its state on disk, and the analyses are pluggable. The main problems are not crashes. **Most of the serious problems give wrong or stale results with no warning.** Four patterns cause most of them:
 
 1. **The methylation numbers fed to the classifiers are biased.** The merge averages percentages without weighting by coverage. matkit counts failed calls in the denominator. NanoDX throws away minus-strand calls.
 2. **State lives in places that go stale.** There are caches inside long-lived Ray workers, the CNV control reference gets modified by every patient, the GUI keeps per-page state on a shared object, and there is one "waiting" slot per classifier for all samples.
 3. **Errors are swallowed at every layer.** Failed jobs are counted as "completed", and error details are never sent to the GUI. This is why the "Error processing file" log line never showed up in the frontend.
+4. **Inputs aren't tied to the right sample or batch.** A missing BAM falls back to another sample's BAM. Early BAMs never reach the SNP input. The master BED can drop the selected panel.
 
 Only two tests exist (added after this review), and no CI runs them.
 
 ### Fix first
 
-| # | Problem | What goes wrong | Where | Size of fix |
-|---|---|---|---|---|
-| 1 | Methylation % is averaged without weighting by coverage | Every classifier gets biased input, and adding depth doesn't make it better | `analysis/temp_utilities.py:285-391` | Small |
-| 2 | CNV control reference is modified by every patient's reads | Real gains and losses fade over a run; false events appear in the next patient | `analysis/cnv_analysis.py:118-145` | Medium (build the control profile without patient reads) |
-| 3 | One waiting slot per classifier type, shared by all samples | In multi-sample runs, a sample's final classification can silently never run | `workflow_ray.py:2462-2535` | Medium |
-| 4 | Classification panel freezes if any classifier is disabled | GUI keeps showing the first result for the rest of the run | `gui/components/classification.py:1003-1021` | Small (two loops) |
-| 5 | Refresh timers are switched off on any brief reconnect | An open page shows hours-old results, with no sign that they are stale | 8 GUI components | Small |
-| 6 | Ray dashboard open on all network interfaces, with no password | Anyone on the network can run code as the ROBIN user | `cli.py:1725-1731`, `2435-2449` | Small (two places) |
-| 7 | 60-second idle timeout (a test value) left in | A sample is marked Complete and finalised too early; SNP calls cover only part of the data | `gui_launcher.py:420` | One line |
-| 8 | matkit counts failed calls in coverage; NanoDX drops minus-strand calls | Methylation pushed down; about half the reads never reach NanoDX | `utilities/matkit.py`, `nanodx_analysis.py` | Medium |
-| 9 | ClinVar handling | IDH1 R132H-type hotspot alleles lost; "conflicting" calls shown as pathogenic; a stale index silently returns nothing | `lightweight_gene_analysis.py`, `snp_processing.py`, `clinvar_manager.py`, `reporting/sections/variants.py` | Small to medium |
-| 10 | Failed jobs counted as "completed"; errors never sent to the GUI | Stale or empty results look current | `workflow_ray.py`, the handlers | Medium |
-| 11 | Same BAM can be processed twice, for example after a restart | Coverage and counts doubled | `workflow_ray.py:4949-4977` | Medium |
-| 12 | PDF report uses the wrong Random Forest cut-offs | The PDF can say "High" where the GUI says "Medium" | `reporting/sections/classification.py:399` | One line |
+| # | ID | Problem | What goes wrong | Where | Size of fix |
+|---|---|---|---|---|---|
+| 1 | SEC-1 *(fixed in our fork)* | Ray dashboard open on all network interfaces, with no password | Anyone on the network can run code as the ROBIN user | `cli.py:1725-1731`, `2435-2449` | Small (two places) |
+| 2 | SEC-8 *(fixed in our fork)* | MGMT runs the sample folder path through the shell | A crafted sample name runs commands; a space in a path breaks MGMT | `analysis/mgmt_analysis.py:836-838` | Small |
+| 3 | VAR-9 | A missing BAM for sample A falls back to sample B's BAM | Another patient's variant evidence is saved under this sample | `analysis/lightweight_gene_analysis.py:1562-1605` | Small |
+| 4 | METH-1 | Methylation % is averaged without weighting by coverage | Every classifier gets biased input, and adding depth doesn't make it better | `analysis/temp_utilities.py:285-391` | Small |
+| 5 | CNV-1 | CNV control reference is modified by every patient's reads | Real gains and losses fade over a run; false events appear in the next patient | `analysis/cnv_analysis.py:118-145` | Medium (build the control profile without patient reads) |
+| 6 | JOB-1 | One waiting slot per classifier type, shared by all samples | In multi-sample runs, a sample's final classification can silently never run | `workflow_ray.py:2462-2535` | Medium |
+| 7 | GUI-1 | Classification panel freezes if any classifier is disabled | GUI keeps showing the first result for the rest of the run | `gui/components/classification.py:1003-1021` | Small (two loops) |
+| 8 | GUI-2 | Refresh timers are switched off on any brief reconnect | An open page shows hours-old results, with no sign that they are stale | 8 GUI components | Small |
+| 9 | VAR-8, VAR-1, VAR-2, VAR-3 | Variant summaries and ClinVar handling | Reference-only sites reported as pathogenic; IDH1 R132H-type alleles lost; "conflicting" shown as pathogenic; a stale index returns nothing | `lightweight_gene_analysis.py`, `snp_processing.py`, `clinvar_manager.py`, `reporting/sections/variants.py` | Small to medium |
+| 10 | TGT-1, TGT-2 | Early BAMs never reach the SNP input; the master BED can drop the panel | SNP calls and IGV miss reads that the coverage numbers include | `analysis/target_analysis.py`, `cnv_analysis.py`, `master_bed_generator.py` | Medium |
+| 11 | JOB-6 | 60-second idle timeout (a test value) left in | A sample is marked Complete and finalised too early; SNP calls cover only part of the data | `gui_launcher.py:420` | One line |
+| 12 | METH-3, METH-4 | matkit counts failed calls in coverage; NanoDX drops minus-strand calls | Methylation pushed down; about half the reads never reach NanoDX | `utilities/matkit.py`, `nanodx_analysis.py` | Medium |
+| 13 | ERR-1 | Failed jobs counted as "completed"; errors never sent to the GUI | Stale or empty results look current | `workflow_ray.py`, the handlers | Medium |
+| 14 | JOB-2 | Same BAM can be processed twice, for example after a restart | Coverage and counts doubled | `workflow_ray.py:4949-4977` | Medium |
+| 15 | REP-1 | PDF report uses the wrong Random Forest cut-offs | The PDF can say "High" where the GUI says "Medium" | `reporting/sections/classification.py:399` | One line |
 
 **Before trusting more runs:** compare ROBIN's merged parquet and classifier inputs with `modkit pileup --combine-strands` on one small real BAM. Make that comparison a regression test.
 
-**Upstream:** #6 (Ray dashboard) and the MNP-Flex TLS issue (SEC-2) are security problems in upstream ROBIN. Report them to LooseLab privately, not in a public issue.
+**Upstream:** SEC-1 (Ray dashboard), SEC-8 (MGMT shell command), SEC-9 (watched file names in command templates) and SEC-2 (MNP-Flex TLS) are security problems in upstream ROBIN. Report them to LooseLab privately, not in a public issue.
 
 ---
 
@@ -162,6 +193,19 @@ Only two tests exist (added after this review), and no CI runs them.
 - **Where:** `temp_utilities.py:152`
 - **What's wrong:** A different panel file with the same name reuses the old ranges. The cache pickle is also written non-atomically, outside the lock.
 
+**METH-13 · high · Confirmed (reproduced; spot-checked)**: Implicit canonical calls in MM tags are ignored, which pushes methylation up. *(IR-05)*
+- **Where:** `utilities/matkit.py:1287-1293, 1311-1333`
+- **What's wrong:** matkit counts only the calls that `read.modified_bases` lists. In the MM tag's implicit mode (`.` or no marker), skipped C bases mean "unmodified", but matkit never counts them as canonical. A read with an empty implicit list (`C+m.;`) is skipped entirely.
+- **Reproduced:** two reads cover `CGCG`, each with one confident modified call and one implicit canonical base. matkit stores 100% instead of 50% at each CpG.
+- **Who it affects:** only BAMs that use implicit mode. In `?` mode, skipped bases are "unknown", and ignoring them is correct. To check which mode a BAM uses: `samtools view x.bam | head -1 | grep -o 'MM:Z:C+[a-z]*[.?]\?'`.
+- **Fix:** follow the MM skip-mode rules when building each read's observations. Add test files for explicit, implicit and unknown modes, and compare with modkit.
+
+**METH-14 · medium · Confirmed (reproduced)**: Whether a low-quality read is filtered depends on where its alignments lie. *(IR-06)*
+- **Where:** `utilities/matkit.py:1263-1284`
+- **What's wrong:** A read is added to the "exclude" set only when its low-QS primary record is reached. Supplementary records that come earlier in coordinate order have already been counted, and are never removed.
+- **Reproduced:** the same QS=5 read keeps one methylation site when its supplementary alignment comes first, and none when its primary comes first. Both BAMs are coordinate-sorted.
+- **Fix:** decide whether a read passes the QS filter before counting any of its alignments.
+
 **Not a problem:**
 - The 5hmC+5mC merge is by design.
 - MGMT's 1-based to 0-based site handling is correct.
@@ -212,7 +256,9 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
 
 ---
 
-## 3. Variants, ClinVar, fusions, custom panels
+## 3. Variants, fusions, target coverage and SNP input
+
+### Variants and ClinVar
 
 **VAR-1 · high · Confirmed**: ClinVar records at the same position overwrite each other.
 - **Where:** `analysis/lightweight_gene_analysis.py:228-229, 560-612`
@@ -254,6 +300,26 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
 - **Where:** `cli.py:957`
 - **What's wrong:** `drop_duplicates(subset=['gene'])` drops every later exon or tile of a gene. In the test, a panel with 3 EGFR rows and 2 TP53 rows became 2 rows. Coverage, SNP calling and fusion detection then ignore the dropped regions.
 
+**VAR-8 · high · Confirmed (reproduced)**: Reference-only samples are summarised as having pathogenic variants. *(IR-01)*
+- **Where:** `analysis/lightweight_gene_analysis.py:904-933, 1451-1488`, `gui/components/coverage.py:5290-5310`
+- **What's wrong:** Every covered ClinVar site in a region is counted as "found", even when its own evidence says `alternate_support=0, evidence_level="no_support"`. `export_json` then sets `pathogenic_status="present_with_good_coverage"` once coverage reaches 10 reads. The GUI's gene table and the HTML report (line 1233) show that status.
+- **Reproduced:** 20 reads with only the reference C at a pathogenic C>T site. The pileup correctly shows zero alternate reads, but the summary reports one gene with pathogenic variants.
+- **Fix:** keep "known site checked" separate from "variant supported". Base positive statuses and counts only on alternate-read evidence, and keep explicit "insufficient evidence" states.
+
+**VAR-9 · critical · Confirmed (reproduced; spot-checked)**: A missing BAM for sample A falls back to sample B's BAM. *(IR-02)*
+- **Where:** `analysis/lightweight_gene_analysis.py:1562-1605, 1665-1677, 1710-1730`; called from `gui/components/coverage.py:5882-5932, 6012-6069`
+- **What's wrong:** If `<work>/A/igv/igv_ready.bam` is missing, the handler walks the whole work directory (`os.walk`) and takes the first `igv_ready.bam` it finds, from any sample. It then saves the result under A. The BED fallback searches the same way. The GUI enables the action based on A's `target.bam`, so this is reachable from the GUI.
+- **Reproduced:** A has a reference-only BAM but no IGV BAM; B's IGV BAM has 20 alternate reads. A's results file contains B's 20 alternate reads.
+- **Fix:** resolve the sample folder once and look only inside it. A missing input must give an explicit "not available" result. Record which BAM was used in the result.
+
+**VAR-10 · medium · Confirmed (reproduced)**: Several BED intervals with the same name are reduced to the first one. *(IR-09)*
+- **Where:** `analysis/lightweight_gene_analysis.py:656-671, 676-698`
+- **What's wrong:** Regions are grouped by name, and one pileup is run over the first interval's coordinates, so variants in a gene's later exons are dropped. This happens even when the BED on disk keeps every interval (unlike VAR-7).
+- **Reproduced:** two `TEST` intervals, each with a supported pathogenic site; only the first site is reported.
+- **Fix:** key regions by coordinates, analyse each interval, then group results by gene name.
+
+### Fusions
+
 **FUS-1 · medium · Confirmed (simulated)**: Master-BED SV breakpoints almost never reach the support threshold.
 - **Where:** `fusion_work.py:1670-1672, 1775-1855`
 - **What's wrong:** Reads are keyed by the midpoint of the whole alignment. The supplementary span is taken as `pos + query_length`, which is 1-based and covers the whole read. Supplementary records also pair with themselves.
@@ -266,6 +332,39 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
 **FUS-3 · medium · Confirmed (deletion); Plausible (double append)**: Fusion accumulation has no lock and deletes staging files that failed to load.
 - **Where:** `fusion_work.py:2175-2437`
 - **What's wrong:** That BAM's fusion reads are lost. With `analysis_workers > 1`, supporting reads can be counted twice.
+
+### Target coverage, read counts and SNP input
+
+**TGT-1 · high · Confirmed (reproduced; spot-checked)**: BAMs that arrive before the coverage threshold never reach the SNP input. *(IR-11)*
+- **Where:** `analysis/target_analysis.py:1839, 1855-1890, 1999-2010`; batch entry at `2183-2223`; final merge at `2631-2658`
+- **What's wrong:** Filtered batch BAMs are only made once some panel target passes `callthreshold`. Until then, coverage is still added up and the staged source BAM references are deleted. When a later batch passes the threshold, only that batch's BAMs are filtered, and the earlier ones are never revisited.
+- **Reproduced:** three BAMs with one read each, where the third crosses the threshold. Coverage includes all three reads, but the batch BAM holds only the third. This needs only one worker, with no restart or timeout.
+- **Fix:** filter and keep each BAM's panel reads when it arrives. Apply the threshold at calling time.
+
+**TGT-2 · high · Confirmed (reproduced)**: The CNV-generated master BED can replace the panel with breakpoint-only targets. *(IR-10)*
+- **Where:** `analysis/cnv_analysis.py:1028-1039, 1730-1743`, `master_bed_generator.py:950-974, 1102-1129, 1187-1207`, `target_analysis.py:1860-1864`
+- **What's wrong:** `cnv_handler` receives the panel, but the CNV save path looks it up only from fusion metadata. With fusion disabled, or before its metadata exists, it passes `target_panel=None`. The master BED is then written with CNV breakpoints but without the panel, and target extraction prefers it over the configured panel. A later call with the right panel reuses the incomplete file, because the file already exists for that counter.
+- **Reproduced:** a `demo` panel on chr1 with breakpoints on chr2: the master BED holds only chr2, and a panel read filters to zero reads.
+- **Fix:** pass the panel explicitly from the handler. Always include the configured panel in extraction targets, and include the panel's identity in the cache key.
+
+**TGT-3 · medium · Confirmed (reproduced; spot-checked)**: "Global coverage" adds up breadth across BAMs instead of measuring depth. *(IR-03)*
+- **Where:** `analysis/target_analysis.py:1146-1148, 1817-1819`, `gui/components/coverage.py:6654-6679`, `reporting/sections/coverage.py:70-85`
+- **What's wrong:** `covbases` (positions covered at least once) is summed per BAM, then divided by the genome length. Breadth doesn't add up across files, so the number depends on how the reads are split into BAMs.
+- **Reproduced:** 10 reads over one of two 100-base contigs, so the true depth is 5×. As one BAM it reports 0.5×; as two BAMs, 1.0×.
+- **How much it matters:** small early in a run, when reads in one BAM rarely overlap. Larger where they do.
+- **Fix:** add up aligned bases (or length-weighted `meandepth`) for depth, and track breadth separately.
+
+**TGT-4 · medium · Confirmed (reproduced)**: Two target accumulations at the same time overwrite each other's coverage. *(IR-04)*
+- **Where:** `analysis/target_analysis.py:1792-1814, 1906-1934, 1999-2010`
+- **What's wrong:** The lock is released between reading the old totals and writing the new ones. Two workers can read the same totals, and the second write replaces the first. Both report success and delete their staged files.
+- **Reproduced:** two one-read BAMs in parallel give a total of 100 bases instead of 200. A single target worker avoids this.
+- **Fix:** read, update and write the totals inside one locked step, and track which batches have been committed.
+
+**TGT-5 · medium · Confirmed (reproduced)**: Supplementary alignments are counted as extra reads. *(IR-07)*
+- **Where:** `analysis/bam_preprocessor.py:352-386, 809-838`, `master_csv_manager.py:172-211`
+- **What's wrong:** The "primary alignments only" check excludes secondary records but not supplementary ones. So read counts, yield and length summaries are inflated for split reads. The same counts feed the 50,000-read gate, so a BAM can be skipped as "too large" too early (traced in code, not reproduced).
+- **Reproduced:** one 4-base read with one supplementary alignment is counted as 2 mapped reads and 8 bases.
+- **Fix:** count reads and yield on primary records only, and keep a separate counter for supplementary alignments.
 
 ---
 
@@ -465,6 +564,7 @@ This is why "Error processing file" showed up in the backend log but never in th
 - **Where:** `cli.py:2435-2449, 1725-1731, 2302-2306`, `workflow_ray.py:5161`
 - **What's wrong:** Anyone on the network can POST a job to `http://<host>:8265/api/jobs/` and run shell commands as the ROBIN user, with access to all BAMs and reports. This is the ShadowRay / CVE-2023-48022 class of issue.
 - **Fix:** default to `127.0.0.1` and make the dashboard opt-in.
+- **Status:** fixed in our fork (`3623e93`). Still open in the original ROBIN.
 
 **SEC-2 · high · Confirmed**: MNP-Flex TLS verification is hard-coded off.
 - **Where:** `gui_launcher.py:7180, 7225-7231`, `gui/components/mnpflex.py:92-147, 829-855`, `utils/mnpflex_client_standalone.py:34`
@@ -503,6 +603,20 @@ This is why "Error processing file" showed up in the backend log but never in th
 - **Examples:** `gui/components/summary.py:1221`, `reporting/sections/cnv.py:433`, `fusion_work.py:2601`
 - **What's wrong:** Opening a results folder, or building a PDF from one, received from someone else can run code.
 
+**SEC-8 · high · Confirmed (reproduced; spot-checked)**: MGMT runs the sample folder path through the shell. *(IR-08)*
+- **Where:** `analysis/mgmt_analysis.py:836-838`; called at lines 1081 and 1393. Sample IDs come from BAM read-group metadata (`bam_preprocessor.py:260-275`).
+- **What's wrong:** The Rscript command is built as one f-string with `sample_dir` and other paths unquoted, and run with `subprocess.run(cmd, shell=True)`. A sample ID becomes part of that path with no shell-safe handling.
+- **Reproduced:** a sample folder named with a harmless `$(touch …)` marker. Running the real MGMT command path creates the marker file, so the shell ran it. A space in any path also splits the arguments and breaks MGMT.
+- **Fix:** pass an argument list with `shell=False`. Separately, validate sample IDs before using them in paths.
+- **Status:** the shell call is fixed in our fork (`2d3577e`, `0873744`). Sample IDs are not validated yet. Still open in the original ROBIN.
+
+**SEC-9 · medium · Confirmed (tested)**: Watched file names are pasted into the operator's shell command. *(Found 2026-10-30, while planning the fix for SEC-8.)*
+- **Where:** `watcher.py:116` (`FileChangeHandler._run_command`) and `workflow_simple.py:1756` (`command_handler`, used by `--commands`).
+- **What's wrong:** Both do `template.replace("{file}", path)` and run the result with `shell=True`. The template is the operator's own command, so a shell is intended, but the file name comes from the watched folder. A file named `a;rm -rf ~.bam` runs `rm`.
+- **Tested:** with the old code, file names containing `$(touch …)` created the marker file, in bare, `"{file}"` and `'… {file} …'` templates.
+- **Fix:** keep the shell, but never paste the name into the command text. Turn `{file}` into a quoted `$ROBIN_FILE` reference and pass the path in the environment. Quoting the name with `shlex.quote` is not enough: inside a longer double-quoted string such as `"{file}.bai"` it can still run. Templates that start a second shell (`sh -c "… {file}"`, `ssh host "…"`) re-parse the name there; document that.
+- **Status:** fixed in our fork (`4f26cf0`, `75485ce`). Still open in the original ROBIN.
+
 ---
 
 ## 9. Packaging, dependencies, tests
@@ -527,6 +641,7 @@ This is why "Error processing file" showed up in the backend log but never in th
 - **Where:** `pyproject.toml:21`
 - **What's wrong:** `requires-python = ">=3.12"`, but numpy 1.26, pandas 2.1.4 and pyarrow 16.1 have wheels only up to 3.12, and sturgeon@testing requires ≤3.12.
 - **Fix:** add `<3.13`.
+- **Status:** fixed in our fork (`43db1df`). Still open in the original ROBIN.
 
 **PKG-4 · medium · Confirmed**: Unpinned polars and pyranges are already causing problems.
 - **What's wrong:**
@@ -545,6 +660,7 @@ This is why "Error processing file" showed up in the backend log but never in th
   - 10 dependencies are listed twice, about 13 are never imported, and 6 that are imported aren't declared.
   - `robin.yml` leaves numpy unpinned while pip pins `<2`.
   - The package is labelled MIT but bundles GPL-3.0 nanoDx. That one is a licence question to raise.
+- **Status:** partly fixed in our fork (`43db1df`): `robin.yml` pins numpy, pandas and scikit-learn, and the duplicate scikit-learn line is gone. The other duplicates, the undeclared imports and the licence question are still open.
 
 ---
 
@@ -606,8 +722,15 @@ This is why "Error processing file" showed up in the backend log but never in th
 
 Make each step below its own change, with its own regression test. The scripts in `2026-10-16-repro/` are the starting point for those tests.
 
-1. **Quick wins (each a few lines). Do SEC-1 first:**
-   - SEC-1: Ray dashboard on 127.0.0.1
+1. **Security first** *(done in our fork, with the version pins)*:
+   - SEC-1: Ray dashboard on 127.0.0.1, and opt-in
+   - SEC-8: MGMT command as an argument list, with no shell
+   - SEC-9: pass watched file names to command templates as data
+2. **Sample identity and truthful variant summaries, together:**
+   - VAR-9: only look inside the sample's own folder
+   - VAR-8: count a variant only when reads support it
+   - VAR-10: analyse every interval, not only the first per name
+3. **Quick wins (each a few lines):**
    - GUI-1: guard both loops in `_refresh_classification`
    - REP-1: the RF config key
    - JOB-6: change 60 to 3600, and make it configurable
@@ -616,24 +739,31 @@ Make each step below its own change, with its own regression test. The scripts i
    - GUI-2: use `on_delete`
    - VAR-3: force-rebuild the tabix index
    - VAR-7: keep all panel regions
-2. **CNV-1:** build the control profile without patient reads (see CNV-1; a deepcopy alone is not enough).
-3. **The methylation maths, as one change with a test against `modkit pileup --combine-strands`:**
+4. **CNV-1:** build the control profile without patient reads (see CNV-1; a deepcopy alone is not enough).
+5. **The methylation maths, as one change with a test against `modkit pileup --combine-strands`:**
    - METH-1 and METH-2: aggregate always, and recompute % from counts
    - METH-5: semi-join, and dedupe the panel
    - METH-6: drop the `Start-1`
    - METH-3: matkit denominator
    - METH-4: combine strands
    - METH-7: pass coverage through
-4. **Make failures visible:**
+   - METH-13, METH-14: honour MM skip modes, and decide the QS filter per read before counting. Add MM-mode and primary/supplementary test files.
+6. **Target input and coverage:**
+   - TGT-1: keep every BAM's panel reads when it arrives
+   - TGT-2: pass the panel explicitly to the master BED
+   - TGT-4: one locked read-update-write step
+   - TGT-3: depth from aligned bases. Test that the same reads split into different BAMs give the same number.
+   - TGT-5: count primary records only
+7. **Make failures visible:**
    - ERR-1: failures counted, and forwarded to the GUI
    - METH-8: classifiers raise instead of logging
    - VAR-4, REP-6: "not available" instead of a negative result
-5. **Scheduling state:**
+8. **Scheduling state:**
    - JOB-1: per-sample dirty flags
    - JOB-2: a persistent file ledger
    - CNV-2: no worker caches, and atomic writes
    - JOB-3, JOB-4, JOB-5, JOB-7
-6. **Security hardening:** SEC-2 to SEC-6.
-7. **Pin and record versions** (PKG-1), **add CI with a test suite** (PKG-2), then start on the architecture items. Delete dead code first (ARCH-4), because it is cheap and stops fixes from landing in the wrong copy.
+9. **Security hardening:** SEC-2 to SEC-7.
+10. **Pin and record versions** (PKG-1), **add CI with a test suite** (PKG-2), then start on the architecture items. Delete dead code first (ARCH-4), because it is cheap and stops fixes from landing in the wrong copy.
 
-Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix.
+Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9) and the version pins are done too; see "This fork and the original ROBIN".
