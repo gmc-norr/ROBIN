@@ -1633,6 +1633,16 @@ def resolve_sample_folder(base_dir: str, sample_id: Optional[str]) -> str:
     is taken as the sample's folder. A sample ID that is a path rather than a
     plain folder name raises ``ValueError``, so it can never point at another
     sample.
+
+    The two layouts are told apart by ``<base_dir>/<sample_id>/igv``: ``igv`` is
+    written by the pipeline that produces the sample's reads, and holds the
+    ``igv_ready.bam`` this analysis consumes, so it marks a real sample folder.
+    ``<base_dir>/<sample_id>`` on its own is not a marker — this analysis
+    creates exactly that folder for its own output, so in the sample-folder
+    layout it exists without any sample living there. Only once that marker is
+    absent does a ``base_dir`` whose own name is the sample ID mean the sample
+    folder was passed directly (a root that happens to be named like the sample
+    still resolves into the sample's folder).
     """
     if not sample_id or sample_id == "unknown":
         return base_dir
@@ -1643,6 +1653,8 @@ def resolve_sample_folder(base_dir: str, sample_id: Optional[str]) -> str:
         or (os.altsep and os.altsep in sample_id)
     ):
         raise ValueError(f"Sample ID is not a plain folder name: {sample_id!r}")
+    if os.path.isdir(os.path.join(base_dir, sample_id, "igv")):
+        return os.path.join(base_dir, sample_id)
     if os.path.basename(os.path.normpath(base_dir)) == sample_id:
         return base_dir
     return os.path.join(base_dir, sample_id)

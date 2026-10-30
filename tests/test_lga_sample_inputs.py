@@ -114,6 +114,19 @@ def test_sample_id_names_a_subfolder_of_the_root(tmp_path):
     assert resolve_sample_folder(str(tmp_path / "root"), "A") == str(tmp_path / "root" / "A")
 
 
+def test_root_named_like_the_sample_resolves_to_the_sample_folder(tmp_path):
+    root = tmp_path / "A"                      # monitored root happens to be called "A"
+    (root / "A" / "igv").mkdir(parents=True)   # sample A lives at /x/A/A
+    assert resolve_sample_folder(str(root), "A") == str(root / "A")
+
+
+def test_output_folder_does_not_change_the_resolved_folder(tmp_path):
+    sample = tmp_path / "root" / "A"
+    (sample / "igv").mkdir(parents=True)
+    (sample / "A").mkdir()                     # the handler's output folder in layout (b)
+    assert resolve_sample_folder(str(sample), "A") == str(sample)
+
+
 # Result files written before the fix can't prove which sample's BAM they used.
 
 
