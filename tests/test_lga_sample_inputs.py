@@ -7,6 +7,7 @@ import pytest
 
 from lga_fixtures import write_bam, write_bed, write_clinvar
 from robin.analysis.lightweight_gene_analysis import (
+    lga_results_belong_to_sample,
     lightweight_gene_analysis_handler,
     resolve_sample_folder,
 )
@@ -111,3 +112,44 @@ def test_no_sample_id_means_the_given_folder(tmp_path, sample_id):
 
 def test_sample_id_names_a_subfolder_of_the_root(tmp_path):
     assert resolve_sample_folder(str(tmp_path / "root"), "A") == str(tmp_path / "root" / "A")
+
+
+# Result files written before the fix can't prove which sample's BAM they used.
+
+
+def _results_file(path, metadata):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"metadata": metadata, "genes": {}}))
+    return path
+
+
+def test_old_results_without_inputs_are_not_trusted(tmp_path):
+    sample_a = tmp_path / "root" / "A"
+    results = _results_file(sample_a / RESULTS, {"analysis_type": "lightweight_gene_analysis"})
+    assert lga_results_belong_to_sample(str(results), str(sample_a)) is False
+
+
+def test_results_from_another_samples_bam_are_not_trusted(tmp_path):
+    root = tmp_path / "root"
+    results = _results_file(root / "A" / RESULTS, {"input_bam": str(root / "B" / "igv" / "igv_ready.bam")})
+    assert lga_results_belong_to_sample(str(results), str(root / "A")) is False
+
+
+def test_results_from_a_sibling_with_a_longer_name_are_not_trusted(tmp_path):
+    # "A2" starts with "A", but it is another sample.
+    root = tmp_path / "root"
+    results = _results_file(root / "A" / RESULTS, {"input_bam": str(root / "A2" / "igv" / "igv_ready.bam")})
+    assert lga_results_belong_to_sample(str(results), str(root / "A")) is False
+
+
+def test_results_from_this_samples_bam_are_trusted(tmp_path):
+    root = tmp_path / "root"
+    results = _results_file(root / "A" / "A" / RESULTS, {"input_bam": str(root / "A" / "igv" / "igv_ready.bam")})
+    assert lga_results_belong_to_sample(str(results), str(root / "A")) is True
+
+
+def test_unreadable_results_are_not_trusted(tmp_path):
+    results = tmp_path / "A" / RESULTS
+    results.parent.mkdir(parents=True)
+    results.write_text("{not json")
+    assert lga_results_belong_to_sample(str(results), str(tmp_path / "A")) is False

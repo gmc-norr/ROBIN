@@ -1530,6 +1530,27 @@ def resolve_sample_folder(base_dir: str, sample_id: Optional[str]) -> str:
     return os.path.join(base_dir, sample_id)
 
 
+def lga_results_belong_to_sample(json_path: str, sample_folder: str) -> bool:
+    """Return True only if a results file proves it used this sample's own BAM.
+
+    Files written before ``input_bam`` was recorded can't prove that, and
+    older versions could fall back to another sample's BAM, so they are not
+    trusted. Neither is a file that can't be read.
+    """
+    import json
+
+    try:
+        with open(json_path) as f:
+            input_bam = json.load(f)["metadata"]["input_bam"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if not isinstance(input_bam, str) or not input_bam:
+        return False
+    folder = os.path.realpath(sample_folder)
+    bam = os.path.realpath(input_bam)
+    return os.path.commonpath([folder, bam]) == folder
+
+
 def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> None:
     """
     Workflow handler for lightweight gene analysis.

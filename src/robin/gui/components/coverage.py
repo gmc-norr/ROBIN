@@ -4817,12 +4817,28 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             sample_dir / "lightweight_gene_analysis_results.json"
                         )
 
-                        if json_report.exists():
+                        from robin.analysis.lightweight_gene_analysis import (
+                            lga_results_belong_to_sample,
+                        )
+
+                        found = next(
+                            (p for p in (json_report, json_report_fallback) if p.exists()),
+                            None,
+                        )
+                        if found is not None and not lga_results_belong_to_sample(
+                            str(found), str(sample_dir)
+                        ):
+                            # Older versions could use another sample's BAM (VAR-9)
+                            lga_results_status.set_text(
+                                "Old variant results can't be confirmed as this "
+                                "sample's. Run the variant analysis again."
+                            )
+                        elif found == json_report:
                             lga_results_status.set_text(
                                 "Lightweight variant analysis completed successfully!"
                             )
                             _display_lga_results(json_report)
-                        elif json_report_fallback.exists():
+                        elif found == json_report_fallback:
                             lga_results_status.set_text(
                                 "Lightweight variant analysis completed successfully! (legacy location)"
                             )
