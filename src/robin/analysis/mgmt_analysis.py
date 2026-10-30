@@ -846,9 +846,10 @@ def run_matkit(
                 ]
                 try:
                     result = subprocess.run(cmd, capture_output=True, text=True)
-                except FileNotFoundError:
-                    # Continue anyway as we still have the BED file
-                    logger.warning("R script failed: Rscript not found on PATH")
+                except OSError as e:
+                    # Rscript missing or not runnable. Continue anyway as we
+                    # still have the BED file.
+                    logger.warning(f"R script failed: could not start Rscript: {e}")
                 else:
                     if result.returncode == 0:
                         # Rename the output CSV file to use incremental naming

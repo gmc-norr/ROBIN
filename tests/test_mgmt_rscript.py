@@ -87,3 +87,18 @@ def test_missing_rscript_logs_warning_and_continues(tmp_path, monkeypatch, mgmt_
     assert "R script failed" in caplog.text
     # The BED file is still kept when R is missing.
     assert (sample_dir / "1_mgmt.bed").exists()
+
+
+def test_rscript_that_cannot_run_logs_warning_and_continues(tmp_path, monkeypatch, mgmt_inputs, caplog):
+    # The old shell call returned 126 here and MGMT warned and carried on.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "Rscript").write_text("#!/bin/sh\n")  # no execute bit
+    monkeypatch.setenv("PATH", str(bin_dir))
+    sample_dir = tmp_path / "sample"
+    sample_dir.mkdir()
+
+    with caplog.at_level(logging.WARNING, logger="robin.mgmt"):
+        assert run_matkit(str(tmp_path), "in.bam", str(mgmt_inputs), str(sample_dir), 1) is True
+    assert "R script failed" in caplog.text
+    assert (sample_dir / "1_mgmt.bed").exists()
