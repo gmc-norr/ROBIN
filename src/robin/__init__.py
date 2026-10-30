@@ -1,5 +1,15 @@
 """ROBIN and robin - A Python CLI tool with file watching capabilities."""
 
+import os
+
+# Keep NiceGUI's storage (logins, disclaimer state) out of the folder Robin is
+# started from. NiceGUI reads this once, when first imported, so it must be set
+# before anything imports NiceGUI. An existing value (including the one Ray
+# gives its workers) wins.
+os.environ.setdefault(
+    "NICEGUI_STORAGE_PATH", os.path.join(os.path.expanduser("~"), ".robin", "nicegui")
+)
+
 # Suppress pkg_resources deprecation warnings from sorted_nearest
 import warnings
 warnings.filterwarnings(

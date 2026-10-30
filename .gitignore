@@ -179,3 +179,6 @@ src/robin/models/pancan_devel_v5i_NN.pkl
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# NiceGUI storage (older Robin versions wrote it into the folder Robin started from)
+.nicegui/
