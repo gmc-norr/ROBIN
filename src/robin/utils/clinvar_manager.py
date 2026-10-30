@@ -136,9 +136,25 @@ def _ensure_tabix_index(gz_path: Path, tbi_path: Path, *, force: bool = False) -
     new one: region queries return no records and exit 0, and pathogenic
     annotations disappear with no error at all (VAR-3). Only a caller that has
     not touched the `.gz` may leave `force=False` and keep a good index.
+
+    `force=True` also removes the existing `.tbi` before rebuilding, so this
+    function never leaves a stale index behind: on failure it raises *and*
+    leaves the index missing, which is the one state `ensure_clinvar_files`
+    repairs on the next start-up.
     """
     if not force and _file_ok(tbi_path):
         return
+
+    # A forced rebuild means the .tbi on disk is already known to be wrong, so
+    # drop it *before* attempting the rebuild rather than after succeeding. A
+    # rebuild that fails then leaves no index at all, which is the state the
+    # next start-up repairs. Were the stale one left behind, the next
+    # `ensure_clinvar_files` would find both files passing `_file_ok`, return
+    # early without ever re-indexing, and every region query would keep
+    # returning no records and exit 0 -- VAR-3 again, one run later and hidden
+    # behind an error raised on a previous run.
+    if force:
+        tbi_path.unlink(missing_ok=True)
 
     print(f"Creating tabix index for {gz_path.name}")
     logger.info("Creating tabix index for %s", gz_path)
@@ -157,7 +173,12 @@ def _ensure_tabix_index(gz_path: Path, tbi_path: Path, *, force: bool = False) -
         if tabix_bin:
             try:
                 subprocess.run(
-                    [tabix_bin, "-p", "vcf", str(gz_path)],
+                    # `-f`: htslib's tabix refuses to overwrite an existing
+                    # index ("the index file exists. Please use '-f' to
+                    # overwrite."). The forced path above unlinks the stale
+                    # .tbi, so this is a second line of defence -- it still
+                    # matters when pysam wrote a partial index before raising.
+                    [tabix_bin, "-f", "-p", "vcf", str(gz_path)],
                     check=True,
                     capture_output=True,
                     text=True,

@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 import pysam
+import pytest
 
 from robin.utils import clinvar_manager
 from robin.utils.clinvar_manager import (
@@ -183,3 +184,73 @@ def test_an_already_present_gz_is_not_reindexed_on_start_up(tmp_path, monkeypatc
 
     assert recorded_force_values == [False]
     assert tbi.exists()
+
+
+def _raise_instead_of_indexing(*args, **kwargs):
+    raise OSError("simulated tabix indexing failure (disk full)")
+
+
+def test_a_failed_forced_rebuild_leaves_no_index_behind(tmp_path, monkeypatch):
+    """I-1: a forced rebuild that fails must take the stale .tbi with it.
+
+    The rebuild raising is correct and loud. What is not correct is leaving the
+    index of the *previous* release on disk: it passes `_file_ok`, so the next
+    start-up trusts it. Nothing here asserts on mtimes -- this machine stores
+    mtime to ~1 ms and a rebuild often lands in the same millisecond -- only on
+    whether the file is there.
+    """
+    gz, tbi = _write_indexed_vcf(tmp_path, pos=100)
+    _overwrite_gz_only(gz, pos=5_000_000)  # the .tbi now indexes the old file
+    assert tbi.exists()
+
+    monkeypatch.setattr(pysam, "tabix_index", _raise_instead_of_indexing)
+    monkeypatch.setattr(clinvar_manager.shutil, "which", lambda name: None)
+
+    with pytest.raises(RuntimeError):
+        _ensure_tabix_index(gz, tbi, force=True)
+
+    assert not tbi.exists()
+
+
+def test_a_failed_rebuild_is_not_trusted_on_the_next_start_up(tmp_path, monkeypatch):
+    """I-1, the property that matters: VAR-3 must not come back one run later.
+
+    An indexing failure is usually transient (a full disk, a truncated
+    download). The run after it must notice the index is missing and rebuild,
+    not find a stale .tbi passing `_file_ok` and return early -- which would
+    leave every region query returning no records and exit code 0, with the
+    only error already in a previous run's log.
+    """
+    resources_dir = tmp_path / "resources"
+    gz, tbi = _write_indexed_vcf(resources_dir, pos=100)
+    _overwrite_gz_only(gz, pos=5_000_000)
+
+    real_tabix_index = pysam.tabix_index
+    real_which = clinvar_manager.shutil.which
+    monkeypatch.setattr(pysam, "tabix_index", _raise_instead_of_indexing)
+    monkeypatch.setattr(clinvar_manager.shutil, "which", lambda name: None)
+    with pytest.raises(RuntimeError):
+        _ensure_tabix_index(gz, tbi, force=True)
+
+    # Next start-up, indexing working again and no download to be had.
+    monkeypatch.setattr(pysam, "tabix_index", real_tabix_index)
+    monkeypatch.setattr(clinvar_manager.shutil, "which", real_which)
+
+    real_ensure_tabix_index = clinvar_manager._ensure_tabix_index
+    recorded_force_values: list[object] = []
+
+    def recording_ensure(gz_path, tbi_path, **kwargs):
+        recorded_force_values.append(kwargs.get("force", False))
+        return real_ensure_tabix_index(gz_path, tbi_path, **kwargs)
+
+    monkeypatch.setattr(clinvar_manager, "_download_url_to_file", _refuse_download)
+    monkeypatch.setattr(clinvar_manager, "_ensure_tabix_index", recording_ensure)
+
+    clinvar_manager.ensure_clinvar_files(
+        resources_dir=resources_dir, url="http://clinvar.invalid/clinvar.vcf.gz"
+    )
+
+    # Reached at all -- not short-circuited by the early "both files OK" return.
+    assert recorded_force_values == [False]
+    with pysam.TabixFile(str(gz)) as tf:
+        assert [r.split("\t")[1] for r in tf.fetch("chr1", 4_999_000, 5_001_000)] == ["5000000"]
