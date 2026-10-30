@@ -435,7 +435,9 @@ class GUILauncher:
         self._unrestricted_page_routes = {"/login"}
         self._password_hash: Optional[str] = None  # cached after first read
 
-        # Idle seconds before a quiet sample is marked Complete and finalised (batch BAMs merged into target.bam, then deleted); override with ROBIN_COMPLETION_TIMEOUT_SECONDS.
+        # Idle seconds before a quiet sample is marked Complete and finalised
+        # (its batch BAMs merged into target.bam, then deleted); override with
+        # ROBIN_COMPLETION_TIMEOUT_SECONDS.
         self.completion_timeout_seconds = completion_timeout_seconds()
         
         # Message queue for non-blocking communication
