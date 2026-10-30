@@ -24,7 +24,7 @@ This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [g
 | Lightweight variant check uses only the sample's own BAM and BED, and records them | VAR-9 | `b9ffef8` | A missing file fails with "… for this sample at <path>" |
 | The GUI hides lightweight variant results that don't record their BAM | VAR-9 | `d0e1975` | Old results aren't shown; run the variant analysis again |
 | Every BED interval of a gene is checked | VAR-10 | `20ea771` | Variants in later exons now appear |
-| A pathogenic variant counts only with 3 or more alternate reads | VAR-8 | `aeb5339` | New status "Insufficient Evidence" (1–2 reads, or an indel); fewer genes flagged |
+| A pathogenic variant counts only with 3 or more alternate reads | VAR-8 | `aeb5339`, `e5527a3` | New status "Insufficient Evidence" (1–2 reads, an indel or multi-base change, or reads showing neither allele); fewer genes flagged |
 
 Every change has a regression test in `tests/`. The details are in `CHANGELOG.md` under `[Unreleased]`. Add a row here each time a fix lands.
 
@@ -309,7 +309,7 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
 - **What's wrong:** Every covered ClinVar site in a region is counted as "found", even when its own evidence says `alternate_support=0, evidence_level="no_support"`. `export_json` then sets `pathogenic_status="present_with_good_coverage"` once coverage reaches 10 reads. The GUI's gene table and the HTML report (line 1233) show that status.
 - **Reproduced:** 20 reads with only the reference C at a pathogenic C>T site. The pileup correctly shows zero alternate reads, but the summary reports one gene with pathogenic variants.
 - **Fix:** keep "known site checked" separate from "variant supported". Base positive statuses and counts only on alternate-read evidence, and keep explicit "insufficient evidence" states.
-- **Status:** fixed in our fork (`aeb5339`): a site counts with 3 or more alternate reads; 1–2 reads or an indel give "insufficient evidence". The unused HTML report (`generate_report`, no callers) still uses the old counting. Still open in the original ROBIN.
+- **Status:** fixed in our fork (`aeb5339`): a site counts with 3 or more alternate reads; 1–2 reads, an indel or multi-base change, or reads showing neither allele give "insufficient evidence" (`e5527a3`). The unused HTML report (`generate_report`, no callers) still uses the old counting. Still open in the original ROBIN.
 
 **VAR-9 · critical · Confirmed (reproduced; spot-checked)**: A missing BAM for sample A falls back to sample B's BAM. *(IR-02)*
 - **Where:** `analysis/lightweight_gene_analysis.py:1562-1605, 1665-1677, 1710-1730`; called from `gui/components/coverage.py:5882-5932, 6012-6069`

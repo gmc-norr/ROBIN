@@ -21,10 +21,10 @@ and this project (almost) adheres to [Semantic Versioning](https://semver.org/sp
 
 ### Changed
 - **Lightweight variant results:**
-  - New gene status "Insufficient Evidence": a site with 1–2 alternate reads, or an indel (which a pileup can't call).
-  - Each checked site has `supported`. The per-gene counts and the totals count supported sites only.
+  - New gene status "Insufficient Evidence": a site with 1–2 alternate reads, an indel or multi-base change (which a pileup can't call), or reads showing neither allele.
+  - Each checked site has `supported` and `needs_review`. The per-gene counts and the totals count supported sites only.
   - New keys: `sites_checked` and `insufficient_evidence_sites` per gene; `total_sites_checked`, `genes_with_good_coverage`, `input_bam`, `input_bed` and `sample_id` in the metadata.
-  - The GUI's variant tables list supported sites only.
+  - The GUI's variant tables list sites that are found or need review, with their evidence level.
   - **Old results files are not shown:** they don't record which BAM they used. Run the variant analysis again.
 - **Pins:** `robin.yml` pins `numpy=1.26.4`, `pandas=2.1.4` and `scikit-learn=1.8.0`; `pyproject.toml` pins `scikit-learn==1.8.0` (the version the NN model pickles were saved with) and requires Python `>=3.12,<3.13`.
 
