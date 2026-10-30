@@ -1315,7 +1315,10 @@ class LightweightGeneAnalysis:
         return html
 
     def export_json(
-        self, gene_reports: Dict[str, GeneReport], output_path: Optional[str] = None
+        self,
+        gene_reports: Dict[str, GeneReport],
+        output_path: Optional[str] = None,
+        inputs: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Export gene analysis results to JSON format for programmatic analysis.
@@ -1323,6 +1326,8 @@ class LightweightGeneAnalysis:
         Args:
             gene_reports: Dictionary of gene analysis results
             output_path: Optional output path for the JSON file
+            inputs: Optional facts about the inputs (e.g. ``input_bam``,
+                ``input_bed``, ``sample_id``), added to the JSON metadata
 
         Returns:
             Path to the generated JSON file
@@ -1488,6 +1493,8 @@ class LightweightGeneAnalysis:
             },
             "genes": gene_variants,
         }
+        if inputs:
+            json_data["metadata"].update(inputs)
 
         # Write JSON file with pretty formatting
         import json
@@ -1498,6 +1505,29 @@ class LightweightGeneAnalysis:
         print(f"         JSON report generated: {output_path}")
         self.logger.info(f"Exported JSON report: {output_path}")
         return str(output_path)
+
+
+def resolve_sample_folder(base_dir: str, sample_id: Optional[str]) -> str:
+    """Return the one folder this sample's inputs may come from.
+
+    ``base_dir`` is either the monitored root holding every sample's folder, or
+    the sample's own folder. With no sample ID (or ``"unknown"``), ``base_dir``
+    is taken as the sample's folder. A sample ID that is a path rather than a
+    plain folder name raises ``ValueError``, so it can never point at another
+    sample.
+    """
+    if not sample_id or sample_id == "unknown":
+        return base_dir
+    if (
+        os.path.isabs(sample_id)
+        or sample_id in (".", "..")
+        or os.sep in sample_id
+        or (os.altsep and os.altsep in sample_id)
+    ):
+        raise ValueError(f"Sample ID is not a plain folder name: {sample_id!r}")
+    if os.path.basename(os.path.normpath(base_dir)) == sample_id:
+        return base_dir
+    return os.path.join(base_dir, sample_id)
 
 
 def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> None:
@@ -1560,68 +1590,16 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
         print(f" Sample directory: {sample_dir}")
         print(f" Sample ID: {sample_id}")
 
-        # Find the best available BAM file for analysis
-        target_bam = None
-
-        # ALWAYS prioritize igv_ready.bam from IGV folders first (these are properly indexed)
-        print(" Searching for igv_ready.bam in IGV folders (priority 1)...")
-
-        # Priority 1: Try igv_ready.bam from IGV folder in sample subdirectory (if sample_id is known)
-        if sample_id:
-            igv_bam = os.path.join(sample_dir, sample_id, "igv", "igv_ready.bam")
-            if os.path.exists(igv_bam):
-                target_bam = igv_bam
-                print(f" Found igv_ready.bam in sample IGV folder: {target_bam}")
-                print(
-                    " This file should be properly indexed and ready for pileup analysis"
-                )
-            else:
-                print(f" igv_ready.bam not found at: {igv_bam}")
-
-        # Priority 2: Try igv_ready.bam from IGV folder in main directory
-        if not target_bam:
-            igv_bam = os.path.join(sample_dir, "igv", "igv_ready.bam")
-            if os.path.exists(igv_bam):
-                target_bam = igv_bam
-                print(f" Found igv_ready.bam in main IGV folder: {target_bam}")
-                print(
-                    " This file should be properly indexed and ready for pileup analysis"
-                )
-            else:
-                print(f" igv_ready.bam not found at: {igv_bam}")
-
-        # Priority 3: Search ALL subdirectories for igv_ready.bam (IGV files are priority)
-        if not target_bam:
-            print(
-                " No IGV igv_ready.bam found, searching all subdirectories for igv_ready.bam..."
-            )
-            for root, dirs, files in os.walk(sample_dir):
-                if "igv_ready.bam" in files:
-                    target_bam = os.path.join(root, "igv_ready.bam")
-                    print(f" Found igv_ready.bam in subdirectory: {target_bam}")
-                    print(
-                        " This file should be properly indexed and ready for pileup analysis"
-                    )
-                    break
-
-        # NO FALLBACK to target.bam - only use properly indexed IGV files
-        if not target_bam:
-            print(" No igv_ready.bam found in any IGV folders or subdirectories")
-            print(" Searched locations:")
-            if sample_id:
-                print(
-                    f"   - {os.path.join(sample_dir, sample_id, 'igv', 'igv_ready.bam')}"
-                )
-            print(f"   - {os.path.join(sample_dir, 'igv', 'igv_ready.bam')}")
-            print("   - All subdirectories recursively")
+        # Only this sample's own files may be used: never search other
+        # samples' folders (VAR-9).
+        sample_folder = resolve_sample_folder(sample_dir, sample_id)
+        target_bam = os.path.join(sample_folder, "igv", "igv_ready.bam")
+        if not os.path.exists(target_bam):
             raise FileNotFoundError(
-                f"No igv_ready.bam found in {sample_dir} or subdirectories. This file is required for analysis."
+                f"No igv_ready.bam for this sample at {target_bam}. "
+                "This file is required for analysis."
             )
-
-        if not target_bam:
-            raise FileNotFoundError(
-                f"No suitable BAM file found in {sample_dir} or subdirectories"
-            )
+        print(f" Using this sample's igv_ready.bam: {target_bam}")
 
         # Check if BAM file has an index
         bam_index = target_bam + ".bai"
@@ -1647,37 +1625,15 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
                 print(f" Error creating BAM index: {e}")
                 print("  Analysis may fail due to missing index")
 
-        # Find BED file if not specified
-        if not bed_path:
-            # Try to find BED file in sample subdirectory first (if sample_id is known)
-            if sample_id:
-                bed_path = os.path.join(
-                    sample_dir, sample_id, "targets_exceeding_threshold.bed"
-                )
-                if os.path.exists(bed_path):
-                    print(f" Found BED file in sample subdirectory: {bed_path}")
-                else:
-                    print(f" BED file not found at: {bed_path}")
-                    bed_path = None
-            else:
-                bed_path = os.path.join(sample_dir, "targets_exceeding_threshold.bed")
-
+        # Use the given BED, else this sample's own targets_exceeding_threshold.bed
         if not bed_path or not os.path.exists(bed_path):
-            # Try to find targets_exceeding_threshold.bed in subdirectories
-            print(
-                " targets_exceeding_threshold.bed not found, searching subdirectories..."
-            )
-            for root, dirs, files in os.walk(sample_dir):
-                if "targets_exceeding_threshold.bed" in files:
-                    bed_path = os.path.join(root, "targets_exceeding_threshold.bed")
-                    print(f" Found BED file in subdirectory: {bed_path}")
-                    break
-            else:
+            sample_bed = os.path.join(sample_folder, "targets_exceeding_threshold.bed")
+            if not os.path.exists(sample_bed):
                 raise FileNotFoundError(
-                    f"targets_exceeding_threshold.bed not found in {sample_dir} or any subdirectories"
+                    f"No targets_exceeding_threshold.bed for this sample at {sample_bed}"
                 )
-        else:
-            print(f" Found BED file: {bed_path}")
+            bed_path = sample_bed
+        print(f" Using BED file: {bed_path}")
 
         # Use default ClinVar path if not specified
         if not clinvar_path:
@@ -1728,8 +1684,15 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
         # Ensure the output directory exists
         os.makedirs(output_dir, exist_ok=True)
 
+        inputs = {
+            "input_bam": os.path.abspath(target_bam),
+            "input_bed": os.path.abspath(bed_path),
+            "sample_id": sample_id,
+        }
         json_report = analysis.export_json(
-            results, os.path.join(output_dir, "lightweight_gene_analysis_results.json")
+            results,
+            os.path.join(output_dir, "lightweight_gene_analysis_results.json"),
+            inputs=inputs,
         )
 
         print(" JSON report generated:")
@@ -1742,6 +1705,8 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
                 {
                     "region_reports": len(results),
                     "json_report": json_report,
+                    "input_bam": inputs["input_bam"],
+                    "input_bed": inputs["input_bed"],
                     "regions_analyzed": list(results.keys()),
                     "total_pathogenic_snps": sum(
                         r.pathogenic_snps_found for r in results.values()
