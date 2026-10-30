@@ -15,8 +15,17 @@ and this project (almost) adheres to [Semantic Versioning](https://semver.org/sp
 ### Fixed
 - **NiceGUI storage race:** Ray workers get their own empty NiceGUI storage folder, which ends the `FileNotFoundError … storage-general.json.tmp` errors.
 - **GUI storage location:** NiceGUI storage (logins, disclaimer state) moves from `./.nicegui` in the start folder to `~/.robin/nicegui`, unless `NICEGUI_STORAGE_PATH` is set. Users see the disclaimer and log in again once after upgrading.
+- **Lightweight variant check uses only the sample's own files (VAR-9):** when a sample's `igv/igv_ready.bam` or `targets_exceeding_threshold.bed` was missing, it used the first one found in any sample's folder and saved the result under this sample. It now fails with "… for this sample at <path>", and the results file records the BAM and BED it used. A sample ID that is a path (`../B`) is refused.
+- **Every BED interval of a gene is checked (VAR-10):** intervals sharing a name (e.g. one per exon) were reduced to the first. Overlapping intervals are merged, so no position is counted twice.
+- **A pathogenic variant counts only when reads support it (VAR-8):** reference-only sites were counted as found. A site now counts with 3 or more alternate reads.
 
 ### Changed
+- **Lightweight variant results:**
+  - New gene status "Insufficient Evidence": a site with 1–2 alternate reads, or an indel (which a pileup can't call).
+  - Each checked site has `supported`. The per-gene counts and the totals count supported sites only.
+  - New keys: `sites_checked` and `insufficient_evidence_sites` per gene; `total_sites_checked`, `genes_with_good_coverage`, `input_bam`, `input_bed` and `sample_id` in the metadata.
+  - The GUI's variant tables list supported sites only.
+  - **Old results files are not shown:** they don't record which BAM they used. Run the variant analysis again.
 - **Pins:** `robin.yml` pins `numpy=1.26.4`, `pandas=2.1.4` and `scikit-learn=1.8.0`; `pyproject.toml` pins `scikit-learn==1.8.0` (the version the NN model pickles were saved with) and requires Python `>=3.12,<3.13`.
 
 ## [0.5.1] - 2026-04-30

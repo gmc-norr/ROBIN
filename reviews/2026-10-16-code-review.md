@@ -5,7 +5,7 @@
 **Scope:** all of `src/robin` (91 Python files, about 82,000 lines), plus packaging, resources and CI config.\
 **Prepared with:** Claude Code (an AI-assisted review), plus a correction pass by Codex and an independent review by GPT 6.1 Sol. Treat each finding as a lead to check, not as a final verdict.\
 **Updated:** 2026-10-16. The independent review's 11 findings are merged in; each keeps its original number (IR-01 to IR-11) next to its new ID. The CNV-1, GUI-1 and SEC-1 fix sizes are corrected, the status lines are up to date, and the reproduction scripts are added.\
-**Updated:** 2026-10-30. SEC-9 is added. Fixes made in our fork are listed under "This fork and the original ROBIN", and each fixed finding has a **Status** line.
+**Updated:** 2026-10-30. SEC-9 is added. Fixes made in our fork are listed under "This fork and the original ROBIN", and each fixed finding has a **Status** line. Batch 2 (VAR-9, VAR-8, VAR-10) is fixed too.
 
 ## This fork and the original ROBIN
 
@@ -21,6 +21,10 @@ This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [g
 | MGMT runs R without a shell | SEC-8 | `2d3577e`, `0873744` | Nothing |
 | Watched file names reach command templates as data | SEC-9 | `4f26cf0`, `75485ce` | Inside a nested `sh -c`, `eval` or `ssh` command, use `"$ROBIN_FILE"` instead of `{file}` |
 | Exact pins: numpy 1.26.4, pandas 2.1.4, scikit-learn 1.8.0; Python 3.12 only | PKG-3, part of PKG-6 | `43db1df` | Installs refuse Python 3.13 and later |
+| Lightweight variant check uses only the sample's own BAM and BED, and records them | VAR-9 | `b9ffef8` | A missing file fails with "… for this sample at <path>" |
+| The GUI hides lightweight variant results that don't record their BAM | VAR-9 | `d0e1975` | Old results aren't shown; run the variant analysis again |
+| Every BED interval of a gene is checked | VAR-10 | `20ea771` | Variants in later exons now appear |
+| A pathogenic variant counts only with 3 or more alternate reads | VAR-8 | `aeb5339` | New status "Insufficient Evidence" (1–2 reads, or an indel); fewer genes flagged |
 
 Every change has a regression test in `tests/`. The details are in `CHANGELOG.md` under `[Unreleased]`. Add a row here each time a fix lands.
 
@@ -74,13 +78,13 @@ Only two tests exist (added after this review), and no CI runs them.
 |---|---|---|---|---|---|
 | 1 | SEC-1 *(fixed in our fork)* | Ray dashboard open on all network interfaces, with no password | Anyone on the network can run code as the ROBIN user | `cli.py:1725-1731`, `2435-2449` | Small (two places) |
 | 2 | SEC-8 *(fixed in our fork)* | MGMT runs the sample folder path through the shell | A crafted sample name runs commands; a space in a path breaks MGMT | `analysis/mgmt_analysis.py:836-838` | Small |
-| 3 | VAR-9 | A missing BAM for sample A falls back to sample B's BAM | Another patient's variant evidence is saved under this sample | `analysis/lightweight_gene_analysis.py:1562-1605` | Small |
+| 3 | VAR-9 *(fixed in our fork)* | A missing BAM for sample A falls back to sample B's BAM | Another patient's variant evidence is saved under this sample | `analysis/lightweight_gene_analysis.py:1562-1605` | Small |
 | 4 | METH-1 | Methylation % is averaged without weighting by coverage | Every classifier gets biased input, and adding depth doesn't make it better | `analysis/temp_utilities.py:285-391` | Small |
 | 5 | CNV-1 | CNV control reference is modified by every patient's reads | Real gains and losses fade over a run; false events appear in the next patient | `analysis/cnv_analysis.py:118-145` | Medium (build the control profile without patient reads) |
 | 6 | JOB-1 | One waiting slot per classifier type, shared by all samples | In multi-sample runs, a sample's final classification can silently never run | `workflow_ray.py:2462-2535` | Medium |
 | 7 | GUI-1 | Classification panel freezes if any classifier is disabled | GUI keeps showing the first result for the rest of the run | `gui/components/classification.py:1003-1021` | Small (two loops) |
 | 8 | GUI-2 | Refresh timers are switched off on any brief reconnect | An open page shows hours-old results, with no sign that they are stale | 8 GUI components | Small |
-| 9 | VAR-8, VAR-1, VAR-2, VAR-3 | Variant summaries and ClinVar handling | Reference-only sites reported as pathogenic; IDH1 R132H-type alleles lost; "conflicting" shown as pathogenic; a stale index returns nothing | `lightweight_gene_analysis.py`, `snp_processing.py`, `clinvar_manager.py`, `reporting/sections/variants.py` | Small to medium |
+| 9 | VAR-8 *(fixed in our fork)*, VAR-1, VAR-2, VAR-3 | Variant summaries and ClinVar handling | Reference-only sites reported as pathogenic; IDH1 R132H-type alleles lost; "conflicting" shown as pathogenic; a stale index returns nothing | `lightweight_gene_analysis.py`, `snp_processing.py`, `clinvar_manager.py`, `reporting/sections/variants.py` | Small to medium |
 | 10 | TGT-1, TGT-2 | Early BAMs never reach the SNP input; the master BED can drop the panel | SNP calls and IGV miss reads that the coverage numbers include | `analysis/target_analysis.py`, `cnv_analysis.py`, `master_bed_generator.py` | Medium |
 | 11 | JOB-6 | 60-second idle timeout (a test value) left in | A sample is marked Complete and finalised too early; SNP calls cover only part of the data | `gui_launcher.py:420` | One line |
 | 12 | METH-3, METH-4 | matkit counts failed calls in coverage; NanoDX drops minus-strand calls | Methylation pushed down; about half the reads never reach NanoDX | `utilities/matkit.py`, `nanodx_analysis.py` | Medium |
@@ -305,18 +309,21 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
 - **What's wrong:** Every covered ClinVar site in a region is counted as "found", even when its own evidence says `alternate_support=0, evidence_level="no_support"`. `export_json` then sets `pathogenic_status="present_with_good_coverage"` once coverage reaches 10 reads. The GUI's gene table and the HTML report (line 1233) show that status.
 - **Reproduced:** 20 reads with only the reference C at a pathogenic C>T site. The pileup correctly shows zero alternate reads, but the summary reports one gene with pathogenic variants.
 - **Fix:** keep "known site checked" separate from "variant supported". Base positive statuses and counts only on alternate-read evidence, and keep explicit "insufficient evidence" states.
+- **Status:** fixed in our fork (`aeb5339`): a site counts with 3 or more alternate reads; 1–2 reads or an indel give "insufficient evidence". The unused HTML report (`generate_report`, no callers) still uses the old counting. Still open in the original ROBIN.
 
 **VAR-9 · critical · Confirmed (reproduced; spot-checked)**: A missing BAM for sample A falls back to sample B's BAM. *(IR-02)*
 - **Where:** `analysis/lightweight_gene_analysis.py:1562-1605, 1665-1677, 1710-1730`; called from `gui/components/coverage.py:5882-5932, 6012-6069`
 - **What's wrong:** If `<work>/A/igv/igv_ready.bam` is missing, the handler walks the whole work directory (`os.walk`) and takes the first `igv_ready.bam` it finds, from any sample. It then saves the result under A. The BED fallback searches the same way. The GUI enables the action based on A's `target.bam`, so this is reachable from the GUI.
 - **Reproduced:** A has a reference-only BAM but no IGV BAM; B's IGV BAM has 20 alternate reads. A's results file contains B's 20 alternate reads.
 - **Fix:** resolve the sample folder once and look only inside it. A missing input must give an explicit "not available" result. Record which BAM was used in the result.
+- **Status:** fixed in our fork (`b9ffef8`, `d0e1975`). A missing input raises an error naming the expected path, which the GUI shows; results record `input_bam` and `input_bed`; older results files are not shown. Still open in the original ROBIN.
 
 **VAR-10 · medium · Confirmed (reproduced)**: Several BED intervals with the same name are reduced to the first one. *(IR-09)*
 - **Where:** `analysis/lightweight_gene_analysis.py:656-671, 676-698`
 - **What's wrong:** Regions are grouped by name, and one pileup is run over the first interval's coordinates, so variants in a gene's later exons are dropped. This happens even when the BED on disk keeps every interval (unlike VAR-7).
 - **Reproduced:** two `TEST` intervals, each with a supported pathogenic site; only the first site is reported.
 - **Fix:** key regions by coordinates, analyse each interval, then group results by gene name.
+- **Status:** fixed in our fork (`20ea771`). Overlapping intervals are merged before the pileup. Still open in the original ROBIN.
 
 ### Fusions
 
@@ -726,7 +733,7 @@ Make each step below its own change, with its own regression test. The scripts i
    - SEC-1: Ray dashboard on 127.0.0.1, and opt-in
    - SEC-8: MGMT command as an argument list, with no shell
    - SEC-9: pass watched file names to command templates as data
-2. **Sample identity and truthful variant summaries, together:**
+2. **Sample identity and truthful variant summaries, together** *(done in our fork)*:
    - VAR-9: only look inside the sample's own folder
    - VAR-8: count a variant only when reads support it
    - VAR-10: analyse every interval, not only the first per name
@@ -766,4 +773,4 @@ Make each step below its own change, with its own regression test. The scripts i
 9. **Security hardening:** SEC-2 to SEC-7.
 10. **Pin and record versions** (PKG-1), **add CI with a test suite** (PKG-2), then start on the architecture items. Delete dead code first (ARCH-4), because it is cheap and stops fixes from landing in the wrong copy.
 
-Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9) and the version pins are done too; see "This fork and the original ROBIN".
+Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9), the version pins and step 2 (VAR-9, VAR-8, VAR-10) are done too; see "This fork and the original ROBIN".

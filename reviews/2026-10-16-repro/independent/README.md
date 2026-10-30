@@ -40,4 +40,13 @@ python3.12 -m venv /tmp/robin-independent-review
 
 **Verified:** 11 of 11 reproduced, once by the independent reviewer at `5be9e04` and again during the merge at `6593336`. Both runs used Python 3.12.3, NumPy 1.26.4, pandas 2.1.4, pysam 0.23.3 and PyArrow 16.1.0. No patient data, live Ray scheduling or GUI was used.
 
-**Fixed since:** SEC-8 is fixed in our fork (`2d3577e`), so `test_ir08` now fails. That is expected: the bug it reproduces is gone. Its regression test is `tests/test_mgmt_rscript.py`. The other 10 still reproduce.
+**Fixed since:** in our fork, these tests now fail or error. That is expected: the bugs they reproduce are gone.
+
+| Test | Fixed by | Regression test |
+|---|---|---|
+| `test_ir08` (SEC-8) | `2d3577e` | `tests/test_mgmt_rscript.py` |
+| `test_ir02` (VAR-9) | `b9ffef8` | `tests/test_lga_sample_inputs.py` |
+| `test_ir09` (VAR-10) | `20ea771` | `tests/test_lga_intervals.py` |
+| `test_ir01` (VAR-8) | `aeb5339` | `tests/test_lga_variant_support.py` |
+
+`test_ir01` and `test_ir09` stop with a `NameError` or `KeyError` instead of an assertion failure. This suite copies in only the functions it names, and the fixed code calls new helpers (`is_supported`, `resolve_sample_folder`). Adding those names to its lists makes all four fail on their assertions. The other 7 tests still reproduce.
