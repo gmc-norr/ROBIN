@@ -95,7 +95,7 @@ Only two tests exist (added after this review), and no CI runs them.
 | 8 | GUI-2 *(fixed in our fork)* | Refresh timers are switched off on any brief reconnect | An open page shows hours-old results, with no sign that they are stale | 8 GUI components | Small |
 | 9 | VAR-8 *(fixed in our fork)*, VAR-1, VAR-2, VAR-3 *(fixed in our fork)* | Variant summaries and ClinVar handling | Reference-only sites reported as pathogenic; IDH1 R132H-type alleles lost; "conflicting" shown as pathogenic; a stale index returns nothing | `lightweight_gene_analysis.py`, `snp_processing.py`, `clinvar_manager.py`, `reporting/sections/variants.py` | Small to medium |
 | 10 | TGT-1, TGT-2 | Early BAMs never reach the SNP input; the master BED can drop the panel | SNP calls and IGV miss reads that the coverage numbers include | `analysis/target_analysis.py`, `cnv_analysis.py`, `master_bed_generator.py` | Medium |
-| 11 | JOB-6 *(fixed in our fork)* | 60-second idle timeout (a test value) left in | A sample is marked Complete and finalised too early; SNP calls cover only part of the data | `gui_launcher.py:420` | One line |
+| 11 | JOB-6 *(partly fixed in our fork)* | 60-second idle timeout (a test value) left in | A sample is marked Complete and finalised too early; SNP calls cover only part of the data | `gui_launcher.py:420` | One line |
 | 12 | METH-3, METH-4 | matkit counts failed calls in coverage; NanoDX drops minus-strand calls | Methylation pushed down; about half the reads never reach NanoDX | `utilities/matkit.py`, `nanodx_analysis.py` | Medium |
 | 13 | ERR-1 | Failed jobs counted as "completed"; errors never sent to the GUI | Stale or empty results look current | `workflow_ray.py`, the handlers | Medium |
 | 14 | JOB-2 | Same BAM can be processed twice, for example after a restart | Coverage and counts doubled | `workflow_ray.py:4949-4977` | Medium |
@@ -493,7 +493,7 @@ This is why "Error processing file" showed up in the backend log but never in th
 - **What's wrong:** Every component calls `timer.deactivate()` in `on_disconnect`, which in NiceGUI 3 also fires on reconnect, and nothing reactivates the timers.
 - **Effect:** after a Wi-Fi blip, laptop sleep or proxy timeout, the page shows hours-old results.
 - **Fix:** use `client.on_delete`.
-- **Status:** fixed in our fork (`7ff93b1`). All nine call sites use `client.on_delete` — the eight above plus `gui_launcher.py:5151`, which has the identical defect and is not listed here. The six theme-sync unregisters in those callbacks were the same bug class and are fixed with them. The trade: a page that really was closed is torn down up to 60 s later, after ROBIN's `reconnect_timeout`. No test proves a timer survives a real reconnect; `tests/test_gui_timer_cleanup.py` is lint-shaped. Still open in the original ROBIN.
+- **Status:** fixed in our fork (`7ff93b1`). All nine call sites use `client.on_delete` — the eight above plus `gui_launcher.py:5130`, which has the identical defect and is not listed here. The six theme-sync unregisters in those callbacks were the same bug class and are fixed with them. The trade: a page that really was closed is torn down up to 60 s later, after ROBIN's `reconnect_timeout`. No test proves a timer survives a real reconnect; `tests/test_gui_timer_cleanup.py` is lint-shaped. Still open in the original ROBIN.
 
 **GUI-3 · high · Confirmed (MGMT simulated)**: A second viewer of the same sample misses updates.
 - **Where:** `mgmt.py:388-405`, `cnv.py:1989-2010`, `coverage.py:6497-6531`, `gui_launcher.py:491-499`
