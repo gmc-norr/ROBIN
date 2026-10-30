@@ -5,7 +5,8 @@
 **Scope:** all of `src/robin` (91 Python files, about 82,000 lines), plus packaging, resources and CI config.\
 **Prepared with:** Claude Code (an AI-assisted review), plus a correction pass by Codex and an independent review by GPT 6.1 Sol. Treat each finding as a lead to check, not as a final verdict.\
 **Updated:** 2026-10-16. The independent review's 11 findings are merged in; each keeps its original number (IR-01 to IR-11) next to its new ID. The CNV-1, GUI-1 and SEC-1 fix sizes are corrected, the status lines are up to date, and the reproduction scripts are added.\
-**Updated:** 2026-10-30. SEC-9 is added. Fixes made in our fork are listed under "This fork and the original ROBIN", and each fixed finding has a **Status** line. Batch 2 (VAR-9, VAR-8, VAR-10) is fixed too.
+**Updated:** 2026-10-30. SEC-9 is added. Fixes made in our fork are listed under "This fork and the original ROBIN", and each fixed finding has a **Status** line. Batch 2 (VAR-9, VAR-8, VAR-10) is fixed too.\
+**Updated:** 2026-10-30. Batch 3, step 3's quick wins, is fixed in our fork: GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3 and VAR-7. JOB-6 is only partly fixed — the timeout constant and its configurability, not the two consequences that overlap JOB-7.
 
 ## This fork and the original ROBIN
 
@@ -25,6 +26,14 @@ This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [g
 | The GUI hides lightweight variant results that don't record their BAM | VAR-9 | `d0e1975` | Old results aren't shown; run the variant analysis again |
 | Every BED interval of a gene is checked | VAR-10 | `20ea771` | Variants in later exons now appear |
 | A pathogenic variant counts only with 3 or more alternate reads | VAR-8 | `aeb5339`, `e5527a3` | New status "Insufficient Evidence" (1–2 reads, an indel or multi-base change, or reads showing neither allele); fewer genes flagged |
+| The classification panel follows the classifiers the run enabled | GUI-1 | `50da100` | With a classifier disabled, the panel keeps updating instead of freezing on the first result |
+| Random Forest is scored against its own confidence cut-offs | REP-1 | `229247f`, `f50ad61` | The PDF no longer says "High" where the GUI says "Medium" for the same sample |
+| The sample-completion idle timeout defaults to an hour, not 60 s | JOB-6 (partly) | `c4592a0`, `b23ef4f` | Samples are no longer finalised mid-run. Set `ROBIN_COMPLETION_TIMEOUT_SECONDS` to change it; a run that relied on 60 s now waits an hour |
+| The CNV card reports an absent gain/loss count instead of the batch counter | GUI-4 | `e677991` | "Gained: Not available" in place of "Gained: 37" |
+| The end of a chromosome's signal is a terminator, not a breakpoint | CNV-5 | `53165ed` | About 24 fewer regions in the master BED per run |
+| Refresh timers survive a reconnect | GUI-2 | `7ff93b1` | An open page keeps updating after a Wi-Fi blip or laptop sleep; a page that really closed is torn down up to 60 s later |
+| A ClinVar refresh rebuilds the tabix index | VAR-3 | `8a37a7a` | Pathogenic annotations no longer vanish after a ClinVar update |
+| `robin add-panel` keeps every region of a gene | VAR-7 | `1c8e95f` | Later exons and tiles stay in the panel, so coverage and SNP calling see them |
 
 Every change has a regression test in `tests/`. The details are in `CHANGELOG.md` under `[Unreleased]`. Add a row here each time a fix lands.
 
@@ -82,15 +91,15 @@ Only two tests exist (added after this review), and no CI runs them.
 | 4 | METH-1 | Methylation % is averaged without weighting by coverage | Every classifier gets biased input, and adding depth doesn't make it better | `analysis/temp_utilities.py:285-391` | Small |
 | 5 | CNV-1 | CNV control reference is modified by every patient's reads | Real gains and losses fade over a run; false events appear in the next patient | `analysis/cnv_analysis.py:118-145` | Medium (build the control profile without patient reads) |
 | 6 | JOB-1 | One waiting slot per classifier type, shared by all samples | In multi-sample runs, a sample's final classification can silently never run | `workflow_ray.py:2462-2535` | Medium |
-| 7 | GUI-1 | Classification panel freezes if any classifier is disabled | GUI keeps showing the first result for the rest of the run | `gui/components/classification.py:1003-1021` | Small (two loops) |
-| 8 | GUI-2 | Refresh timers are switched off on any brief reconnect | An open page shows hours-old results, with no sign that they are stale | 8 GUI components | Small |
-| 9 | VAR-8 *(fixed in our fork)*, VAR-1, VAR-2, VAR-3 | Variant summaries and ClinVar handling | Reference-only sites reported as pathogenic; IDH1 R132H-type alleles lost; "conflicting" shown as pathogenic; a stale index returns nothing | `lightweight_gene_analysis.py`, `snp_processing.py`, `clinvar_manager.py`, `reporting/sections/variants.py` | Small to medium |
+| 7 | GUI-1 *(fixed in our fork)* | Classification panel freezes if any classifier is disabled | GUI keeps showing the first result for the rest of the run | `gui/components/classification.py:1003-1021` | Small (two loops) |
+| 8 | GUI-2 *(fixed in our fork)* | Refresh timers are switched off on any brief reconnect | An open page shows hours-old results, with no sign that they are stale | 8 GUI components | Small |
+| 9 | VAR-8 *(fixed in our fork)*, VAR-1, VAR-2, VAR-3 *(fixed in our fork)* | Variant summaries and ClinVar handling | Reference-only sites reported as pathogenic; IDH1 R132H-type alleles lost; "conflicting" shown as pathogenic; a stale index returns nothing | `lightweight_gene_analysis.py`, `snp_processing.py`, `clinvar_manager.py`, `reporting/sections/variants.py` | Small to medium |
 | 10 | TGT-1, TGT-2 | Early BAMs never reach the SNP input; the master BED can drop the panel | SNP calls and IGV miss reads that the coverage numbers include | `analysis/target_analysis.py`, `cnv_analysis.py`, `master_bed_generator.py` | Medium |
-| 11 | JOB-6 | 60-second idle timeout (a test value) left in | A sample is marked Complete and finalised too early; SNP calls cover only part of the data | `gui_launcher.py:420` | One line |
+| 11 | JOB-6 *(fixed in our fork)* | 60-second idle timeout (a test value) left in | A sample is marked Complete and finalised too early; SNP calls cover only part of the data | `gui_launcher.py:420` | One line |
 | 12 | METH-3, METH-4 | matkit counts failed calls in coverage; NanoDX drops minus-strand calls | Methylation pushed down; about half the reads never reach NanoDX | `utilities/matkit.py`, `nanodx_analysis.py` | Medium |
 | 13 | ERR-1 | Failed jobs counted as "completed"; errors never sent to the GUI | Stale or empty results look current | `workflow_ray.py`, the handlers | Medium |
 | 14 | JOB-2 | Same BAM can be processed twice, for example after a restart | Coverage and counts doubled | `workflow_ray.py:4949-4977` | Medium |
-| 15 | REP-1 | PDF report uses the wrong Random Forest cut-offs | The PDF can say "High" where the GUI says "Medium" | `reporting/sections/classification.py:399` | One line |
+| 15 | REP-1 *(fixed in our fork)* | PDF report uses the wrong Random Forest cut-offs | The PDF can say "High" where the GUI says "Medium" | `reporting/sections/classification.py:399` | One line |
 
 **Before trusting more runs:** compare ROBIN's merged parquet and classifier inputs with `modkit pileup --combine-strands` on one small real BAM. Make that comparison a regression test.
 
@@ -255,6 +264,7 @@ Only two tests exist (added after this review), and no CI runs them.
 - **Where:** `cnv_analysis.py:574-580, 714-730`
 - **What's wrong:** ruptures always returns the series length as its last change point. That adds about 24 spurious regions to the master BED.
 - **Fix:** use `result[:-1]`.
+- **Status:** fixed in our fork (`53165ed`). `run_ruptures` drops the terminator where it is produced, so those regions leave the master BED and `breakpoints_count` falls by about 24 per run. A chromosome whose only change point is the series end now yields no region at all, and when every chromosome does, `cnv_data_array.npy` and `breakpoints_NNN.bed` are not written. Still open in the original ROBIN.
 
 The CNV summary card and the report's CNV problems are covered in sections 6 and 7.
 
@@ -281,6 +291,7 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
 - **Where:** `utils/clinvar_manager.py:130-131, 221, 300`
 - **What's wrong:** After a new `clinvar.vcf.gz` is swapped in, `_ensure_tabix_index` returns early because the old `.tbi` exists. Region queries then return nothing with exit code 0, so pathogenic annotations silently disappear.
 - **Fix:** always rebuild the index after replacing the file.
+- **Status:** fixed in our fork (`8a37a7a`). `_ensure_tabix_index` takes a keyword-only `force`, and the two callers that have just written the `.gz` — `ensure_clinvar_files` and `update_clinvar_if_newer` — pass it, so the index is rebuilt with the file. A caller that did not touch the `.gz` keeps `force=False`, so a good index is not rebuilt on every start-up. Still open in the original ROBIN.
 
 **VAR-4 · high · Confirmed**: The report says "No pathogenic variants" when ClinVar annotation never ran.
 - **Where:** `reporting/sections/variants.py:229-246, 306-335`, `target_analysis.py:3891-3940`
@@ -303,6 +314,7 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
 **VAR-7 · high · Confirmed**: `robin add-panel` keeps only the first region of each gene.
 - **Where:** `cli.py:957`
 - **What's wrong:** `drop_duplicates(subset=['gene'])` drops every later exon or tile of a gene. In the test, a panel with 3 EGFR rows and 2 TP53 rows became 2 rows. Coverage, SNP calling and fusion detection then ignore the dropped regions.
+- **Status:** fixed in our fork (`1c8e95f`). The dedupe key is the whole region (`chrom`, `start`, `end`, `gene`), so every distinct region survives and an exactly repeated row still collapses. The second problem the reproduction script showed, under no finding ID — `read_csv` is given six column names, so an 8-column BED shifts every field and the function fails on `int('EGFR')` — is not addressed and is still open. Still open in the original ROBIN.
 
 **VAR-8 · high · Confirmed (reproduced)**: Reference-only samples are summarised as having pathogenic variants. *(IR-01)*
 - **Where:** `analysis/lightweight_gene_analysis.py:904-933, 1451-1488`, `gui/components/coverage.py:5290-5310`
@@ -412,6 +424,7 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
   - The code still says `completion_timeout_seconds = 60  # Set to 3600 for production`.
   - A gap of 60 s or more between BAMs marks the sample Complete and finalises it. Later SNP runs then skip the merge and use the old `target.bam`.
   - After a restart, unmerged batch BAMs are deleted.
+- **Status:** partly fixed in our fork (`c4592a0`, `b23ef4f`): only the first bullet. The default is 3600 s, and `ROBIN_COMPLETION_TIMEOUT_SECONDS` overrides it (unset, empty, non-integer or below 1 all mean 3600, because finalisation deletes unmerged batch BAMs). The second and third bullets describe what happens *when* the timeout fires, overlap JOB-7 and are not fixed: a later SNP run still skips the merge once a sample is finalised (`gui_launcher.py:7406, 7424-7426`), and unmerged batch BAMs are still deleted when `target.bam` already exists (`target_analysis.py:2604-2618`). Still open in the original ROBIN.
 
 **JOB-7 · high · Double run Confirmed; corruption Plausible**: `target.bam` finalisation runs twice.
 - **Where:** `gui_launcher.py:7422-7512`
@@ -473,12 +486,14 @@ This is why "Error processing file" showed up in the backend log but never in th
 - **Where:** `gui/components/classification.py:1003-1021`
 - **What's wrong:** The loop goes over all four tools in `tool_to_file`, but `charts` only has entries for the enabled ones. So `charts['PanNanoDX']` raises KeyError on every tick after the first. The panel keeps showing the first result, while the summary card moves on.
 - **Fix:** in both loops of `_refresh_classification` (lines 1003-1008 and 1019-1021), loop over `charts` instead of `tool_to_file`, or skip tools that aren't in `charts`. The third loop (1041-1047) is already guarded.
+- **Status:** fixed in our fork (`50da100`). The mtime scan moved into a module-level `classification_files_to_refresh` keyed by the tools present in `charts`, and the update loop and the log line iterate `charts` too, so a run with a classifier disabled keeps refreshing. Still open in the original ROBIN.
 
 **GUI-2 · critical · Confirmed (against NiceGUI 3.6 source)**: A brief websocket drop permanently stops every refresh timer.
 - **Where:** `summary.py:352`, `classification.py:1068`, `coverage.py:6917`, `mgmt.py:721`, `cnv.py:2467`, `fusion.py:3421`, `mnpflex.py:860`, `bed_coverage.py:456`
 - **What's wrong:** Every component calls `timer.deactivate()` in `on_disconnect`, which in NiceGUI 3 also fires on reconnect, and nothing reactivates the timers.
 - **Effect:** after a Wi-Fi blip, laptop sleep or proxy timeout, the page shows hours-old results.
 - **Fix:** use `client.on_delete`.
+- **Status:** fixed in our fork (`7ff93b1`). All nine call sites use `client.on_delete` — the eight above plus `gui_launcher.py:5151`, which has the identical defect and is not listed here. The six theme-sync unregisters in those callbacks were the same bug class and are fixed with them. The trade: a page that really was closed is torn down up to 60 s later, after ROBIN's `reconnect_timeout`. No test proves a timer survives a real reconnect; `tests/test_gui_timer_cleanup.py` is lint-shaped. Still open in the original ROBIN.
 
 **GUI-3 · high · Confirmed (MGMT simulated)**: A second viewer of the same sample misses updates.
 - **Where:** `mgmt.py:388-405`, `cnv.py:1989-2010`, `coverage.py:6497-6531`, `gui_launcher.py:491-499`
@@ -488,6 +503,7 @@ This is why "Error processing file" showed up in the backend log but never in th
 **GUI-4 · high · Confirmed (spot-checked)**: The CNV summary card shows the batch counter as "Gained".
 - **Where:** `summary.py:1245-1292`
 - **What's wrong:** It reads `cnv_analysis_counter.txt` as the number of gains. After 37 batches the card says "Gained: 37, Lost: 0" for every sample. The other files it looks for are never written.
+- **Status:** fixed in our fork (`e677991`). The counter file has left the candidate list, and `gained`/`lost` default to `None`, which the card renders as "Not available" — the idiom it already uses for genetic sex, bin width and variance. Because nothing in `src/` writes a per-sample gain/loss count, that is what every sample now shows; a real `cnv_results.csv` would still supply real counts. Still open in the original ROBIN.
 
 **GUI-5 · high · Confirmed (by reading)**: Per-page state is shared by all browsers.
 - **Where:** `gui_launcher.py:2396, 2732, 3155-3163, 7289-7317`
@@ -522,6 +538,7 @@ This is why "Error processing file" showed up in the backend log but never in th
 - **Where:** `reporting/sections/classification.py:399`
 - **What's wrong:** It looks up `"random forest"`, but the key is `"random_forest"`, so the default 80/50 is used instead of 85/65. At 82%, the PDF says "High" and the GUI says "Medium".
 - **Fix:** map display names to config keys, and raise an error on an unknown classifier.
+- **Status:** fixed in our fork (`229247f`, `f50ad61`). `classification_config` gained `CLASSIFIER_DISPLAY_NAMES` and `config_key_for_classifier()`, which resolves a display name to its key and raises on an unknown one; the report's one call site goes through it, so 82% bands as "Medium" in both the PDF and the GUI. `get_confidence_status` itself stays permissive, because `summary.py` passes section anchors ("coverage", "cnv", "mgmt", "fusion") that need the default fallback. Still open in the original ROBIN.
 
 **REP-2 · high · Confirmed**: CNV gene counts and plot selection use an old ±1 SD rule.
 - **Where:** `reporting/sections/cnv.py:122-160, 580-620, 988-1005`
@@ -737,7 +754,7 @@ Make each step below its own change, with its own regression test. The scripts i
    - VAR-9: only look inside the sample's own folder
    - VAR-8: count a variant only when reads support it
    - VAR-10: analyse every interval, not only the first per name
-3. **Quick wins (each a few lines):**
+3. **Quick wins (each a few lines):** *(done in our fork; JOB-6 only in part)*
    - GUI-1: guard both loops in `_refresh_classification`
    - REP-1: the RF config key
    - JOB-6: change 60 to 3600, and make it configurable
@@ -773,4 +790,4 @@ Make each step below its own change, with its own regression test. The scripts i
 9. **Security hardening:** SEC-2 to SEC-7.
 10. **Pin and record versions** (PKG-1), **add CI with a test suite** (PKG-2), then start on the architecture items. Delete dead code first (ARCH-4), because it is cheap and stops fixes from landing in the wrong copy.
 
-Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9), the version pins and step 2 (VAR-9, VAR-8, VAR-10) are done too; see "This fork and the original ROBIN".
+Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9), the version pins, step 2 (VAR-9, VAR-8, VAR-10) and step 3's quick wins (GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3, VAR-7) are done too; see "This fork and the original ROBIN". Of step 3, only JOB-6 is partial: the timeout constant and its configurability are done, the merge-skip and the batch-BAM deletion that follow from the timeout firing are not, and they overlap JOB-7.
