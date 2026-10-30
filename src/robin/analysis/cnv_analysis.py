@@ -573,10 +573,13 @@ def run_ruptures(
     # Predict the change points using the provided penalty value
     ruptures_result = algo_c.predict(pen=penalty_value)
 
-    # Compute the ranges around each change point using vectorized operations
+    # Compute the ranges around each change point. ruptures always appends the
+    # length of the signal to close the final segment; it terminates the list
+    # rather than marking a detected shift, so dropping it keeps a fake region
+    # off the end of every chromosome.
     return [
         (cp * bin_width - bin_width, cp * bin_width + bin_width)
-        for cp in ruptures_result
+        for cp in ruptures_result[:-1]
     ]
 
 
