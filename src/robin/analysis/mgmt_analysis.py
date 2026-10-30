@@ -834,20 +834,33 @@ def run_matkit(
             # Run R script for MGMT prediction
             r_script_path = os.path.join(hv_path, "bin", "mgmt_pred_v0.3.R")
             if os.path.exists(r_script_path):
-                cmd = f"Rscript {r_script_path} --input={output_mgmt_bed} --out_dir={sample_dir} --probes={hv_path}/bin/mgmt_probes.Rdata --model={hv_path}/bin/mgmt_137sites_mean_model.Rdata --sample=live_analysis"
-                result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-
-                if result.returncode == 0:
-                    # Rename the output CSV file to use incremental naming
-                    default_csv = os.path.join(
-                        sample_dir, "live_analysis_mgmt_status.csv"
-                    )
-                    final_csv = os.path.join(sample_dir, f"{file_number}_mgmt.csv")
-                    if os.path.exists(default_csv):
-                        shutil.move(default_csv, final_csv)
-                else:
-                    logger.warning(f"R script failed: {result.stderr}")
+                # An argument list, not a shell string: sample paths are data, never code.
+                cmd = [
+                    "Rscript",
+                    r_script_path,
+                    f"--input={output_mgmt_bed}",
+                    f"--out_dir={sample_dir}",
+                    f"--probes={os.path.join(hv_path, 'bin', 'mgmt_probes.Rdata')}",
+                    f"--model={os.path.join(hv_path, 'bin', 'mgmt_137sites_mean_model.Rdata')}",
+                    "--sample=live_analysis",
+                ]
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                except FileNotFoundError:
                     # Continue anyway as we still have the BED file
+                    logger.warning("R script failed: Rscript not found on PATH")
+                else:
+                    if result.returncode == 0:
+                        # Rename the output CSV file to use incremental naming
+                        default_csv = os.path.join(
+                            sample_dir, "live_analysis_mgmt_status.csv"
+                        )
+                        final_csv = os.path.join(sample_dir, f"{file_number}_mgmt.csv")
+                        if os.path.exists(default_csv):
+                            shutil.move(default_csv, final_csv)
+                    else:
+                        logger.warning(f"R script failed: {result.stderr}")
+                        # Continue anyway as we still have the BED file
             else:
                 logger.warning(f"R script not found at {r_script_path}")
 
