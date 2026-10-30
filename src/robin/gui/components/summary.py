@@ -280,8 +280,8 @@ def _analysis_section(sample_dir: Path, launcher: Any = None):
                     cnv_data.get("genetic_sex", "Not available"),
                     cnv_data.get("bin_width", "Not available"),
                     cnv_data.get("variance", "Not available"),
-                    cnv_data.get("gained", 0),
-                    cnv_data.get("lost", 0),
+                    cnv_data.get("gained", None),
+                    cnv_data.get("lost", None),
                     anchor_key="cnv",
                 )
 
@@ -642,13 +642,27 @@ def _create_cnv_dashboard_card_with_data(
     genetic_sex: str,
     bin_width: str,
     variance: str,
-    gained: int,
-    lost: int,
+    gained: Optional[int],
+    lost: Optional[int],
     anchor_key: str = "cnv",
 ) -> None:
-    """CNV insight card — design.md §9."""
-    total = int(gained) + int(lost)
+    """CNV insight card — design.md §9.
+
+    ``gained``/``lost`` are ``None`` when no CNV file supplied a real count, which
+    is the normal case: they must render as "Not available", never as 0, and must
+    never reach ``int()``.
+    """
+    total = sum(int(c) for c in (gained, lost) if c is not None)
     total_denom = str(total) if total > 0 else "—"
+    gained_text = "Not available" if gained is None else str(gained)
+    lost_text = "Not available" if lost is None else str(lost)
+    # "Gained vs total: Not available / —" is worse than the "—" this line
+    # already shows for an unknown denominator, so drop the ratio entirely.
+    gained_vs_total = (
+        "Gained vs total: —"
+        if gained is None
+        else f"Gained vs total: {gained} / {total_denom}"
+    )
 
     def _on_click() -> None:
         _scroll_to_analysis_detail(anchor_key)
@@ -671,17 +685,15 @@ def _create_cnv_dashboard_card_with_data(
             ui.label(genetic_sex).classes("classification-insight-result w-full").props(
                 f'title="{_gs}"'
             )
-            ui.label(f"Gained vs total: {gained} / {total_denom}").classes(
-                "classification-insight-meta w-full"
-            )
+            ui.label(gained_vs_total).classes("classification-insight-meta w-full")
             with ui.column().classes("w-full gap-1"):
                 ui.label(f"Bin width: {bin_width}").classes("classification-insight-meta")
                 ui.label(f"Variance: {variance}").classes("classification-insight-meta")
             with ui.row().classes("gap-1 flex-wrap"):
-                ui.label(f"Gained: {gained}").classes(
+                ui.label(f"Gained: {gained_text}").classes(
                     "analysis-insight-pill analysis-insight-pill--emerald"
                 )
-                ui.label(f"Lost: {lost}").classes(
+                ui.label(f"Lost: {lost_text}").classes(
                     "analysis-insight-pill analysis-insight-pill--rose"
                 )
             ui.label(
@@ -1207,8 +1219,10 @@ def _extract_cnv_data(sample_dir: Path) -> Dict[str, Any]:
         "genetic_sex": "Not available",
         "bin_width": "Not available",
         "variance": "Not available",
-        "gained": 0,
-        "lost": 0,
+        # None, not 0: nothing in src/ writes a per-sample gain/loss count, so
+        # "unknown" is the honest default and 0 would be a claim we can't make.
+        "gained": None,
+        "lost": None,
     }
 
     try:
@@ -1246,9 +1260,14 @@ def _extract_cnv_data(sample_dir: Path) -> Dict[str, Any]:
                 logging.debug(f"   MGMT: <access denied>: {e}")
                 pass
 
-        # Look for CNV result files for gained/lost counts
+        # Look for CNV result files for gained/lost counts.
+        # cnv_analysis_counter.txt is deliberately NOT here: it is the batch
+        # counter written by save_analysis_counter(), not a gain count, and
+        # reading it as one made every sample's card say "Gained: <batches>".
+        # cnv_summary.txt and cnv_analysis_results.pkl are aspirational — the
+        # first is written by nothing in src/, the second carries no counts this
+        # function knows how to read — so only the .csv can supply counts today.
         cnv_files = [
-            "cnv_analysis_counter.txt",
             "cnv_results.csv",
             "cnv_summary.txt",
             "cnv_analysis_results.pkl",
@@ -1257,20 +1276,7 @@ def _extract_cnv_data(sample_dir: Path) -> Dict[str, Any]:
         for cnv_file in cnv_files:
             file_path = sample_dir / cnv_file
             if file_path.exists():
-                if cnv_file.endswith(".txt"):
-                    try:
-                        with open(file_path, "r") as f:
-                            content = f.read().strip()
-                            # Parse counter file for basic CNV info
-                            if content.isdigit():
-                                cnv_data["gained"] = int(
-                                    content
-                                )  # Assume this is gained regions
-                                cnv_data["lost"] = 0  # Default value
-                    except Exception as e:
-                        logging.debug(f"   MGMT: <access denied>: {e}")
-                        pass
-                elif cnv_file.endswith(".csv"):
+                if cnv_file.endswith(".csv"):
                     try:
                         with open(file_path, "r") as f:
                             reader = csv.DictReader(f)

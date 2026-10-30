@@ -48,7 +48,7 @@ The independent review's suite (IR-01 to IR-11) is in [`independent/`](independe
 | `orchestration/test_pool_timeout.py` | JOB-9: timeout frees a slot twice | |
 | _(retired)_ `gui/test_classification_refresh.py` | GUI-1: panel freezes with a disabled classifier — **fixed**, replaced by `tests/test_classification_refresh.py` | ✓ |
 | `gui/test_mgmt_shared_state.py` | GUI-3: second viewer misses updates | |
-| `gui/test_summary_cnv.py` | GUI-4 (counter shown as gains), GUI-7, GUI-9 | ✓ |
+| `gui/test_summary_cnv.py` | GUI-4 (counter shown as gains) — **fixed** in our fork, now prints `'gained': None, 'lost': None`, regression test `tests/test_summary_cnv_counts.py`; GUI-7 and GUI-9 remain, so the script stays | ✓ |
 | `gui/time_fusion_validate.py`, `time_tostring.py` | PERF-1: fusion refresh cost | |
 | _(retired)_ `reporting/rf_conf.py` | REP-1: wrong Random Forest cut-offs — **fixed**, replaced by `tests/test_classifier_config_keys.py` | ✓ |
 | `reporting/patho.py` | VAR-2 (report side) | ✓ |
