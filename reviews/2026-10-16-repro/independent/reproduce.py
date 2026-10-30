@@ -139,7 +139,7 @@ class AdditionalFindings(unittest.TestCase):
 
     def test_ir01_reference_only_sample_is_exported_as_pathogenic(self):
         module = definitions("src/robin/analysis/lightweight_gene_analysis.py", {
-            "GeneReport", "LightweightGeneAnalysis",
+            "GeneReport", "LightweightGeneAnalysis", "is_supported", "needs_review", "resolve_sample_folder",
         })
         vcf = self.root / "clinvar.vcf"
         vcf.write_text(
@@ -163,7 +163,7 @@ class AdditionalFindings(unittest.TestCase):
 
     def test_ir02_missing_sample_bam_falls_back_to_another_sample(self):
         module = definitions("src/robin/analysis/lightweight_gene_analysis.py", {
-            "GeneReport", "LightweightGeneAnalysis", "lightweight_gene_analysis_handler",
+            "GeneReport", "LightweightGeneAnalysis", "is_supported", "needs_review", "resolve_sample_folder", "lightweight_gene_analysis_handler",
         })
         wrong_bam = make_bam(self.root / "B/igv/igv_ready.bam", [
             (f"B-read{i}", 0, "T" * 30, 0) for i in range(20)
@@ -343,7 +343,7 @@ class AdditionalFindings(unittest.TestCase):
 
     def test_ir09_repeated_region_name_only_pileups_first_interval(self):
         module = definitions("src/robin/analysis/lightweight_gene_analysis.py", {
-            "GeneReport", "LightweightGeneAnalysis",
+            "GeneReport", "LightweightGeneAnalysis", "is_supported", "needs_review", "resolve_sample_folder",
         })
         vcf = self.root / "clinvar.vcf"
         vcf.write_text(

@@ -40,7 +40,7 @@ python3.12 -m venv /tmp/robin-independent-review
 
 **Verified:** 11 of 11 reproduced, once by the independent reviewer at `5be9e04` and again during the merge at `6593336`. Both runs used Python 3.12.3, NumPy 1.26.4, pandas 2.1.4, pysam 0.23.3 and PyArrow 16.1.0. No patient data, live Ray scheduling or GUI was used.
 
-**Fixed since:** in our fork, these tests now fail or error. That is expected: the bugs they reproduce are gone.
+**Fixed since:** in our fork, these tests now fail. That is expected: the bugs they reproduce are gone.
 
 | Test | Fixed by | Regression test |
 |---|---|---|
@@ -49,4 +49,6 @@ python3.12 -m venv /tmp/robin-independent-review
 | `test_ir09` (VAR-10) | `20ea771` | `tests/test_lga_intervals.py` |
 | `test_ir01` (VAR-8) | `aeb5339` | `tests/test_lga_variant_support.py` |
 
-`test_ir01` and `test_ir09` stop with a `NameError` or `KeyError` instead of an assertion failure. This suite copies in only the functions it names, and the fixed code calls new helpers (`is_supported`, `resolve_sample_folder`). Adding those names to its lists makes all four fail on their assertions. The other 7 tests still reproduce.
+Each of the four fails on its own assertion, which shows the fixed behaviour: `test_ir01` gets `none_detected`, `test_ir02` stops at A's missing `igv_ready.bam`, `test_ir08` finds no marker file, and `test_ir09` finds both sites, 11 and 111. The other 7 tests still reproduce.
+
+This suite copies in only the functions it names. The fixed code calls new helpers, so `is_supported`, `needs_review` and `resolve_sample_folder` were added to its lists in `reproduce.py`. Without them the LGA tests stop with a `NameError` or `KeyError` instead. No assertion was changed.
