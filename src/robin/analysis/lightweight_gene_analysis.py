@@ -673,6 +673,28 @@ class LightweightGeneAnalysis:
 
         return region_variants
 
+    @staticmethod
+    def _merge_intervals(intervals) -> List[Tuple[str, int, int]]:
+        """Return distinct ``(chromosome, start, end)`` intervals with overlaps merged.
+
+        Keeps the order in which chromosomes first appear; sorted by start within one.
+        """
+        by_chromosome: Dict[str, List[Tuple[int, int]]] = {}
+        for chromosome, start, end in intervals:
+            by_chromosome.setdefault(chromosome, []).append((start, end))
+        merged = []
+        for chromosome, spans in by_chromosome.items():
+            current_start, current_end = None, None
+            for start, end in sorted(spans):
+                if current_end is not None and start <= current_end:
+                    current_end = max(current_end, end)
+                    continue
+                if current_end is not None:
+                    merged.append((chromosome, current_start, current_end))
+                current_start, current_end = start, end
+            merged.append((chromosome, current_start, current_end))
+        return merged
+
     def _analyze_single_region(
         self, bam_path: str, region_id: str, variants: List[Dict[str, Any]]
     ) -> GeneReport:
@@ -682,32 +704,59 @@ class LightweightGeneAnalysis:
         if not variants:
             raise ValueError(f"No variants found for region: {region_id}")
 
-        region_info = variants[0]["intersecting_region"]
+        # A gene can have several BED intervals with the same name (e.g. one
+        # per exon). Pile up every interval that holds a ClinVar site, not
+        # only the first one (VAR-10). Overlapping intervals are merged first,
+        # so no position is counted twice.
+        intervals = self._merge_intervals(
+            (
+                v["intersecting_region"]["chromosome"],
+                v["intersecting_region"]["start"],
+                v["intersecting_region"]["end"],
+            )
+            for v in variants
+        )
+
+        pileup_data = []
+        intersecting_variants = []
+        for chromosome, start, end in intervals:
+            coords = {"chromosome": chromosome, "start": start, "end": end}
+            interval_pileup = self._perform_targeted_pileup(bam_path, coords)
+            interval_variants = [
+                v
+                for v in variants
+                if v["intersecting_region"]["chromosome"] == chromosome
+                and start <= v["intersecting_region"]["start"]
+                and v["intersecting_region"]["end"] <= end
+            ]
+            intersecting_variants.extend(
+                self._find_intersecting_variants(
+                    coords, interval_variants, interval_pileup
+                )
+            )
+            pileup_data.extend(interval_pileup)
+
+        first_chromosome = intervals[0][0]
         region_coords = {
-            "chromosome": region_info["chromosome"],
-            "start": region_info["start"],
-            "end": region_info["end"],
+            "chromosome": first_chromosome,
+            "start": min(s for c, s, e in intervals if c == first_chromosome),
+            "end": max(e for c, s, e in intervals if c == first_chromosome),
         }
-
-        # Perform targeted pileup using pysam
-
-        pileup_data = self._perform_targeted_pileup(bam_path, region_coords)
 
         # Extract coverage data from pileup for backward compatibility
         coverage_data = [
             (entry["position"], entry["coverage"]) for entry in pileup_data
         ]
 
-        # Intersect with pathogenic variants
-        intersecting_variants = self._find_intersecting_variants(
-            region_coords, variants, pileup_data
-        )
-
         # Calculate coverage statistics
         coverage_stats = self._calculate_coverage_statistics(pileup_data)
 
-        # Determine analysis quality
-        analysis_quality = self._determine_analysis_quality(pileup_data, region_coords)
+        # Determine analysis quality from the bases actually analysed
+        analysis_quality = self._determine_analysis_quality(
+            pileup_data,
+            region_coords,
+            region_size=sum(e - s for c, s, e in intervals),
+        )
 
         # Create gene report (reusing the same structure for regions)
         region_report = GeneReport(
@@ -1066,13 +1115,21 @@ class LightweightGeneAnalysis:
         }
 
     def _determine_analysis_quality(
-        self, pileup_data: List[Dict[str, Any]], gene_coords: Dict[str, Any]
+        self,
+        pileup_data: List[Dict[str, Any]],
+        gene_coords: Dict[str, Any],
+        region_size: Optional[int] = None,
     ) -> str:
-        """Determine the quality of the analysis based on coverage and region size."""
+        """Determine the quality of the analysis based on coverage and region size.
+
+        ``region_size`` overrides ``end - start`` when the analysed bases are
+        several intervals rather than one span.
+        """
         if not pileup_data:
             return "low"
 
-        region_size = gene_coords["end"] - gene_coords["start"]
+        if region_size is None:
+            region_size = gene_coords["end"] - gene_coords["start"]
         mean_coverage = np.mean([entry["coverage"] for entry in pileup_data])
 
         # Quality thresholds
