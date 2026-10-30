@@ -5434,7 +5434,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     v
                                     for v in variants
                                     if v.get("coverage_at_variant", 0) >= 10
-                                    and v.get("supported", False)  # 3+ alt reads (VAR-8)
+                                    # Found (3+ alt reads) or needing review (VAR-8)
+                                    and (v.get("supported") or v.get("needs_review"))
                                 ]
 
                                 if high_cov_variants:
@@ -5722,8 +5723,9 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     variant_data = []
                                     for variant in variants:
                                         evidence = variant.get("evidence_analysis", {})
-                                        # Only include variants the reads support (3+ alt reads, VAR-8)
-                                        if variant.get("supported", False):
+                                        # Sites found (3+ alt reads) or needing review; the
+                                        # evidence column says which (VAR-8)
+                                        if variant.get("supported") or variant.get("needs_review"):
                                             # Create genomic locus in format chr1:119,915,631
                                             chromosome = variant.get("chromosome", "N")
                                             position = variant.get("position", 0)

@@ -83,3 +83,34 @@ def test_indel_site_is_insufficient_evidence(tmp_path):
     summary = data["genes"]["TEST"]["summary"]
     assert summary["pathogenic_status"] == "insufficient_evidence"
     assert summary["total_variants"] == 0
+
+
+def test_multi_base_substitution_is_insufficient_evidence(tmp_path):
+    # CC>TT is not an indel, but a one-base pileup can't call it either.
+    # The reads carry TT here, so "none detected" would be wrong.
+    mnv_read = (0, "C" * 10 + "TT" + "C" * 38)
+    _, data = _analyse(tmp_path, [mnv_read] * 20, sites=[(11, "CC", "TT")])
+    summary = data["genes"]["TEST"]["summary"]
+    assert summary["pathogenic_status"] == "insufficient_evidence"
+    assert data["genes"]["TEST"]["variants"][0]["needs_review"] is True
+
+
+def test_site_where_reads_show_neither_allele_is_insufficient_evidence(tmp_path):
+    # ClinVar C>T, but every read has G: wrong build or position, not "none detected".
+    g_read = (0, "C" * 10 + "G" + "C" * 39)
+    _, data = _analyse(tmp_path, [g_read] * 20)
+    summary = data["genes"]["TEST"]["summary"]
+    assert summary["pathogenic_status"] == "insufficient_evidence"
+
+
+def test_sites_needing_review_are_flagged_per_variant(tmp_path):
+    # The GUI lists these sites, so the rule lives in one place.
+    _, data = _analyse(tmp_path, [REF_READ] * 18 + [ALT_READ] * 2)
+    variant = data["genes"]["TEST"]["variants"][0]
+    assert variant["supported"] is False
+    assert variant["needs_review"] is True
+
+
+def test_reference_only_site_needs_no_review(tmp_path):
+    _, data = _analyse(tmp_path, [REF_READ] * 20)
+    assert data["genes"]["TEST"]["variants"][0]["needs_review"] is False

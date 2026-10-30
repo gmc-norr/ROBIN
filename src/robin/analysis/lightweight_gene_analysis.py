@@ -68,12 +68,14 @@ from robin.logging_config import get_job_logger
 
 # Evidence levels from _analyze_variant_evidence. A ClinVar site counts as a
 # found variant only with 3 or more alternate reads (VAR-8). 1-2 reads, and
-# indels (which a pileup can't call), need review: "insufficient evidence".
+# indels and multi-base changes (which a pileup can't call), and sites where
+# the reads show neither allele, need review: "insufficient evidence".
 SUPPORTED_EVIDENCE = ("low_frequency", "medium_frequency", "high_frequency")
 REVIEW_EVIDENCE = (
     "low_support",
     "indel_requires_review",
     "insertion_requires_review",
+    "mnv_requires_review",
     "reference_mismatch",
 )
 
@@ -1079,6 +1081,13 @@ class LightweightGeneAnalysis:
                 alt_support = 0
                 evidence_level = "indel_requires_review"
                 vaf = 0.0
+        elif len(expected_ref) != 1:
+            # Same-length multi-base change (e.g. CC>TT): a one-base pileup
+            # can't call it, so it needs review, never "no support" (VAR-8)
+            ref_support = 0
+            alt_support = 0
+            evidence_level = "mnv_requires_review"
+            vaf = 0.0
         else:
             # SNV - use the original logic
             ref_support = base_counts.get(expected_ref.upper(), 0)
@@ -1086,7 +1095,10 @@ class LightweightGeneAnalysis:
             vaf = alt_support / total_coverage if total_coverage > 0 else 0
 
             # Determine evidence level for SNVs
-            if alt_support == 0:
+            if total_coverage > 0 and ref_support + alt_support == 0:
+                # Reads show neither allele: wrong build or position, can't call
+                evidence_level = "reference_mismatch"
+            elif alt_support == 0:
                 evidence_level = "no_support"
             elif alt_support < 3:
                 evidence_level = "low_support"
@@ -1542,6 +1554,7 @@ class LightweightGeneAnalysis:
             checked = gene_data["variants"]
             for v in checked:
                 v["supported"] = is_supported(v.get("evidence_analysis"))
+                v["needs_review"] = needs_review(v.get("evidence_analysis"))
             supported = [v for v in checked if v["supported"]]
 
             summary = gene_data["summary"]
