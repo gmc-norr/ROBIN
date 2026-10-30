@@ -10,7 +10,7 @@ These are the scripts behind the "Confirmed" findings in [`../2026-10-16-code-re
 
 ## How to run
 
-Run from the repository root, in a Python 3.12 environment with pandas 2.1.4, numpy < 2, polars, pyranges 0.1.4 and pyarrow 16.1. Ray, NiceGUI, pysam and sturgeon are not needed: the scripts stub them out (see `orchestration/stubs.py` and `gui/stubs*/`).
+Run from the repository root, in a Python 3.12 environment with pandas 2.1.4, numpy < 2, polars, pyranges 0.1.4 and pyarrow 16.1. Ray, NiceGUI, pysam and sturgeon are not needed: the scripts stub them out (see `orchestration/stubs.py` and `gui/stubs*/`). `gui/stubs2/` is also used by `tests/test_classification_refresh.py`, so it stays even though GUI-1's script is retired.
 
 ```
 python reviews/2026-10-16-repro/architecture/merge_mean.py
@@ -46,7 +46,7 @@ The independent review's suite (IR-01 to IR-11) is in [`independent/`](independe
 | `architecture/partial_dl.py` | SEC-3 (same, with a fake downloader) | |
 | `orchestration/test_orch.py` | T1 JOB-3, T2 ERR-1, T3 JOB-1, T4 JOB-5, T5 JOB-13, T6 JOB-4 and JOB-8 | ✓ |
 | `orchestration/test_pool_timeout.py` | JOB-9: timeout frees a slot twice | |
-| `gui/test_classification_refresh.py` | GUI-1: panel freezes with a disabled classifier | ✓ |
+| _(retired)_ `gui/test_classification_refresh.py` | GUI-1: panel freezes with a disabled classifier — **fixed**, replaced by `tests/test_classification_refresh.py` | ✓ |
 | `gui/test_mgmt_shared_state.py` | GUI-3: second viewer misses updates | |
 | `gui/test_summary_cnv.py` | GUI-4 (counter shown as gains), GUI-7, GUI-9 | ✓ |
 | `gui/time_fusion_validate.py`, `time_tostring.py` | PERF-1: fusion refresh cost | |

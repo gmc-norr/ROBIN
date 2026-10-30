@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 import csv
 import logging
 import zlib
@@ -313,6 +313,43 @@ except ImportError:
         "random_forest": "Random Forest",
         "pannanodx": "PanNanoDX",
     }
+
+
+def classification_files_to_refresh(
+    charts: Dict[str, Dict[str, Any]],
+    sample_dir: Optional[Path],
+) -> Tuple[Dict[str, float], Dict[str, bool], bool]:
+    """Work out which classifier score files the panel needs to re-read.
+
+    Only the tools present in ``charts`` are considered — a classifier the user
+    left out of the workflow has no chart and no score file, and looking it up
+    used to raise ``KeyError`` and freeze the whole panel (GUI-1).
+
+    Returns ``(mtimes, changed, is_fresh_visit)``, all keyed by the tool names in
+    ``charts`` and nothing else:
+
+    * ``mtimes[tool]`` is the score file's ``st_mtime``, or ``0.0`` when the file
+      is missing or ``sample_dir`` is falsy.
+    * ``changed[tool]`` is True when the file exists and its mtime is newer than
+      the chart's recorded ``last_mtime``; a ``last_mtime`` of ``None`` (never
+      read) counts as changed.
+    * ``is_fresh_visit`` is True when any tool in ``charts`` still has
+      ``last_mtime is None``, i.e. the panel has yet to show it anything.
+    """
+    mtimes: Dict[str, float] = {}
+    changed: Dict[str, bool] = {}
+    for tool_name, cfg in charts.items():
+        file_path = sample_dir / cfg["file"] if sample_dir else None
+        if file_path and file_path.exists():
+            mtime = file_path.stat().st_mtime
+            mtimes[tool_name] = mtime
+            prev_mtime = cfg.get("last_mtime", 0)
+            changed[tool_name] = prev_mtime is None or mtime > prev_mtime
+        else:
+            mtimes[tool_name] = 0.0
+            changed[tool_name] = False
+    is_fresh_visit = any(cfg.get("last_mtime") is None for cfg in charts.values())
+    return mtimes, changed, is_fresh_visit
 
 
 def add_classification_section(sample_dir: Path, launcher: Any = None) -> None:
@@ -994,33 +1031,12 @@ def add_classification_section(sample_dir: Path, launcher: Any = None) -> None:
                 logging.warning(f"[Classification] Sample directory not found: {sample_dir}")
                 return
             
-            # Check modification times for all files upfront
-            import time
-            file_mtimes = {}
-            files_changed = {}
-            any_changes = False
-            
-            for tool_name, cfg in tool_to_file.items():
-                file_path = sample_dir / cfg["file"] if sample_dir else None
-                if file_path and file_path.exists():
-                    mtime = file_path.stat().st_mtime
-                    file_mtimes[tool_name] = mtime
-                    prev_mtime = charts[tool_name].get("last_mtime", 0)
-                    if prev_mtime is None or mtime > prev_mtime:
-                        files_changed[tool_name] = True
-                        any_changes = True
-                    else:
-                        files_changed[tool_name] = False
-                else:
-                    file_mtimes[tool_name] = 0
-                    files_changed[tool_name] = False
-            
-            # Check if this is a fresh visit (no files have been processed yet)
-            is_fresh_visit = any(
-                charts[tool_name].get("last_mtime") is None 
-                for tool_name in tool_to_file.keys()
+            # Check modification times upfront, for the enabled classifiers only
+            file_mtimes, files_changed, is_fresh_visit = classification_files_to_refresh(
+                charts, sample_dir
             )
-            
+            any_changes = any(files_changed.values())
+
             # Early exit if nothing has changed and not a fresh visit
             if not any_changes and not is_fresh_visit:
                 logging.debug(f"[Classification] ⏭ Skipping classification update - no file changes detected")
@@ -1033,12 +1049,12 @@ def add_classification_section(sample_dir: Path, launcher: Any = None) -> None:
                     reasons.append("fresh_visit")
                 for tool_name, changed in files_changed.items():
                     if changed:
-                        reasons.append(f"{tool_to_file[tool_name]['file']}")
+                        reasons.append(f"{charts[tool_name]['file']}")
                 if reasons:
                     logging.debug(f"[Classification] Update needed. Reasons: {', '.join(reasons)}")
-            
+
             # Update only files that have changed
-            for tool_name, cfg in tool_to_file.items():
+            for tool_name, cfg in charts.items():
                 file_path = sample_dir / cfg["file"] if sample_dir else None
                 if file_path and files_changed.get(tool_name, False):
                     _check_and_update_file(tool_name, cfg["file"], file_path, charts)
