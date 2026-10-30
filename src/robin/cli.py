@@ -49,6 +49,7 @@ import logging
 is_development_mode = os.environ.get("ROBIN_DEV_MODE", "").lower() in ("1", "true", "yes", "on")
 
 from robin.workflow_simple import default_file_classifier, Job
+from robin.ray_setup import ray_init_options
 
 # Many analysis handlers have optional third-party dependencies. Import them lazily
 # so lightweight commands (e.g. `robin utils update-models`) still work.
@@ -1671,7 +1672,7 @@ def _create_ray_workflow_runner(
         return None
 
 
-def _initialize_ray(num_cpus: Optional[int], include_dashboard: bool = True) -> None:
+def _initialize_ray(num_cpus: Optional[int], include_dashboard: bool = False) -> None:
     """Initialize Ray with specified CPU count and dashboard option."""
     if num_cpus is not None:
         if num_cpus <= 0:
@@ -1703,7 +1704,6 @@ def _initialize_ray(num_cpus: Optional[int], include_dashboard: bool = True) -> 
                 if "RAY_MAX_LIMIT_FROM_DATA_SOURCE" not in os.environ:
                     os.environ["RAY_MAX_LIMIT_FROM_DATA_SOURCE"] = "100000"
 
-                # Bind dashboard to 0.0.0.0 when supported so it's reachable off-host
                 init_kwargs = {
                     "num_cpus": num_cpus,
                     "ignore_reinit_error": True,
@@ -1721,16 +1721,8 @@ def _initialize_ray(num_cpus: Optional[int], include_dashboard: bool = True) -> 
                         "object_store_full_max_retries": 0,
                     },
                 }
-
-                if include_dashboard:
-                    init_kwargs.update(
-                        {
-                            "include_dashboard": True,
-                            "dashboard_host": os.environ.get(
-                                "RAY_DASHBOARD_HOST", "0.0.0.0"
-                            ),
-                        }
-                    )
+                # Dashboard (localhost only, off unless asked) and worker NiceGUI storage
+                init_kwargs.update(ray_init_options(include_dashboard))
 
                 try:
                     ray.init(**init_kwargs)
@@ -2302,8 +2294,8 @@ def _display_workflow_config(
 )
 @click.option(
     "--ray-dashboard/--no-ray-dashboard",
-    default=True,
-    help="Enable Ray dashboard (default: on). Disable with --no-ray-dashboard. Only used when --use-ray is specified.",
+    default=False,
+    help="Enable the Ray dashboard on localhost (default: off). Set RAY_DASHBOARD_HOST to bind elsewhere. Only used when --use-ray is specified.",
 )
 @click.option(
     "--target-panel",
@@ -2432,16 +2424,8 @@ def workflow(
                     init_kwargs = {
                         "ignore_reinit_error": True,
                     }
-
-                    if ray_dashboard:
-                        init_kwargs.update(
-                            {
-                                "include_dashboard": True,
-                                "dashboard_host": os.environ.get(
-                                    "RAY_DASHBOARD_HOST", "0.0.0.0"
-                                ),
-                            }
-                        )
+                    # Dashboard (localhost only, off unless asked) and worker NiceGUI storage
+                    init_kwargs.update(ray_init_options(ray_dashboard))
 
                     if preset in {"p2i", "standard"}:
                         init_kwargs["num_cpus"] = 2 if preset == "p2i" else 6  # Increased from 4 to 6 for standard

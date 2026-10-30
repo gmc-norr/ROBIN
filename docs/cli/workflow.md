@@ -50,7 +50,7 @@ preprocessing:preprocessing,bed_conversion:bed_conversion,mgmt:mgmt,classificati
 
 | Mode | Flag | Notes |
 |------|------|--------|
-| **Ray** (default) | `--use-ray` | Distributed task execution; optional Ray dashboard (`--ray-dashboard` / `--no-ray-dashboard`). |
+| **Ray** (default) | `--use-ray` | Distributed task execution; optional Ray dashboard, off by default (`--ray-dashboard` turns it on, on localhost only; set `RAY_DASHBOARD_HOST` to bind elsewhere). |
 | Threading | `--no-use-ray` | Falls back to threaded workers; analysis worker counts apply per queue mode. |
 
 **Presets** (`--preset`): `p2i`, `standard` (default), `high` — adjust Ray actor grouping and CPU caps for different hardware (e.g. P2i vs server).

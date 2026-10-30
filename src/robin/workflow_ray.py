@@ -55,6 +55,8 @@ from tqdm import tqdm
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from robin.ray_setup import ray_init_options, ray_worker_runtime_env
+
 try:
     from rich.progress import (
         BarColumn,
@@ -5122,9 +5124,10 @@ def parse_args():
         help="Execution preset controlling actor grouping and concurrency",
     )
     p.add_argument(
-        "--no-ray-dashboard",
-        action="store_true",
-        help="Disable Ray dashboard (default: dashboard enabled)",
+        "--ray-dashboard",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable the Ray dashboard on localhost (default: off). Set RAY_DASHBOARD_HOST to bind elsewhere.",
     )
     p.add_argument(
         "--center",
@@ -5152,21 +5155,14 @@ if __name__ == "__main__":
     if os.environ.get("RAY_MAX_LIMIT_FROM_DATA_SOURCE") is None:
         os.environ["RAY_MAX_LIMIT_FROM_DATA_SOURCE"] = "100000"
     try:
-        # Expose dashboard on all interfaces when supported
+        # Dashboard (localhost only, off unless asked) and worker NiceGUI storage
         init_kwargs = {"address": args.ray_address}
-
-        if not args.no_ray_dashboard:
-            init_kwargs.update(
-                {
-                    "include_dashboard": True,
-                    "dashboard_host": os.environ.get("RAY_DASHBOARD_HOST", "0.0.0.0"),
-                }
-            )
+        init_kwargs.update(ray_init_options(args.ray_dashboard))
 
         ray.init(**init_kwargs)
     except TypeError:
         # Older Ray versions may not support dashboard args
-        ray.init(address=args.ray_address)
+        ray.init(address=args.ray_address, runtime_env=ray_worker_runtime_env())
 
     if not args.plan:
         # default example
