@@ -291,7 +291,7 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
 - **Where:** `utils/clinvar_manager.py:130-131, 221, 300`
 - **What's wrong:** After a new `clinvar.vcf.gz` is swapped in, `_ensure_tabix_index` returns early because the old `.tbi` exists. Region queries then return nothing with exit code 0, so pathogenic annotations silently disappear.
 - **Fix:** always rebuild the index after replacing the file.
-- **Status:** fixed in our fork (`8a37a7a`). `_ensure_tabix_index` takes a keyword-only `force`, and the two callers that have just written the `.gz` — `ensure_clinvar_files` and `update_clinvar_if_newer` — pass it, so the index is rebuilt with the file. A caller that did not touch the `.gz` keeps `force=False`, so a good index is not rebuilt on every start-up. Still open in the original ROBIN.
+- **Status:** fixed in our fork (`8a37a7a`, `849e078`). `_ensure_tabix_index` takes a keyword-only `force`, and the two callers that have just written the `.gz` — `ensure_clinvar_files` and `update_clinvar_if_newer` — pass it, so the index is rebuilt with the file. A caller that did not touch the `.gz` keeps `force=False`, so a good index is not rebuilt on every start-up. A forced rebuild also deletes the old index before it starts, so a rebuild that fails cannot leave a stale index for the next start-up to accept as good — which would have brought this finding back behind an error from an earlier run. Still open in the original ROBIN.
 
 **VAR-4 · high · Confirmed**: The report says "No pathogenic variants" when ClinVar annotation never ran.
 - **Where:** `reporting/sections/variants.py:229-246, 306-335`, `target_analysis.py:3891-3940`
