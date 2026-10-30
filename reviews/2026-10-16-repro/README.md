@@ -15,7 +15,6 @@ Run from the repository root, in a Python 3.12 environment with pandas 2.1.4, nu
 ```
 python reviews/2026-10-16-repro/architecture/merge_mean.py
 python reviews/2026-10-16-repro/cnv_fusion/test_snp.py reviews/2026-10-16-repro/cnv_fusion/vcf/test.vcf
-python reviews/2026-10-16-repro/appshell/repro_unique_bed.py "$(mktemp -d)"
 ```
 
 The independent review's suite (IR-01 to IR-11) is in [`independent/`](independent/README.md). It is a single `unittest` file that also needs pysam.
@@ -38,7 +37,7 @@ The independent review's suite (IR-01 to IR-11) is in [`independent/`](independe
 | `cnv_fusion/test_lw.py` + `vcf/clinvar_test.vcf` | VAR-1: ClinVar alleles overwrite each other | ✓ |
 | `cnv_fusion/test_snp.py` + `vcf/test.vcf` | VAR-2: "conflicting" counted as pathogenic | ✓ |
 | `cnv_fusion/sim_bp_keys.py`, `sim_dbscan.py` | FUS-1: breakpoints never reach support | |
-| `appshell/repro_unique_bed.py <tmpdir>` | VAR-7: `add-panel` keeps one region per gene | |
+| _(retired)_ `appshell/repro_unique_bed.py <tmpdir>` | VAR-7: `add-panel` keeps one region per gene — **fixed**, replaced by `tests/test_add_panel_regions.py`. Its 8-column case showed a second problem, under no finding ID and not addressed by VAR-7: `read_csv` is given 6 names, so an 8-column BED shifts every field and `_generate_unique_gene_bed` returns `False` on `int('EGFR')`. | |
 | _(retired)_ `appshell/stale_tbi.sh` | VAR-3: stale tabix index returns nothing — **fixed**, replaced by `tests/test_clinvar_index.py` | |
 | `appshell/repro_partial_model_rst.py <tmpdir>` | SEC-3: partial model download accepted | |
 | `architecture/partial_dl.py` | SEC-3 (same, with a fake downloader) | |

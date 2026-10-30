@@ -954,8 +954,14 @@ def _generate_unique_gene_bed(input_bed_path: Path, output_bed_path: Path) -> bo
         # Convert to DataFrame and remove duplicates
         processed_df = pd.DataFrame(processed_regions)
         
-        # Remove duplicates based on gene name (keep first occurrence)
-        processed_df = processed_df.drop_duplicates(subset=['gene'], keep='first')
+        # Remove duplicate regions. A gene legitimately has many regions in a
+        # panel - one per exon, or per tile - so only an identical region is a
+        # duplicate. Deduplicating on the gene name alone dropped every later
+        # region of a gene, and coverage, SNP calling and fusion detection then
+        # never saw them (VAR-7).
+        processed_df = processed_df.drop_duplicates(
+            subset=['chrom', 'start', 'end', 'gene'], keep='first'
+        )
         
         # Sort by chromosome and position
         processed_df = processed_df.sort_values(['chrom', 'start', 'end'])
