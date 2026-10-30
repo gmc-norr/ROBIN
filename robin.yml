@@ -25,11 +25,15 @@ dependencies:
   - pip
 
   # core python scientific stack
-  - numpy
+  # Exact pins, so a later `conda install` can't move them:
+  # - pandas 2.1.4 is built for numpy 1.x; numpy 2 breaks it ("numpy.dtype size changed").
+  # - scikit-learn 1.8.0 is the version both NN model pickles were saved with.
+  - numpy=1.26.4
+  - pandas=2.1.4
   # SciPy 1.14+ conda-forge builds often link against a newer libstdc++ (CXXABI_1.3.15).
   # Staying on 1.11.x–1.13.x reduces that risk on older hosts.
   - scipy>=1.11,<1.14
-  - scikit-learn
+  - scikit-learn=1.8.0
   - ruptures
 
   # bioinformatics

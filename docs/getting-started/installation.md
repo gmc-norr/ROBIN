@@ -52,7 +52,7 @@ conda activate robin
 
 Notes:
 
-- `pyproject.toml` requires Python `>=3.12`; this environment matches that.
+- `pyproject.toml` requires Python 3.12 only (`>=3.12,<3.13`); this environment matches that.
 - Prefer a **fresh** environment for this codebase rather than reusing an older ROBIN env from past releases.
 
 #### If the `robin` environment already exists

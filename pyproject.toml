@@ -18,7 +18,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "click>=8.0.0",
     "watchdog>=3.0.0",
@@ -46,7 +46,7 @@ dependencies = [
     "ruptures",
     "pywebview",
     "torch", #==1.13.1",
-    "scikit-learn",
+    "scikit-learn==1.8.0",  # version the NN model pickles were saved with
     "tabulate",
     "networkx",
     "docker",
@@ -63,7 +63,6 @@ dependencies = [
     "dna_features_viewer", 
     "icecream",
     "pywebview",
-    "scikit-learn",
     "yappi",
     "tabulate",
     "docker",

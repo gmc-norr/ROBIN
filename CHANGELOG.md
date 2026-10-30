@@ -7,6 +7,18 @@ and this project (almost) adheres to [Semantic Versioning](https://semver.org/sp
 
 ## [Unreleased]
 
+### Security
+- **Ray dashboard (SEC-1):** off by default, and on `127.0.0.1` when turned on with `--ray-dashboard` (set `RAY_DASHBOARD_HOST` to bind elsewhere). Its Jobs API runs any command it is sent and has no login; it used to listen on `0.0.0.0`. `--no-ray-dashboard` now really turns it off: Ray's own default started it anyway. `workflow_ray` gains `--ray-dashboard/--no-ray-dashboard` in place of `--no-ray-dashboard`.
+- **MGMT R script (SEC-8):** runs `Rscript` with an argument list, not a shell string, so a sample folder name can't run commands.
+- **Command templates (SEC-9):** in `--commands` templates and the file watcher's command, `{file}` reaches the shell as data (`$ROBIN_FILE`), so a watched file's name can't run commands.
+
+### Fixed
+- **NiceGUI storage race:** Ray workers get their own empty NiceGUI storage folder, which ends the `FileNotFoundError … storage-general.json.tmp` errors.
+- **GUI storage location:** NiceGUI storage (logins, disclaimer state) moves from `./.nicegui` in the start folder to `~/.robin/nicegui`, unless `NICEGUI_STORAGE_PATH` is set. Users see the disclaimer and log in again once after upgrading.
+
+### Changed
+- **Pins:** `robin.yml` pins `numpy=1.26.4`, `pandas=2.1.4` and `scikit-learn=1.8.0`; `pyproject.toml` pins `scikit-learn==1.8.0` (the version the NN model pickles were saved with) and requires Python `>=3.12,<3.13`.
+
 ## [0.5.1] - 2026-04-30
 
 ### Changed
