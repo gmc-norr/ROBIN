@@ -328,6 +328,26 @@ def set_gui_password_interactive() -> bool:
     return True
 
 
+def completion_timeout_seconds() -> int:
+    """Idle seconds before a quiet sample is marked Complete and finalised.
+
+    From env ROBIN_COMPLETION_TIMEOUT_SECONDS; defaults to 3600 (one hour).
+    Unset, empty, whitespace, non-integer and values below 1 all fall back to
+    3600.
+
+    Deliberately diverges from ``workflow_ray._job_timeout_seconds``, which
+    shares this shape but treats 0 as *disabled*: here 0 (and any value below
+    1) means *use the default*. Finalisation merges a sample's batch BAMs into
+    target.bam and deletes them, so a 0 that was honoured would finalise every
+    sample on the first tick and destroy unmerged data.
+    """
+    try:
+        val = int(os.environ.get("ROBIN_COMPLETION_TIMEOUT_SECONDS", "").strip())
+    except (ValueError, TypeError):
+        return 3600
+    return val if val >= 1 else 3600
+
+
 class UpdateType(Enum):
     """Types of updates that can be sent to the GUI."""
 
@@ -415,9 +435,8 @@ class GUILauncher:
         self._unrestricted_page_routes = {"/login"}
         self._password_hash: Optional[str] = None  # cached after first read
 
-        # Sample status transition timeout (in seconds)
-        # Change to 60 for testing (1 minute), 3600 for production (60 minutes)
-        self.completion_timeout_seconds = 60  # Set to 3600 for production
+        # Idle seconds before a quiet sample is marked Complete and finalised (batch BAMs merged into target.bam, then deleted); override with ROBIN_COMPLETION_TIMEOUT_SECONDS.
+        self.completion_timeout_seconds = completion_timeout_seconds()
         
         # Message queue for non-blocking communication
         self.update_queue = queue.PriorityQueue()
