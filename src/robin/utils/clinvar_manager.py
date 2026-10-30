@@ -123,11 +123,21 @@ def _download_url_to_file(url: str, target_path: Path, *, timeout_s: int = 600) 
         raise
 
 
-def _ensure_tabix_index(gz_path: Path, tbi_path: Path) -> None:
+def _ensure_tabix_index(gz_path: Path, tbi_path: Path, *, force: bool = False) -> None:
     """
     Ensure a tabix index exists for a bgzipped VCF.
+
+    Pass `force=True` whenever the caller has just written `gz_path`: that is
+    `ensure_clinvar_files` after `_download_url_to_file`, and
+    `update_clinvar_if_newer` after `tmp_path.replace(gz_path)`. An existing
+    `.tbi` passes `_file_ok` -- it exists, is a file and is non-empty -- while
+    still describing the *previous* ClinVar release. A tabix index stores file
+    offsets, so one built for the old `.gz` points into the wrong bytes of the
+    new one: region queries return no records and exit 0, and pathogenic
+    annotations disappear with no error at all (VAR-3). Only a caller that has
+    not touched the `.gz` may leave `force=False` and keep a good index.
     """
-    if _file_ok(tbi_path):
+    if not force and _file_ok(tbi_path):
         return
 
     print(f"Creating tabix index for {gz_path.name}")
@@ -192,7 +202,8 @@ def ensure_clinvar_files(
 
     Strategy:
     - Download `clinvar.vcf.gz` when missing.
-    - Create tabix index (`.tbi`) when missing.
+    - Create tabix index (`.tbi`) when missing, and rebuild it after a
+      download, because the `.tbi` on disk may index the previous release.
     """
 
     resources_dir = resources_dir or get_resources_dir()
@@ -212,13 +223,18 @@ def ensure_clinvar_files(
         f"{tbi_path.name}={'OK' if tbi_ok else 'MISSING'}"
     )
 
+    downloaded = False
     if not gz_ok:
         if not download_if_missing:
             raise FileNotFoundError(
                 f"Missing ClinVar file in {resources_dir}: expected {gz_path.name}"
             )
         _download_url_to_file(url, gz_path)
-    _ensure_tabix_index(gz_path, tbi_path)
+        downloaded = True
+    # A freshly downloaded .gz can land beside a .tbi that outlived the file it
+    # indexes; an untouched .gz keeps its index instead of re-indexing at every
+    # start-up.
+    _ensure_tabix_index(gz_path, tbi_path, force=downloaded)
 
 
 def _get_remote_last_modified(url: str, *, timeout_s: int = 30) -> Optional[float]:
@@ -297,7 +313,8 @@ def update_clinvar_if_newer(
     try:
         _download_url_to_file(url, tmp_path, timeout_s=timeout_s)
         tmp_path.replace(gz_path)
-        _ensure_tabix_index(gz_path, tbi_path)
+        # The .gz has just changed underneath the old index: always rebuild.
+        _ensure_tabix_index(gz_path, tbi_path, force=True)
     finally:
         try:
             if tmp_path.exists():

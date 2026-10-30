@@ -18,8 +18,6 @@ python reviews/2026-10-16-repro/cnv_fusion/test_snp.py reviews/2026-10-16-repro/
 python reviews/2026-10-16-repro/appshell/repro_unique_bed.py "$(mktemp -d)"
 ```
 
-`appshell/stale_tbi.sh` also needs `bcftools`.
-
 The independent review's suite (IR-01 to IR-11) is in [`independent/`](independent/README.md). It is a single `unittest` file that also needs pysam.
 
 ## Which script shows which finding
@@ -41,7 +39,7 @@ The independent review's suite (IR-01 to IR-11) is in [`independent/`](independe
 | `cnv_fusion/test_snp.py` + `vcf/test.vcf` | VAR-2: "conflicting" counted as pathogenic | ✓ |
 | `cnv_fusion/sim_bp_keys.py`, `sim_dbscan.py` | FUS-1: breakpoints never reach support | |
 | `appshell/repro_unique_bed.py <tmpdir>` | VAR-7: `add-panel` keeps one region per gene | |
-| `appshell/stale_tbi.sh` | VAR-3: stale tabix index returns nothing | |
+| _(retired)_ `appshell/stale_tbi.sh` | VAR-3: stale tabix index returns nothing — **fixed**, replaced by `tests/test_clinvar_index.py` | |
 | `appshell/repro_partial_model_rst.py <tmpdir>` | SEC-3: partial model download accepted | |
 | `architecture/partial_dl.py` | SEC-3 (same, with a fake downloader) | |
 | `orchestration/test_orch.py` | T1 JOB-3, T2 ERR-1, T3 JOB-1, T4 JOB-5, T5 JOB-13, T6 JOB-4 and JOB-8 | ✓ |
