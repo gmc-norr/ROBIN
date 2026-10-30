@@ -66,6 +66,27 @@ import pandas as pd
 import pysam
 from robin.logging_config import get_job_logger
 
+# Evidence levels from _analyze_variant_evidence. A ClinVar site counts as a
+# found variant only with 3 or more alternate reads (VAR-8). 1-2 reads, and
+# indels (which a pileup can't call), need review: "insufficient evidence".
+SUPPORTED_EVIDENCE = ("low_frequency", "medium_frequency", "high_frequency")
+REVIEW_EVIDENCE = (
+    "low_support",
+    "indel_requires_review",
+    "insertion_requires_review",
+    "reference_mismatch",
+)
+
+
+def is_supported(evidence: Optional[Dict[str, Any]]) -> bool:
+    """True when the reads support the ClinVar variant (3+ alternate reads)."""
+    return (evidence or {}).get("evidence_level") in SUPPORTED_EVIDENCE
+
+
+def needs_review(evidence: Optional[Dict[str, Any]]) -> bool:
+    """True when the reads can neither confirm nor rule out the variant."""
+    return (evidence or {}).get("evidence_level") in REVIEW_EVIDENCE
+
 
 @dataclass
 class GeneReport:
@@ -768,7 +789,10 @@ class LightweightGeneAnalysis:
             total_coverage=coverage_stats["total_coverage"],
             mean_coverage=coverage_stats["mean_coverage"],
             coverage_std=coverage_stats["coverage_std"],
-            pathogenic_snps_found=len(intersecting_variants),
+            # Every checked site stays in the details; only supported ones count
+            pathogenic_snps_found=sum(
+                is_supported(v.get("evidence_analysis")) for v in intersecting_variants
+            ),
             pathogenic_snps_details=intersecting_variants,
             coverage_profile=coverage_data,
             pileup_data=pileup_data,
@@ -1511,22 +1535,36 @@ class LightweightGeneAnalysis:
                         gene_variants[gene_name]["variants"].append(variant_data)
 
         # Calculate summary statistics and convert sets to lists
+        # "variants" lists every ClinVar site checked. Counts and statuses use
+        # only sites the reads support (VAR-8).
         for gene_data in gene_variants.values():
             gene_data["regions_analyzed"] = list(gene_data["regions_analyzed"])
-            gene_data["summary"]["total_variants"] = len(gene_data["variants"])
-            gene_data["summary"]["high_coverage_variants"] = sum(
-                1 for v in gene_data["variants"] if v["coverage_status"] == "high"
+            checked = gene_data["variants"]
+            for v in checked:
+                v["supported"] = is_supported(v.get("evidence_analysis"))
+            supported = [v for v in checked if v["supported"]]
+
+            summary = gene_data["summary"]
+            summary["sites_checked"] = len(checked)
+            summary["total_variants"] = len(supported)
+            summary["high_coverage_variants"] = sum(
+                1 for v in supported if v["coverage_status"] == "high"
             )
-            gene_data["summary"]["low_coverage_variants"] = sum(
-                1 for v in gene_data["variants"] if v["coverage_status"] == "low"
+            summary["low_coverage_variants"] = sum(
+                1 for v in supported if v["coverage_status"] == "low"
+            )
+            summary["insufficient_evidence_sites"] = sum(
+                1 for v in checked if needs_review(v.get("evidence_analysis"))
             )
 
-            if gene_data["summary"]["high_coverage_variants"] > 0:
-                gene_data["summary"]["pathogenic_status"] = "present_with_good_coverage"
-            elif gene_data["summary"]["total_variants"] > 0:
-                gene_data["summary"]["pathogenic_status"] = "present_but_low_coverage"
+            if summary["high_coverage_variants"] > 0:
+                summary["pathogenic_status"] = "present_with_good_coverage"
+            elif summary["total_variants"] > 0:
+                summary["pathogenic_status"] = "present_but_low_coverage"
+            elif summary["insufficient_evidence_sites"] > 0:
+                summary["pathogenic_status"] = "insufficient_evidence"
             else:
-                gene_data["summary"]["pathogenic_status"] = "none_detected"
+                summary["pathogenic_status"] = "none_detected"
 
         # Create the final JSON structure
         json_data = {
@@ -1546,6 +1584,16 @@ class LightweightGeneAnalysis:
                     1
                     for g in gene_variants.values()
                     if g["summary"]["high_coverage_variants"] > 0
+                ),
+                "total_sites_checked": sum(
+                    g["summary"]["sites_checked"] for g in gene_variants.values()
+                ),
+                # Genes with at least one checked site at 10x or more,
+                # whether or not a variant was found there
+                "genes_with_good_coverage": sum(
+                    1
+                    for g in gene_variants.values()
+                    if any(v["coverage_status"] == "high" for v in g["variants"])
                 ),
             },
             "genes": gene_variants,

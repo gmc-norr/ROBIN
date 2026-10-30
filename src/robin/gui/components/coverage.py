@@ -4959,7 +4959,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                             "text-lg font-medium text-gray-700"
                                         )
                                         ui.label(
-                                            f"{metadata.get('genes_with_good_coverage_variants', 0)}"
+                                            f"{metadata.get('genes_with_good_coverage', 0)}"
                                         ).classes("text-3xl font-bold text-green-600")
 
                                     with ui.row().classes(
@@ -4971,7 +4971,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                         low_coverage = metadata.get(
                                             "total_genes_analyzed", 0
                                         ) - metadata.get(
-                                            "genes_with_good_coverage_variants", 0
+                                            "genes_with_good_coverage", 0
                                         )
                                         ui.label(f"{low_coverage}").classes(
                                             "text-3xl font-bold text-orange-600"
@@ -5434,10 +5434,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     v
                                     for v in variants
                                     if v.get("coverage_at_variant", 0) >= 10
-                                    and v.get("evidence_analysis", {}).get(
-                                        "alternate_support", 0
-                                    )
-                                    > 0
+                                    and v.get("supported", False)  # 3+ alt reads (VAR-8)
                                 ]
 
                                 if high_cov_variants:
@@ -5725,8 +5722,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                     variant_data = []
                                     for variant in variants:
                                         evidence = variant.get("evidence_analysis", {})
-                                        # Only include variants where alternate allele is actually detected
-                                        if evidence.get("alternate_support", 0) > 0:
+                                        # Only include variants the reads support (3+ alt reads, VAR-8)
+                                        if variant.get("supported", False):
                                             # Create genomic locus in format chr1:119,915,631
                                             chromosome = variant.get("chromosome", "N")
                                             position = variant.get("position", 0)
