@@ -5,10 +5,16 @@ import os
 # Keep NiceGUI's storage (logins, disclaimer state) out of the folder Robin is
 # started from. NiceGUI reads this once, when first imported, so it must be set
 # before anything imports NiceGUI. An existing value (including the one Ray
-# gives its workers) wins.
-os.environ.setdefault(
-    "NICEGUI_STORAGE_PATH", os.path.join(os.path.expanduser("~"), ".robin", "nicegui")
-)
+# gives its workers) wins. NiceGUI creates only the last folder of the path,
+# so the default is created here.
+if "NICEGUI_STORAGE_PATH" not in os.environ:
+    os.environ["NICEGUI_STORAGE_PATH"] = os.path.join(
+        os.path.expanduser("~"), ".robin", "nicegui"
+    )
+    try:
+        os.makedirs(os.environ["NICEGUI_STORAGE_PATH"], exist_ok=True)
+    except OSError:
+        pass  # NiceGUI logs its own error when it can't write there
 
 # Suppress pkg_resources deprecation warnings from sorted_nearest
 import warnings
