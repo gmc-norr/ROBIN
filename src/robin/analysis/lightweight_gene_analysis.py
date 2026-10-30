@@ -924,10 +924,14 @@ class LightweightGeneAnalysis:
                 total_coverage = sum(base_counts.values()) - base_counts["indel"]
 
                 # Determine reference base (we'll need to get this from the BAM header or assume)
-                # For now, we'll use the most common base as reference
-                ref_base = max((k, v) for k, v in base_counts.items() if k != "indel")[
-                    0
-                ]
+                # For now, we'll use the most common base as reference.
+                # ``key`` compares the counts: without it max() would compare the
+                # (base, count) tuples, so the base letter decided the winner and
+                # the answer was always "T" however few reads carried it.
+                ref_base = max(
+                    ((k, v) for k, v in base_counts.items() if k != "indel"),
+                    key=lambda kv: kv[1],
+                )[0]
 
                 # Calculate variant allele frequency if there are variants
                 variant_alleles = [

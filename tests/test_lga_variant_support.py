@@ -114,3 +114,47 @@ def test_sites_needing_review_are_flagged_per_variant(tmp_path):
 def test_reference_only_site_needs_no_review(tmp_path):
     _, data = _analyse(tmp_path, [REF_READ] * 20)
     assert data["genes"]["TEST"]["variants"][0]["needs_review"] is False
+
+
+def _pileup(tmp_path, reads):
+    """Pile up ``reads`` over chr1:0-50 and index the entries by 1-based position."""
+    bam = write_bam(tmp_path / "s.bam", reads)
+    vcf = write_clinvar(tmp_path / "clinvar.vcf", SNV)
+    analysis = LightweightGeneAnalysis(str(tmp_path / "work"), str(vcf))
+    entries = analysis._perform_targeted_pileup(
+        str(bam), {"chromosome": "chr1", "start": 0, "end": 50}
+    )
+    return {entry["position"]: entry for entry in entries}
+
+
+def test_pileup_reference_is_the_most_common_base(tmp_path):
+    # Every read carries C here, so the pileup's reference must be C, not the
+    # letter that happens to sort highest.
+    entry = _pileup(tmp_path, [REF_READ] * 20)[11]
+    assert entry["reference"] == "C"
+    assert entry["coverage"] == 20
+    assert entry["variant_alleles"] == []
+    assert entry["has_variants"] is False
+
+
+def test_insertion_site_on_reference_reads_needs_review(tmp_path):
+    # C>CA on reads that all show C: the reference base matches, so the site is
+    # one LGA can't call, not a position mismatch.
+    _, data = _analyse(tmp_path, [REF_READ] * 20, sites=[(11, "C", "CA")])
+    variant = data["genes"]["TEST"]["variants"][0]
+    assert variant["evidence_analysis"]["evidence_level"] == "insertion_requires_review"
+    assert variant["needs_review"] is True
+    assert data["genes"]["TEST"]["summary"]["pathogenic_status"] == "insufficient_evidence"
+
+
+def test_column_where_every_read_is_deleted_is_piled_up(tmp_path):
+    # 10M1D39M deletes 1-based position 11 in every read, so that column has no
+    # base counts at all. It must still be reported, not abort the pileup.
+    by_position = _pileup(tmp_path, [(0, "C" * 49, "10M1D39M")] * 20)
+    assert 11 in by_position
+    entry = by_position[11]
+    assert entry["base_counts"]["indel"] == 20
+    assert entry["coverage"] == 0
+    assert entry["reference"] in ("A", "T", "G", "C", "N")
+    assert entry["variant_alleles"] == []
+    assert entry["has_variants"] is False

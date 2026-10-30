@@ -8,7 +8,11 @@ CONTIG_LENGTH = 1000
 
 
 def write_bam(path, reads):
-    """Write an indexed BAM on chr1. ``reads`` is a list of ``(start, sequence)``."""
+    """Write an indexed BAM on chr1.
+
+    ``reads`` is a list of ``(start, sequence)``, or ``(start, sequence, cigarstring)``
+    when the read needs a CIGAR other than the default all-match ``<length>M``.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     header = {
@@ -16,13 +20,15 @@ def write_bam(path, reads):
         "SQ": [{"SN": "chr1", "LN": CONTIG_LENGTH}],
     }
     with pysam.AlignmentFile(str(path), "wb", header=header) as bam:
-        for i, (start, sequence) in enumerate(sorted(reads, key=lambda r: r[0])):
+        for i, spec in enumerate(sorted(reads, key=lambda r: r[0])):
+            start, sequence = spec[0], spec[1]
+            cigarstring = spec[2] if len(spec) > 2 else f"{len(sequence)}M"
             read = pysam.AlignedSegment(bam.header)
             read.query_name = f"read{i}"
             read.reference_id = 0
             read.reference_start = start
             read.query_sequence = sequence
-            read.cigarstring = f"{len(sequence)}M"
+            read.cigarstring = cigarstring
             read.query_qualities = pysam.qualitystring_to_array("?" * len(sequence))
             read.mapping_quality = 60
             bam.write(read)

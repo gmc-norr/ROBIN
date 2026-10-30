@@ -32,6 +32,6 @@ touches:
 
 ## Watch out
 - len(ref) != len(alt) is not the only uncallable case: CC>TT is same-length and a one-base pileup can't call it.
-- The pileup's "reference" field is always "T" (max over (base, count) tuples compares letters). Don't trust it.
+- The pileup's "reference" field is the most common base (max(..., key=lambda kv: kv[1]) over base_counts minus "indel"); it is a guess from the reads, not the reference genome. It used to be always "T" because max over (base, count) tuples compared letters.
 - reviews/2026-10-16-repro/independent/reproduce.py copies in only the functions it names; when LGA gains a helper, add it to the names lists or the tests NameError instead of showing the fix.
 - tests/lga_fixtures.py writes tiny indexed BAMs, ClinVar VCFs and BEDs; keep ClinVar POS off the BED start.
