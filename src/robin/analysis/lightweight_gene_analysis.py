@@ -1681,6 +1681,30 @@ def lga_results_belong_to_sample(json_path: str, sample_folder: str) -> bool:
     return os.path.commonpath([folder, bam]) == folder
 
 
+def pick_lga_results(
+    candidates: list[str], sample_folder: str
+) -> tuple[Optional[str], bool]:
+    """Return the first results file that can be shown, and whether any is stale.
+
+    ``candidates`` are the paths a results file may live at, best location
+    first. The first one that exists *and* proves it used this sample's own BAM
+    is returned; a file that exists but can't prove that is skipped, so one old
+    untrusted file can never hide a fresh trusted one.
+
+    Returns ``(path, False)`` when a trusted file is found, ``(None, True)``
+    when at least one candidate exists but none is trusted, and
+    ``(None, False)`` when none exists.
+    """
+    found_untrusted = False
+    for candidate in candidates:
+        if not os.path.exists(candidate):
+            continue
+        if lga_results_belong_to_sample(candidate, sample_folder):
+            return candidate, False
+        found_untrusted = True
+    return None, found_untrusted
+
+
 def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> None:
     """
     Workflow handler for lightweight gene analysis.

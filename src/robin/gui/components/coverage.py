@@ -4818,31 +4818,31 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         )
 
                         from robin.analysis.lightweight_gene_analysis import (
-                            lga_results_belong_to_sample,
+                            pick_lga_results,
                         )
 
-                        found = next(
-                            (p for p in (json_report, json_report_fallback) if p.exists()),
-                            None,
+                        # The first file we can prove is this sample's, not just
+                        # the first that exists (VAR-9 follow-up).
+                        found, found_untrusted = pick_lga_results(
+                            [str(json_report), str(json_report_fallback)],
+                            str(sample_dir),
                         )
-                        if found is not None and not lga_results_belong_to_sample(
-                            str(found), str(sample_dir)
-                        ):
+                        if found == str(json_report):
+                            lga_results_status.set_text(
+                                "Lightweight variant analysis completed successfully!"
+                            )
+                            _display_lga_results(json_report)
+                        elif found == str(json_report_fallback):
+                            lga_results_status.set_text(
+                                "Lightweight variant analysis completed successfully! (legacy location)"
+                            )
+                            _display_lga_results(json_report_fallback)
+                        elif found_untrusted:
                             # Older versions could use another sample's BAM (VAR-9)
                             lga_results_status.set_text(
                                 "Old variant results can't be confirmed as this "
                                 "sample's. Run the variant analysis again."
                             )
-                        elif found == json_report:
-                            lga_results_status.set_text(
-                                "Lightweight variant analysis completed successfully!"
-                            )
-                            _display_lga_results(json_report)
-                        elif found == json_report_fallback:
-                            lga_results_status.set_text(
-                                "Lightweight variant analysis completed successfully! (legacy location)"
-                            )
-                            _display_lga_results(json_report_fallback)
                         else:
                             lga_results_status.set_text(
                                 "No lightweight variant analysis results found"
@@ -6116,6 +6116,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 lga_analysis_button.enable()
                                 lga_analysis_button.set_text("Rerun Variant Analysis")
                                 lga_analysis_button.props("color=secondary")
+                                # Show what the run just wrote, without a reload
+                                _check_lga_results()
                             except Exception as e:
                                 print(f" Error updating UI: {e}")
                             return False  # Stop checking

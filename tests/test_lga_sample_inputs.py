@@ -9,6 +9,7 @@ from lga_fixtures import write_bam, write_bed, write_clinvar
 from robin.analysis.lightweight_gene_analysis import (
     lga_results_belong_to_sample,
     lightweight_gene_analysis_handler,
+    pick_lga_results,
     resolve_sample_folder,
 )
 
@@ -166,3 +167,49 @@ def test_unreadable_results_are_not_trusted(tmp_path):
     results.parent.mkdir(parents=True)
     results.write_text("{not json")
     assert lga_results_belong_to_sample(str(results), str(tmp_path / "A")) is False
+
+
+# The GUI must show the first results file it can trust, not the first that exists.
+
+
+def test_pick_lga_results_skips_an_untrusted_candidate_for_a_trusted_one(tmp_path):
+    root = tmp_path / "root"
+    sample = root / "A"
+    untrusted = _results_file(
+        sample / "A" / RESULTS, {"input_bam": str(root / "B" / "igv" / "igv_ready.bam")}
+    )
+    trusted = _results_file(
+        sample / RESULTS, {"input_bam": str(sample / "igv" / "igv_ready.bam")}
+    )
+    assert pick_lga_results([str(untrusted), str(trusted)], str(sample)) == (
+        str(trusted),
+        False,
+    )
+
+
+def test_pick_lga_results_reports_untrusted_when_no_candidate_is_trusted(tmp_path):
+    sample = tmp_path / "root" / "A"
+    untrusted = _results_file(
+        sample / "A" / RESULTS, {"analysis_type": "lightweight_gene_analysis"}
+    )
+    assert pick_lga_results([str(untrusted), str(sample / RESULTS)], str(sample)) == (
+        None,
+        True,
+    )
+
+
+def test_pick_lga_results_finds_nothing_when_no_candidate_exists(tmp_path):
+    sample = tmp_path / "root" / "A"
+    candidates = [str(sample / "A" / RESULTS), str(sample / RESULTS)]
+    assert pick_lga_results(candidates, str(sample)) == (None, False)
+
+
+def test_pick_lga_results_keeps_the_first_of_two_trusted_candidates(tmp_path):
+    sample = tmp_path / "root" / "A"
+    bam = str(sample / "igv" / "igv_ready.bam")
+    first = _results_file(sample / "A" / RESULTS, {"input_bam": bam})
+    _results_file(sample / RESULTS, {"input_bam": bam})
+    assert pick_lga_results([str(first), str(sample / RESULTS)], str(sample)) == (
+        str(first),
+        False,
+    )
