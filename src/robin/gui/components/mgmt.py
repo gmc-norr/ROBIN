@@ -718,7 +718,7 @@ def add_mgmt_section(launcher: Any, sample_dir: Path) -> None:
         immediate=True,
     )
     try:
-        ui.context.client.on_disconnect(
+        ui.context.client.on_delete(
             lambda: (refresh_timer.deactivate(), unregister_mgmt_theme_sync())
         )
     except Exception:

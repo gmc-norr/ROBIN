@@ -5148,7 +5148,7 @@ class GUILauncher:
                     try:
                         refresh_timer = ui.timer(30.0, _refresh_sample_detail_async)
                         try:
-                            ui.context.client.on_disconnect(
+                            ui.context.client.on_delete(
                                 lambda: refresh_timer.deactivate()
                             )
                         except Exception:

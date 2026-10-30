@@ -349,7 +349,7 @@ def add_summary_section(sample_dir: Path, sample_id: str, launcher: Any = None) 
         30.0, _refresh_summary_cache_async, active=True, immediate=False
     )
     try:
-        ui.context.client.on_disconnect(lambda: refresh_timer.deactivate())
+        ui.context.client.on_delete(lambda: refresh_timer.deactivate())
     except Exception:
         pass
 

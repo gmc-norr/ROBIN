@@ -2464,7 +2464,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         immediate=True,
     )
     try:
-        ui.context.client.on_disconnect(
+        ui.context.client.on_delete(
             lambda: (refresh_timer.deactivate(), unregister_cnv_theme_sync())
         )
     except Exception:

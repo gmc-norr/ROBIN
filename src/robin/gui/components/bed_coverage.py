@@ -453,7 +453,7 @@ def add_bed_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
     refresh_timer = ui.timer(30.0, refresh_coverage, active=True)
     try:
-        ui.context.client.on_disconnect(
+        ui.context.client.on_delete(
             lambda: (
                 result_timer.deactivate(),
                 refresh_timer.deactivate(),

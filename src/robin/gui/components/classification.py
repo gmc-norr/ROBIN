@@ -1081,7 +1081,7 @@ def add_classification_section(sample_dir: Path, launcher: Any = None) -> None:
     # Initial refresh after the page is rendered
     ui.timer(0.5, _refresh_classification, once=True)
     try:
-        ui.context.client.on_disconnect(
+        ui.context.client.on_delete(
             lambda: (refresh_timer.deactivate(), unregister_classification_theme_sync())
         )
     except Exception:

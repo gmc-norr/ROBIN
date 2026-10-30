@@ -857,6 +857,6 @@ def add_mnpflex_section(launcher: Any, sample_dir: Path, sample_id: str) -> None
         refresh_timer = ui.timer(30.0, _poll_status, active=True, immediate=False)
         ui.timer(0.5, _poll_status, once=True)
         try:
-            ui.context.client.on_disconnect(lambda: refresh_timer.deactivate())
+            ui.context.client.on_delete(lambda: refresh_timer.deactivate())
         except Exception:
             pass
