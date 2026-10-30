@@ -50,7 +50,7 @@ The independent review's suite (IR-01 to IR-11) is in [`independent/`](independe
 | `gui/test_mgmt_shared_state.py` | GUI-3: second viewer misses updates | |
 | `gui/test_summary_cnv.py` | GUI-4 (counter shown as gains), GUI-7, GUI-9 | ✓ |
 | `gui/time_fusion_validate.py`, `time_tostring.py` | PERF-1: fusion refresh cost | |
-| `reporting/rf_conf.py` | REP-1: wrong Random Forest cut-offs | ✓ |
+| _(retired)_ `reporting/rf_conf.py` | REP-1: wrong Random Forest cut-offs — **fixed**, replaced by `tests/test_classifier_config_keys.py` | ✓ |
 | `reporting/patho.py` | VAR-2 (report side) | ✓ |
 | `reporting/cyto.py`, `cyto2.py` | REP-2: old ±1 SD rule | ✓ (`cyto.py`) |
 | `reporting/fusion_logic.py` | REP-3 (weakest cluster), REP-4 (hyphenated genes) | |

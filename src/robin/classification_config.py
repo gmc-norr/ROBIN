@@ -31,12 +31,55 @@ CLASSIFIER_CONFIDENCE_THRESHOLDS: Dict[str, Dict[str, float]] = {
     },
 }
 
+# Human-facing classifier names (as shown in the GUI and the PDF report) mapped to
+# their CLASSIFIER_CONFIDENCE_THRESHOLDS keys. Lowercasing a display name is NOT
+# enough: "Random Forest".lower() is "random forest", not "random_forest", so the
+# report used to score Random Forest against the default 80/50 band instead of its
+# own 85/65 one. Go through config_key_for_classifier() instead.
+CLASSIFIER_DISPLAY_NAMES: Dict[str, str] = {
+    "Sturgeon": "sturgeon",
+    "NanoDX": "nanodx",
+    "PanNanoDX": "pannanodx",
+    "Random Forest": "random_forest",
+}
+
 # Default thresholds (fallback)
 DEFAULT_CONFIDENCE_THRESHOLDS = {
     "high": 80.0,
     "medium": 50.0,
     "low": 20.0,
 }
+
+
+def config_key_for_classifier(display_name: str) -> str:
+    """
+    Resolve a classifier's display name to its confidence-threshold config key.
+
+    Matching ignores case and surrounding whitespace, so "Random Forest",
+    "random forest" and "  RANDOM FOREST " all resolve to "random_forest".
+
+    Args:
+        display_name: Human-facing classifier name, e.g. 'Random Forest'
+
+    Returns:
+        The matching CLASSIFIER_CONFIDENCE_THRESHOLDS key
+
+    Raises:
+        ValueError: if the name is not a known classifier. Callers that
+            deliberately pass non-classifier keys (the summary page's section
+            anchors, for instance) must not use this function; they rely on
+            DEFAULT_CONFIDENCE_THRESHOLDS as a fallback instead.
+    """
+    normalized = display_name.strip().lower()
+    for display, config_key in CLASSIFIER_DISPLAY_NAMES.items():
+        if display.lower() == normalized:
+            return config_key
+
+    known = ", ".join(repr(name) for name in CLASSIFIER_DISPLAY_NAMES)
+    raise ValueError(
+        f"Unknown classifier {display_name!r}; known classifiers are: {known}"
+    )
+
 
 def get_confidence_level(classifier: str, confidence: float) -> str:
     """

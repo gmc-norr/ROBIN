@@ -22,7 +22,10 @@ import matplotlib.ticker as mticker
 import seaborn as sns
 import io
 
-from robin.classification_config import get_confidence_status
+from robin.classification_config import (
+    config_key_for_classifier,
+    get_confidence_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -395,8 +398,13 @@ class ClassificationSection(ReportSection):
                         else raw_confidence
                     )
 
-                    # Determine confidence level based on classifier using centralized config
-                    confidence_status, status_color = get_confidence_status(name.lower(), confidence_value)
+                    # Determine confidence level based on classifier using centralized
+                    # config. The display name must be resolved to the config key:
+                    # "Random Forest".lower() is not "random_forest", and falling back
+                    # to the default band would score it 80/50 instead of 85/65.
+                    confidence_status, status_color = get_confidence_status(
+                        config_key_for_classifier(name), confidence_value
+                    )
 
                     # Add to summary table with HTML-like color formatting
                     summary_data.append(
