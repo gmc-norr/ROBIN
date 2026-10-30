@@ -6,6 +6,13 @@ the watched folder, though, so it must never become shell code. It is never
 pasted into the command text: ``{file}`` becomes a reference to the
 ``ROBIN_FILE`` environment variable, and the shell never runs what a variable
 holds.
+
+Limit: this protects the shell Robin starts. A template that hands text to a
+second interpreter (``sh -c "... {file}"``, ``bash -c``, ``eval``,
+``ssh host "... {file}"``, ``xargs sh -c``) gives it the expanded file name,
+and that interpreter parses it again. In such templates use
+``"$ROBIN_FILE"`` inside the inner command instead of ``{file}``; it is
+exported to the command's environment.
 """
 
 import os

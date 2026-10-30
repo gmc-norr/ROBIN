@@ -10,7 +10,7 @@ and this project (almost) adheres to [Semantic Versioning](https://semver.org/sp
 ### Security
 - **Ray dashboard (SEC-1):** off by default, and on `127.0.0.1` when turned on with `--ray-dashboard` (set `RAY_DASHBOARD_HOST` to bind elsewhere). Its Jobs API runs any command it is sent and has no login; it used to listen on `0.0.0.0`. `--no-ray-dashboard` now really turns it off: Ray's own default started it anyway. `workflow_ray` gains `--ray-dashboard/--no-ray-dashboard` in place of `--no-ray-dashboard`.
 - **MGMT R script (SEC-8):** runs `Rscript` with an argument list, not a shell string, so a sample folder name can't run commands.
-- **Command templates (SEC-9):** in `--commands` templates and the file watcher's command, `{file}` reaches the shell as data (`$ROBIN_FILE`), so a watched file's name can't run commands.
+- **Command templates (SEC-9):** in `--commands` templates and the file watcher's command, `{file}` reaches the shell as data (`$ROBIN_FILE`), so a watched file's name can't run commands in that shell. Templates that start a second interpreter (`sh -c "… {file}"`, `eval`, `ssh host "… {file}"`) still re-parse the name there; use `"$ROBIN_FILE"` inside the inner command instead. Stored command results now show `${ROBIN_FILE}` in place of the path.
 
 ### Fixed
 - **NiceGUI storage race:** Ray workers get their own empty NiceGUI storage folder, which ends the `FileNotFoundError … storage-general.json.tmp` errors.

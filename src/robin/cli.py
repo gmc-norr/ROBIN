@@ -2170,7 +2170,11 @@ def _display_workflow_config(
     "--commands",
     "-c",
     multiple=True,
-    help="Command mappings (e.g., 'index:samtools index {file}')",
+    help=(
+        "Command mappings (e.g., 'index:samtools index {file}'). {file} is passed "
+        "safely to this shell command. Inside a nested 'sh -c', 'eval' or 'ssh' "
+        "command, use \"$ROBIN_FILE\" instead of {file}."
+    ),
 )
 @click.option(
     "--verbose",
