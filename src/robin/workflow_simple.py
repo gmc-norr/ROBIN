@@ -1752,13 +1752,17 @@ def command_handler(job: Job, command_template: str) -> None:
     """Handler that runs shell commands."""
     import subprocess
 
+    from robin.command_template import run_file_command, shell_command_for_file
+
     ctx = job.context
-    command = command_template.replace("{file}", ctx.filepath)
+    command = shell_command_for_file(command_template)
 
     try:
-        result = subprocess.run(
-            command,
-            shell=True,
+        # The template is the operator's own shell command, so it runs in a
+        # shell; {file} reaches it as data, never as shell code.
+        result = run_file_command(
+            command_template,
+            ctx.filepath,
             capture_output=True,
             text=True,
             timeout=30,

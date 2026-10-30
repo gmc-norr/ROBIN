@@ -10,6 +10,8 @@ from watchdog.events import FileSystemEventHandler, FileSystemEvent
 from watchdog.observers import Observer
 from tqdm import tqdm
 
+from robin.command_template import run_file_command
+
 
 class FileChangeHandler(FileSystemEventHandler):
     """Handler for file system events."""
@@ -112,15 +114,14 @@ class FileChangeHandler(FileSystemEventHandler):
             file_path: Path to the changed file
         """
         try:
-            # Replace {file} placeholder with the actual file path
-            cmd = self.command.replace("{file}", file_path)
-
             if self.verbose:
-                print(f"Running command: {cmd}")
+                print(f"Running command: {self.command} (file: {file_path})")
 
-            result = subprocess.run(
-                cmd,
-                shell=True,
+            # The template is the operator's own shell command, so it runs in a
+            # shell; {file} reaches it as data, never as shell code.
+            result = run_file_command(
+                self.command,
+                file_path,
                 capture_output=True,
                 text=True,
                 timeout=30,
