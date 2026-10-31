@@ -162,6 +162,22 @@ def test_the_subprocess_script_reference_is_the_control_alone(tmp_path, as_array
     assert result["r2_cnv"] == reference_cnv_profile(control, result["r_bin"])
 
 
+def test_a_batch_counts_each_bam_once(tmp_path, cached_control):
+    # CNV-3: after the loop had added every BAM, a "final" call added the
+    # last one again, and the saved counts kept it twice.
+    first = write_bam(str(tmp_path / "1.bam"), CONTIGS, {"chr1": list(range(0, 300_000, 1000))})
+    second = write_bam(str(tmp_path / "2.bam"), CONTIGS, {"chr2": list(range(0, 200_000, 1000))})
+    cached_control["control"] = flat_control(CONTIGS, 1)
+    bams = [first, second]
+    result = cnv_analysis.process_multiple_bams(
+        bams, [bam_metadata("S", b) for b in bams], str(tmp_path / "run"), LOG, threads=1
+    )
+    assert result["error_message"] is None, result
+    with open(tmp_path / "run" / "S" / "S_copy_numbers.pkl", "rb") as f:
+        counts = pickle.load(f)
+    assert {name: sum(bins) for name, bins in counts.items()} == {"chr1": 300, "chr2": 200}
+
+
 def test_a_contig_only_the_sample_has_is_skipped(tmp_path, cached_control):
     contigs = dict(CONTIGS, chrUn=100_000)
     bam = write_bam(str(tmp_path / "s.bam"), contigs, {c: every_kb(n) for c, n in contigs.items()})

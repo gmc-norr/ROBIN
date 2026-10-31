@@ -1618,49 +1618,13 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2,
                 
                 # Update copy_numbers for next iteration
                 copy_numbers = updated_copy_numbers
-                
+
                 logger.info(f"Completed BAM file {i+1}/{len(valid_bam_paths)}: {os.path.basename(bam_path)}")
 
-            # After processing all BAM files, get the final aggregated results
-            # We need to run one final analysis to get the aggregated CNV data
-            logger.info("Generating final aggregated CNV results...")
-            
-            # Use the last BAM file to generate final results (copy_numbers now contains aggregated data)
-            final_bam_path = valid_bam_paths[-1]
-            
-            if USE_CNV_SUBPROCESS:
-                # For subprocess mode, we need to run one more analysis to get final results
-                final_result = run_cnv_analysis_subprocess(
-                    final_bam_path,
-                    {},
-                    ref_cnv_path,
-                    temp_dir,
-                    logger,
-                    threads=threads,
-                    mapq_filter=60,
-                    sample_id=sample_id,
-                    copy_numbers_path=copy_numbers_path,
-                    timeout=adaptive_timeout,
-                )
-            else:
-                # For direct mode, run one final analysis to get aggregated results
-                final_result = run_cnv_analysis_direct(
-                    final_bam_path,
-                    copy_numbers,  # This now contains aggregated data from all BAM files
-                    ref_cnv_dict_loaded,
-                    logger,
-                    threads=threads,
-                    mapq_filter=60,
-                    sample_id=sample_id,
-                )
-
-            if final_result is None or not final_result.get("success", False):
-                error_msg = (
-                    final_result.get("error", "Unknown error")
-                    if final_result
-                    else "Final analysis failed"
-                )
-                raise RuntimeError(f"Final CNV analysis failed: {error_msg}")
+            # The last BAM's result already covers every BAM: each call adds
+            # its BAM into copy_numbers and profiles the total. Running the
+            # last BAM again would count it twice, for good (CNV-3).
+            final_result = subprocess_result
 
             # Extract final aggregated results
             r_cnv = final_result["r_cnv"]
