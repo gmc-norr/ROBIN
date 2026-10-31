@@ -942,6 +942,33 @@ def generate_bed_files(bed_dir, analysis_counter, breakpoints, cnv_data, bin_wid
         logger.error(f"Error generating BED files: {e}")
 
 
+def _atomic_np_save(path: str, arr) -> None:
+    """``np.save`` to ``path`` whole or not at all: a temp file, then a rename.
+
+    The GUI reads these arrays while runs write them, and ``np.save`` in place
+    let it see half a file; a failed write also destroyed the last good one.
+    """
+    import tempfile
+
+    fd, tmp_path = tempfile.mkstemp(
+        dir=os.path.dirname(os.path.abspath(path)),
+        prefix=os.path.basename(path) + ".",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            np.save(f, arr)  # a file object: np.save adds no ".npy"
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def save_cnv_files(
     sample_dir,
     analysis_counter,
@@ -974,10 +1001,11 @@ def save_cnv_files(
         logger: Logger instance
     """
     try:
-        # Save CNV data files as specified in documentation
-        np.save(os.path.join(sample_dir, "CNV.npy"), r_cnv)
-        np.save(os.path.join(sample_dir, "CNV2.npy"), r2_cnv)
-        np.save(os.path.join(sample_dir, "CNV3.npy"), result3_cnv)
+        # Save CNV data files as specified in documentation. Each is written
+        # whole or not at all (the GUI reads them while runs write them).
+        _atomic_np_save(os.path.join(sample_dir, "CNV.npy"), r_cnv)
+        _atomic_np_save(os.path.join(sample_dir, "CNV2.npy"), r2_cnv)
+        _atomic_np_save(os.path.join(sample_dir, "CNV3.npy"), result3_cnv)
 
         # Save processing metadata
         cnv_dict = {
@@ -985,7 +1013,7 @@ def save_cnv_files(
             "variance": variance,
             "analysis_counter": analysis_counter,
         }
-        np.save(os.path.join(sample_dir, "CNV_dict.npy"), cnv_dict)
+        _atomic_np_save(os.path.join(sample_dir, "CNV_dict.npy"), cnv_dict)
 
         # Save breakpoint data as structured array. An empty one when there
         # are none, so the GUI never shows the previous run's breakpoints.
@@ -995,7 +1023,7 @@ def save_cnv_files(
                 [(bp["chromosome"], bp["start"], bp["end"]) for bp in breakpoints],
                 dtype=[("name", "U10"), ("start", "i8"), ("end", "i8")],
             )
-            np.save(os.path.join(sample_dir, "cnv_data_array.npy"), breakpoint_array)
+            _atomic_np_save(os.path.join(sample_dir, "cnv_data_array.npy"), breakpoint_array)
 
         # Helper for atomic pickle writes to avoid readers seeing partial files
         def _atomic_pickle_dump(obj, target_path: str) -> None:
