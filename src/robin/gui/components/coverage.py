@@ -5011,49 +5011,15 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                 # Function to hide results and restore original view
                 def _hide_lga_results():
-                    """Hide the inline results and restore the original simple view"""
-                    try:
-                        print(" GUI: Hiding results...")
+                    """Hide the inline results and show the summary view again.
 
-                        # Clear the results container
-                        lga_results_container.clear()
-
-                        # Restore the original simple view
-                        with lga_results_container:
-                            with ui.row().classes("w-full gap-3"):
-                                with ui.card().classes("flex-1"):
-                                    ui.label("JSON Results").classes("text-sm font-medium")
-                                    ui.label("Available").classes("text-xs text-green-600")
-
-                                with ui.card().classes("flex-1"):
-                                    ui.label("Analysis Complete").classes(
-                                        "text-sm font-medium"
-                                    )
-                                    ui.label("Ready to view").classes(
-                                        "text-xs text-green-600"
-                                    )
-
-                            # Add view results button
-                            with ui.row().classes("w-full mt-4"):
-                                ui.button(
-                                    "View Analysis Results",
-                                    icon="analytics",
-                                    on_click=lambda: _view_lga_json_results_inline(
-                                        str(
-                                            Path(sample_dir)
-                                            / sample_dir.name
-                                            / "lightweight_gene_analysis_results.json"
-                                        )
-                                    ),
-                                ).classes("flex-1")
-
-                        print(" GUI: Results hidden successfully")
-
-                    except Exception as e:
-                        print(f" GUI: Error hiding results: {e}")
-                        import traceback
-
-                        traceback.print_exc()
+                    Re-run the check instead of rebuilding the view here: the
+                    panel may be showing the legacy file, and only the check
+                    knows which file it trusts now. A hard-coded path made
+                    "View" point at a missing or untrusted file.
+                    _check_lga_results catches its own errors.
+                    """
+                    _check_lga_results()
 
                 # Helper functions for displaying JSON results
                 def _display_gene_overview(data):
