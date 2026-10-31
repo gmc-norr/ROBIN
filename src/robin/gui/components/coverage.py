@@ -5678,6 +5678,23 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                                 f"{summary.get('low_coverage_variants', 0)}"
                                             ).classes("text-2xl font-bold text-orange-600")
 
+                                        # Why a gene may read "insufficient
+                                        # evidence": sites never looked at
+                                        for key, caption in (
+                                            ("sites_without_reads", "Sites without reads"),
+                                            ("sites_pileup_failed", "Sites not analysed (pileup failed)"),
+                                        ):
+                                            if summary.get(key, 0) > 0:
+                                                with ui.row().classes(
+                                                    "w-full items-center justify-between p-3 bg-yellow-50 rounded"
+                                                ):
+                                                    ui.label(caption).classes(
+                                                        "text-base font-medium text-gray-700"
+                                                    )
+                                                    ui.label(f"{summary[key]}").classes(
+                                                        "text-2xl font-bold text-yellow-700"
+                                                    )
+
                                 # Variants table
                                 if variants:
                                     ui.label("Variant Details").classes(

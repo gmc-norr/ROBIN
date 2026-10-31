@@ -48,6 +48,16 @@ def test_results_from_either_location_are_not_called_legacy():
     assert not [s for s in strings if "legacy" in s.lower()]
 
 
+def test_the_gene_details_show_the_unread_site_counts():
+    """A gene that reads "insufficient evidence" because sites had no reads
+    (or the pileup failed) must say so where its review rows are listed."""
+    details = _function("_display_gene_details")
+    strings = {
+        n.value for n in ast.walk(details) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    }
+    assert {"sites_without_reads", "sites_pileup_failed"} <= strings
+
+
 def test_hide_does_not_name_a_results_file_itself():
     hide = _function("_hide_lga_results")
     strings = [
