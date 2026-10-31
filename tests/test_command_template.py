@@ -51,7 +51,7 @@ def test_filename_with_shell_syntax_does_not_run(tmp_path, template):
 
 def test_filename_does_not_run_inside_command_substitution(tmp_path):
     # Inside "$(...)" the shell starts a new quoting context. Nothing in the
-    # name runs there (an unquoted {file} there may still split into words).
+    # name runs there, and {file} is quoted for that context, so it stays whole.
     path = str(tmp_path / HOSTILE)
     _printed_args("printf '%s\\n' \"$(printf '%s ' {file})\"", path, tmp_path)
     assert not (tmp_path / "MARKER").exists()

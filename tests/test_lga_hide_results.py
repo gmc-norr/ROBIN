@@ -37,6 +37,17 @@ def test_hide_re_runs_the_results_check():
     assert "_check_lga_results" in calls
 
 
+def test_results_from_either_location_are_not_called_legacy():
+    """Both result locations are current (a run given the monitored root writes
+    the flat one), so neither may be captioned "(legacy location)" (batch 3c
+    final review, Important 1)."""
+    check = _function("_check_lga_results")
+    strings = [
+        n.value for n in ast.walk(check) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    ]
+    assert not [s for s in strings if "legacy" in s.lower()]
+
+
 def test_hide_does_not_name_a_results_file_itself():
     hide = _function("_hide_lga_results")
     strings = [

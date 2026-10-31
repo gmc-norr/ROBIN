@@ -4803,17 +4803,17 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                 # Function to check and display lightweight gene analysis results
                 def _check_lga_results():
                     try:
-                        # Check for JSON results file in the correct location
-                        # The JSON file is written to {sample_dir}/{sample_id}/lightweight_gene_analysis_results.json
+                        # Results live in one of two current places: a run
+                        # given this sample folder writes
+                        # {sample_dir}/{sample_id}/, a run given the monitored
+                        # root writes {sample_dir}/ itself.
                         sample_id = sample_dir.name
                         json_report = (
                             sample_dir
                             / sample_id
                             / "lightweight_gene_analysis_results.json"
                         )
-
-                        # Also check the old location as fallback
-                        json_report_fallback = (
+                        json_report_flat = (
                             sample_dir / "lightweight_gene_analysis_results.json"
                         )
 
@@ -4821,22 +4821,17 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             pick_lga_results,
                         )
 
-                        # The first file we can prove is this sample's, not just
-                        # the first that exists (VAR-9 follow-up).
+                        # The newest file we can prove is this sample's, not
+                        # just the first that exists (VAR-9 follow-ups).
                         found, found_untrusted = pick_lga_results(
-                            [str(json_report), str(json_report_fallback)],
+                            [str(json_report), str(json_report_flat)],
                             str(sample_dir),
                         )
-                        if found == str(json_report):
+                        if found:
                             lga_results_status.set_text(
                                 "Lightweight variant analysis completed successfully!"
                             )
-                            _display_lga_results(json_report)
-                        elif found == str(json_report_fallback):
-                            lga_results_status.set_text(
-                                "Lightweight variant analysis completed successfully! (legacy location)"
-                            )
-                            _display_lga_results(json_report_fallback)
+                            _display_lga_results(found)
                         elif found_untrusted:
                             # Older versions could use another sample's BAM (VAR-9)
                             # Drop any earlier render: a results panel must never
