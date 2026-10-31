@@ -89,3 +89,26 @@
 ### Task 6: Result and records
 - Run the full comparison; commit `result: … — supported / refuted` with its output.
 - CHANGELOG; review Status lines for METH-1..6, 13, 14 and the fork table; v0.5 note; a learning; plan Outcome; `trail check`.
+
+## Result (2026-11-01, on `1c6c65f`): supported
+
+Every locked rule passes. modkit 0.6.4 against ROBIN at each panel CpG of the fixture (n_mod, n_canonical, valid_cov, percent):
+
+| CpG | modkit (combined strands) | ROBIN, 1 batch | 2 and 4 batches |
+|---|---|---|---|
+| 500 | 8, 6, 14, 57.14 | 8, 6, 14, 57.142857 | identical |
+| 900 | 7, 7, 14, 50.00 | 7, 7, 14, 50.0 | identical |
+| 1700 | 3, 8, 11, 27.27 | 3, 8, 11, 27.272728 | identical |
+| 2100 | 8, 3, 11, 72.73 | 8, 3, 11, 72.727272 | identical |
+| 2500 | 6, 7, 13, 46.15 | 6, 7, 13, 46.153847 | identical |
+| 2502 | 4, 9, 13, 30.77 | 4, 9, 13, 30.769230 | identical |
+
+Same CpG set (1300 is off the panel, as intended). Rules 1-5: `test_the_cumulative_parquet_matches_modkit[1,2,4]`, `test_splitting_into_batches_changes_nothing`. Rule 6: the four `test_meth_consumers.py` tests. Rule 7: `test_the_mgmt_bed_matches_modkit_per_strand`. 9 passed.
+
+Gate D:
+1. *Could the pipeline have produced this?* The reference is modkit, run on the same reads by its own code; the fixture was checked by hand at CpG 500 (8 modified, 6 canonical) before any fix.
+2. *Does the control tell working from broken?* All 9 tests fail on `2f29cf7`'s code; each fix undone alone in a scratch copy (implicit calls, supplementary counted, fails in coverage, panel shift, panel cache name, no dedupe, no strand shift, existing file ignored, first write unsummed) fails a test.
+3. *Measured or inferred?* Measured: the table above and the test run.
+4. *Fresh output:* in this commit's message.
+
+Two facts found on the way, and one rule test changed after seeing a result (ledgered): modkit counts a 0.45/0.45 5mC/5hmC read as a failed call (review METH-3's secondary point is refuted); modkit counts primary alignments only, so matkit now does too; the MGMT test first applied rule 4's 1e-4 percent check, which locked rule 7 doesn't include and a 2-decimal BED can't meet.
