@@ -90,6 +90,7 @@ from scipy.ndimage import uniform_filter1d
 
 import ruptures as rpt
 from robin.logging_config import get_job_logger
+from robin.analysis.cnv_reference import reference_cnv_profile
 import robin.resources as resources
 
 os.environ["CI"] = "1"
@@ -283,7 +284,9 @@ def run_cnv_analysis_direct(
     Args:
         bam_path: Path to BAM file
         copy_numbers: Copy numbers dictionary (passed directly, no file I/O)
-        ref_cnv_dict: Reference CNV dictionary (passed directly, no file I/O)
+        ref_cnv_dict: The control's read starts per 1 kb bin. Only read: its
+            profile comes from reference_cnv_profile, never from
+            iterate_bam_file, which would add this BAM's reads into it.
         logger: Logger instance
         threads: Number of threads to use
         mapq_filter: Mapping quality filter
@@ -319,17 +322,13 @@ def run_cnv_analysis_direct(
         pass1_time = time.time() - pass1_start
         logger.info(f"Pass 1 completed in {pass1_time:.2f}s (bin_width: {result.bin_width}, variance: {result.variance:.6f})")
 
-        # Second pass: process against reference using the same bin width
-        logger.debug(f"Starting Pass 2: Reference CNV extraction with {threads} threads")
+        # Second pass: the control's profile at the sample's bin width, from
+        # the control's counts alone. Never hand the control to
+        # iterate_bam_file: it adds the BAM's reads into the dict it gets,
+        # and sums chunks in 16 bits (CNV-1).
+        logger.debug("Starting Pass 2: control profile at the sample's bin width")
         pass2_start = time.time()
-        result2 = cnv_from_bam.iterate_bam_file(
-            bam_path,
-            _threads=threads,
-            mapq_filter=mapq_filter,
-            copy_numbers=ref_cnv_dict_loaded,
-            log_level=int(logging.ERROR),
-            bin_width=result.bin_width,  # Use the same bin width as the sample
-        )
+        r2_cnv = reference_cnv_profile(ref_cnv_dict_loaded, result.bin_width)
         pass2_time = time.time() - pass2_start
         logger.info(f"Pass 2 completed in {pass2_time:.2f}s")
         logger.info(f"Total CNV extraction time: {pass1_time + pass2_time:.2f}s")
@@ -341,7 +340,7 @@ def run_cnv_analysis_direct(
             "r_bin": result.bin_width,
             "r_var": result.variance,
             "genome_length": result.genome_length,
-            "r2_cnv": result2.cnv,
+            "r2_cnv": r2_cnv,
             "updated_copy_numbers": copy_numbers,  # The mutated copy_numbers
             "timing": {
                 "pass1_time": pass1_time,
