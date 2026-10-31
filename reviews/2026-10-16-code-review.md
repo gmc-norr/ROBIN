@@ -7,7 +7,8 @@
 **Updated:** 2026-10-16. The independent review's 11 findings are merged in; each keeps its original number (IR-01 to IR-11) next to its new ID. The CNV-1, GUI-1 and SEC-1 fix sizes are corrected, the status lines are up to date, and the reproduction scripts are added.\
 **Updated:** 2026-10-30. SEC-9 is added. Fixes made in our fork are listed under "This fork and the original ROBIN", and each fixed finding has a **Status** line. Batch 2 (VAR-9, VAR-8, VAR-10) is fixed too.\
 **Updated:** 2026-10-30. Batch 3, step 3's quick wins, is fixed in our fork: GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3 and VAR-7. JOB-6 is only partly fixed — the timeout constant and its configurability, not the two consequences that overlap JOB-7.\
-**Updated:** 2026-10-31. Two follow-ups from batch 3's own review are fixed in our fork: `robin add-panel` reads BED files wider than 6 columns (BED12 was saved garbled), and the variant panel's "Hide Results" keeps pointing at the file it showed.
+**Updated:** 2026-10-31. Two follow-ups from batch 3's own review are fixed in our fork: `robin add-panel` reads BED files wider than 6 columns (BED12 was saved garbled), and the variant panel's "Hide Results" keeps pointing at the file it showed.\
+**Updated:** 2026-10-31. Five findings from a review of the fix series (`reviews/2026-10-31-fix-series-review.md`) are fixed in our fork: stale CNV breakpoints after a flat run, an older LGA results file hiding a newer one, an LGA status timer that never stopped, SNV sites with no usable bases read as "None Detected", and `{file}` quoting inside `$(...)`.
 
 ## This fork and the original ROBIN
 
@@ -37,6 +38,11 @@ This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [g
 | `robin add-panel` keeps every region of a gene | VAR-7 | `1c8e95f` | Later exons and tiles stay in the panel, so coverage and SNP calling see them |
 | `robin add-panel` reads BED files wider than 6 columns, by their first 4 | Found while fixing VAR-7 | `5af0a47` | A BED12 panel is saved with its real regions. It used to be saved garbled, with "added successfully"; 7 or 8 columns failed |
 | The variant panel's "Hide Results" offers the file it showed | VAR-9 follow-up | `754741d` | After "Hide", "View" opens the trusted file again, not a hard-coded path |
+| A CNV run with no breakpoints replaces the last run's breakpoints | CNV-5 follow-up | `4032f8b` | After a flat run, old breakpoints leave the CNV plot and the master BED |
+| The newest trusted variant results file is the one shown | VAR-9 follow-up | `f3f29cd` | A fresh negative is no longer hidden by an older positive in the other results location |
+| The variant panel's status timer stops when a run ends | VAR-9 follow-up | `6acc03d` | An opened results view stays open instead of resetting every half second |
+| An SNV site with no usable bases needs review | VAR-8 follow-up | `b26c410` | Such a gene reads "insufficient evidence", not "None Detected" |
+| `{file}` inside `$(...)` is quoted for that context | SEC-9 follow-up | `ab5151b` | Templates like `"$(dirname "{file}")/x.bai"` work on paths with spaces |
 
 Every change has a regression test in `tests/`. The details are in `CHANGELOG.md` under `[Unreleased]`. Add a row here each time a fix lands.
 
@@ -267,7 +273,7 @@ Only two tests exist (added after this review), and no CI runs them.
 - **Where:** `cnv_analysis.py:574-580, 714-730`
 - **What's wrong:** ruptures always returns the series length as its last change point. That adds about 24 spurious regions to the master BED.
 - **Fix:** use `result[:-1]`.
-- **Status:** fixed in our fork (`53165ed`). `run_ruptures` drops the terminator where it is produced, so those regions leave the master BED and `breakpoints_count` falls by about 24 per run. A chromosome whose only change point is the series end now yields no region at all, and when every chromosome does, `cnv_data_array.npy` and `breakpoints_NNN.bed` are not written. Still open in the original ROBIN.
+- **Status:** fixed in our fork (`53165ed`). `run_ruptures` drops the terminator where it is produced, so those regions leave the master BED and `breakpoints_count` falls by about 24 per run. A chromosome whose only change point is the series end now yields no region at all, and when every chromosome does, `cnv_data_array.npy` and `breakpoints_NNN.bed` were not written, so the previous run's breakpoints stayed in the GUI and the master BED. Since `4032f8b` both are written empty instead. Still open in the original ROBIN.
 
 The CNV summary card and the report's CNV problems are covered in sections 6 and 7.
 
@@ -324,14 +330,14 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
 - **What's wrong:** Every covered ClinVar site in a region is counted as "found", even when its own evidence says `alternate_support=0, evidence_level="no_support"`. `export_json` then sets `pathogenic_status="present_with_good_coverage"` once coverage reaches 10 reads. The GUI's gene table and the HTML report (line 1233) show that status.
 - **Reproduced:** 20 reads with only the reference C at a pathogenic C>T site. The pileup correctly shows zero alternate reads, but the summary reports one gene with pathogenic variants.
 - **Fix:** keep "known site checked" separate from "variant supported". Base positive statuses and counts only on alternate-read evidence, and keep explicit "insufficient evidence" states.
-- **Status:** fixed in our fork (`aeb5339`): a site counts with 3 or more alternate reads; 1–2 reads, an indel or multi-base change, or reads showing neither allele give "insufficient evidence" (`e5527a3`). The unused HTML report (`generate_report`, no callers) still uses the old counting. Still open in the original ROBIN.
+- **Status:** fixed in our fork (`aeb5339`): a site counts with 3 or more alternate reads; 1–2 reads, an indel or multi-base change, or reads showing neither allele give "insufficient evidence" (`e5527a3`), and so does an SNV site with no usable bases, e.g. every read deleted there (`b26c410`). ClinVar sites with no reads at all still drop out before export. The unused HTML report (`generate_report`, no callers) still uses the old counting. Still open in the original ROBIN.
 
 **VAR-9 · critical · Confirmed (reproduced; spot-checked)**: A missing BAM for sample A falls back to sample B's BAM. *(IR-02)*
 - **Where:** `analysis/lightweight_gene_analysis.py:1562-1605, 1665-1677, 1710-1730`; called from `gui/components/coverage.py:5882-5932, 6012-6069`
 - **What's wrong:** If `<work>/A/igv/igv_ready.bam` is missing, the handler walks the whole work directory (`os.walk`) and takes the first `igv_ready.bam` it finds, from any sample. It then saves the result under A. The BED fallback searches the same way. The GUI enables the action based on A's `target.bam`, so this is reachable from the GUI.
 - **Reproduced:** A has a reference-only BAM but no IGV BAM; B's IGV BAM has 20 alternate reads. A's results file contains B's 20 alternate reads.
 - **Fix:** resolve the sample folder once and look only inside it. A missing input must give an explicit "not available" result. Record which BAM was used in the result.
-- **Status:** fixed in our fork (`b9ffef8`, `d0e1975`). A missing input raises an error naming the expected path, which the GUI shows; results record `input_bam` and `input_bed`; older results files are not shown. Still open in the original ROBIN.
+- **Status:** fixed in our fork (`b9ffef8`, `d0e1975`). A missing input raises an error naming the expected path, which the GUI shows; results record `input_bam` and `input_bed`; older results files are not shown. When both result locations hold a trusted file, the newer one is shown (`f3f29cd`), and the panel's status timer stops when a run ends (`6acc03d`). Still open in the original ROBIN.
 
 **VAR-10 · medium · Confirmed (reproduced)**: Several BED intervals with the same name are reduced to the first one. *(IR-09)*
 - **Where:** `analysis/lightweight_gene_analysis.py:656-671, 676-698`
@@ -642,7 +648,7 @@ This is why "Error processing file" showed up in the backend log but never in th
 - **What's wrong:** Both do `template.replace("{file}", path)` and run the result with `shell=True`. The template is the operator's own command, so a shell is intended, but the file name comes from the watched folder. A file named `a;rm -rf ~.bam` runs `rm`.
 - **Tested:** with the old code, file names containing `$(touch …)` created the marker file, in bare, `"{file}"` and `'… {file} …'` templates.
 - **Fix:** keep the shell, but never paste the name into the command text. Turn `{file}` into a quoted `$ROBIN_FILE` reference and pass the path in the environment. Quoting the name with `shlex.quote` is not enough: inside a longer double-quoted string such as `"{file}.bai"` it can still run. Templates that start a second shell (`sh -c "… {file}"`, `ssh host "…"`) re-parse the name there; document that.
-- **Status:** fixed in our fork (`4f26cf0`, `75485ce`). Still open in the original ROBIN.
+- **Status:** fixed in our fork (`4f26cf0`, `75485ce`). A quoted `{file}` inside `$(...)` is quoted for that inner context and stays one word (`ab5151b`). Still open in the original ROBIN.
 
 ---
 
@@ -793,4 +799,4 @@ Make each step below its own change, with its own regression test. The scripts i
 9. **Security hardening:** SEC-2 to SEC-7.
 10. **Pin and record versions** (PKG-1), **add CI with a test suite** (PKG-2), then start on the architecture items. Delete dead code first (ARCH-4), because it is cheap and stops fixes from landing in the wrong copy.
 
-Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9), the version pins, step 2 (VAR-9, VAR-8, VAR-10) and step 3's quick wins (GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3, VAR-7) are done too; see "This fork and the original ROBIN". Of step 3, only JOB-6 is partial: the timeout constant and its configurability are done, the merge-skip and the batch-BAM deletion that follow from the timeout firing are not, and they overlap JOB-7. The follow-ups batch 3's own review asked for soon are done as well.
+Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9), the version pins, step 2 (VAR-9, VAR-8, VAR-10) and step 3's quick wins (GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3, VAR-7) are done too; see "This fork and the original ROBIN". Of step 3, only JOB-6 is partial: the timeout constant and its configurability are done, the merge-skip and the batch-BAM deletion that follow from the timeout firing are not, and they overlap JOB-7. The follow-ups batch 3's own review asked for soon are done as well, and so are the five findings of the 2026-10-31 review of the fix series.
