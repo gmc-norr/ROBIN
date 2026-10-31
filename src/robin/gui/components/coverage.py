@@ -6075,9 +6075,14 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     )
                     thread.start()
 
-                    # Check for completion status periodically
+                    # Check for completion status periodically. The timer is
+                    # cancelled when the run ends: NiceGUI ignores a callback's
+                    # return value, so returning False never stopped it, and
+                    # the refresh below then redrew the panel every tick,
+                    # replacing any results view the user had opened.
                     def check_lga_status():
                         if lga_status["status"] == "completed":
+                            status_timer.cancel()
                             try:
                                 lga_status_label.set_text(lga_status["message"])
                                 lga_status_label.classes(
@@ -6086,12 +6091,12 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 lga_analysis_button.enable()
                                 lga_analysis_button.set_text("Rerun Variant Analysis")
                                 lga_analysis_button.props("color=secondary")
-                                # Show what the run just wrote, without a reload
+                                # Show what the run just wrote, once
                                 _check_lga_results()
                             except Exception as e:
                                 print(f" Error updating UI: {e}")
-                            return False  # Stop checking
                         elif lga_status["status"] == "error":
+                            status_timer.cancel()
                             try:
                                 lga_status_label.set_text(
                                     f"Lightweight variant analysis failed: {lga_status['error']}"
@@ -6100,11 +6105,9 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 lga_analysis_button.enable()
                             except Exception as e:
                                 print(f" Error updating UI: {e}")
-                            return False  # Stop checking
-                        return True  # Keep checking
 
                     # Start checking status every 0.5 seconds
-                    ui.timer(0.5, check_lga_status, active=True)
+                    status_timer = ui.timer(0.5, check_lga_status, active=True)
 
                     ui.notify(
                         "Lightweight variant analysis started in background (direct execution)",
