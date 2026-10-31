@@ -244,6 +244,39 @@ def test_a_trusted_file_without_a_date_loses_to_one_with_a_date(tmp_path):
     assert pick_lga_results([str(nested), str(flat)], str(sample)) == (str(flat), False)
 
 
+def test_results_dates_carry_their_utc_offset(tmp_path):
+    # A naive local time can't be ordered across a clock change or between
+    # machines; the offset makes "newest" well defined.
+    import datetime
+
+    from robin.analysis.lightweight_gene_analysis import LightweightGeneAnalysis
+
+    vcf = write_clinvar(tmp_path / "clinvar.vcf", [(11, "C", "T")])
+    analysis = LightweightGeneAnalysis(str(tmp_path / "work"), str(vcf))
+    path = analysis.export_json({}, str(tmp_path / RESULTS))
+    stamp = json.loads(open(path).read())["metadata"]["generated_at"]
+    assert datetime.datetime.fromisoformat(stamp).tzinfo is not None
+
+
+def test_pick_lga_results_orders_dates_across_a_clock_change(tmp_path):
+    # Autumn fall-back: 02:10+01:00 (01:10 UTC) is later than 02:30+02:00
+    # (00:30 UTC), though its wall-clock time is earlier.
+    sample = tmp_path / "root" / "A"
+    bam = str(sample / "igv" / "igv_ready.bam")
+    nested = _results_file(sample / "A" / RESULTS, {"input_bam": bam, "generated_at": "2026-10-25T02:30:00+02:00"})
+    flat = _results_file(sample / RESULTS, {"input_bam": bam, "generated_at": "2026-10-25T02:10:00+01:00"})
+    assert pick_lga_results([str(nested), str(flat)], str(sample)) == (str(flat), False)
+
+
+def test_an_old_naive_date_and_a_new_dated_one_compare(tmp_path):
+    # Files written before the offset was recorded have naive local times.
+    sample = tmp_path / "root" / "A"
+    bam = str(sample / "igv" / "igv_ready.bam")
+    nested = _results_file(sample / "A" / RESULTS, {"input_bam": bam, "generated_at": "2020-01-01T00:00:00"})
+    flat = _results_file(sample / RESULTS, {"input_bam": bam, "generated_at": "2026-10-31T10:00:00+00:00"})
+    assert pick_lga_results([str(nested), str(flat)], str(sample)) == (str(flat), False)
+
+
 def test_a_fresh_run_in_the_other_layout_is_the_one_shown(tmp_path):
     """The review's two real runs: an old positive, then a fresh negative."""
     root = tmp_path / "root"

@@ -1631,7 +1631,9 @@ class LightweightGeneAnalysis:
         json_data = {
             "metadata": {
                 "analysis_type": "lightweight_gene_analysis",
-                "generated_at": pd.Timestamp.now().isoformat(),
+                # Local time with its UTC offset, so files can be ordered
+                # across a clock change (pick_lga_results relies on this)
+                "generated_at": datetime.datetime.now().astimezone().isoformat(),
                 "total_genes_analyzed": len(gene_variants),
                 "total_variants_found": sum(
                     g["summary"]["total_variants"] for g in gene_variants.values()
@@ -1767,14 +1769,16 @@ def _lga_results_generated_at(json_path: str) -> datetime.datetime:
     """When a results file was written, from its own metadata; oldest if unknown."""
     import json
 
+    oldest = datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
     try:
         with open(json_path) as f:
             stamp = json.load(f)["metadata"]["generated_at"]
         when = datetime.datetime.fromisoformat(stamp)
-    except (OSError, ValueError, KeyError, TypeError):
-        return datetime.datetime.min
-    # export_json writes local naive times; compare everything that way.
-    return when.replace(tzinfo=None) if when.tzinfo else when
+        # Compare in UTC. Files written before the offset was recorded hold a
+        # naive local time; astimezone() reads those as this machine's time.
+        return when.astimezone(datetime.timezone.utc)
+    except (OSError, ValueError, KeyError, TypeError, OverflowError):
+        return oldest
 
 
 def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> None:
