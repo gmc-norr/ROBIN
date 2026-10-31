@@ -16,23 +16,8 @@ import pyarrow.parquet as pq
 import pyranges as pr
 import pandas as pd
 
+from meth_fixtures import write_per_bam_parquet as _per_bam
 from robin.analysis.temp_utilities import merge_modkit_files
-from robin.analysis.utilities import matkit
-
-
-def _per_bam(path, rows):
-    """A per-BAM parquet from (pos, strand, n_mod, n_canonical) rows on chr1."""
-    counts, sites = {}, set()
-    for pos, strand, n_mod, n_can in rows:
-        c = [0] * matkit.COUNT_LEN
-        c[matkit.COUNT_IDX_MOD] = n_mod
-        c[matkit.COUNT_IDX_CANONICAL] = n_can
-        c[matkit.COUNT_IDX_TOTAL] = n_mod + n_can
-        key = ("chr1", pos, strand, "m")
-        counts[key] = c
-        sites.add(key)
-    matkit.write_counts_to_parquet(counts, sites, str(path))
-    return str(path)
 
 
 def _panel(path, rows):

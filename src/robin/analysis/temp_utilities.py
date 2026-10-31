@@ -150,6 +150,67 @@ def load_cpg_panel(filter_bed_file: str, sample_output_dir: str) -> "pr.PyRanges
     return filter_ranges
 
 
+# The sidecar JSON's column_format for a cumulative parquet of per-CpG counts
+# (strands combined, percent from the counts). Older files are re-summed on
+# their next merge by the same steps as new data.
+CPG_COUNTS_FORMAT = "cpg_counts_v2"
+
+
+def _panel_starts(filter_ranges: "pr.PyRanges") -> pl.DataFrame:
+    """Each panel interval's start: the C of its CpG (0-based)."""
+    df = filter_ranges.df[["Chromosome", "Start"]].drop_duplicates()
+    return pl.DataFrame(
+        {
+            "chrom": df["Chromosome"].astype(str).tolist(),
+            "chromStart": df["Start"].astype("int64").tolist(),
+        },
+        schema={"chrom": pl.Utf8, "chromStart": pl.Int64},
+    )
+
+
+def _sum_counts(df: pl.DataFrame) -> pl.DataFrame:
+    return df.group_by(["chrom", "chromStart"]).agg(pl.sum("n_mod"), pl.sum("n_canonical"))
+
+
+def _cpg_counts(df: pl.DataFrame, panel_starts: pl.DataFrame) -> pl.DataFrame:
+    """Per-CpG counts: chrom, chromStart (the C), n_mod, n_canonical.
+
+    A minus-strand row sits on the CpG's G, so it moves one base left onto the
+    C, as ``modkit --combine-strands`` does (METH-4). Only rows on a panel
+    CpG's C are kept, each once (a semi-join; METH-5), and counts are summed
+    per CpG. Rows already combined (strand ".") pass through unchanged, which
+    is what lets an old-format cumulative file be migrated by this same step.
+    """
+    shift = pl.when(pl.col("strand").cast(pl.Utf8) == "-").then(1).otherwise(0)
+    df = df.select(
+        pl.col("chrom").cast(pl.Utf8),
+        (pl.col("chromStart").cast(pl.Int64) - shift).alias("chromStart"),
+        pl.col("n_mod").cast(pl.Int64),
+        pl.col("n_canonical").cast(pl.Int64),
+    )
+    return _sum_counts(df.join(panel_starts, on=["chrom", "chromStart"], how="semi"))
+
+
+def _cpg_table(counts: pl.DataFrame) -> pl.DataFrame:
+    """The cumulative parquet: one row per CpG, strand ".", valid_cov =
+    n_mod + n_canonical and percent recomputed from them (METH-1, METH-2)."""
+    valid = pl.col("n_mod") + pl.col("n_canonical")
+    return (
+        counts.filter(valid > 0)
+        .sort(["chrom", "chromStart"])
+        .select(
+            pl.col("chrom"),
+            pl.col("chromStart"),
+            pl.lit("m").alias("mod_code"),
+            pl.lit(".").alias("strand"),
+            valid.cast(pl.UInt32).alias("valid_cov"),
+            (100.0 * pl.col("n_mod") / valid).cast(pl.Float32).alias("percent_modified"),
+            pl.col("n_mod").cast(pl.UInt32),
+            pl.col("n_canonical").cast(pl.UInt32),
+        )
+    )
+
+
 def merge_modkit_files(
     new_files: List[str],
     existing_file: str,
@@ -230,6 +291,7 @@ def merge_modkit_files(
 
         
         filter_ranges = load_cpg_panel(filter_bed_file, sample_output_dir)
+        panel_starts = _panel_starts(filter_ranges)
 
         # BEDMethyl 18-column names for modkit output (tab-separated)
         full_cols = [
@@ -288,28 +350,11 @@ def merge_modkit_files(
                 if pl_df.is_empty():
                     continue
 
-                # Build PyRanges for intersection (only need chrom/start/end)
-                pr_df = pl_df.rename({"chrom": "Chromosome", "chromStart": "Start"}).with_columns(
-                    (pl.col("Start") + 1).alias("End")
-                )
-                gr = pr.PyRanges(pr_df.to_pandas()[["Chromosome", "Start", "End"]])
-                inter = gr.intersect(filter_ranges).df
-                # No sites on the panel: PyRanges returns a DataFrame with no columns
-                if inter.empty:
+                counts = _cpg_counts(pl_df, panel_starts)
+                # No sites on the panel
+                if counts.is_empty():
                     continue
-
-                # Join in Polars: keep only rows whose (chrom, chromStart) are in the intersection.
-                # Cast join keys to match pl_df (str + UInt32); from_pandas can infer Categorical for chrom.
-                inter_pl = pl.from_pandas(
-                    inter[["Chromosome", "Start"]].rename(
-                        columns={"Chromosome": "chrom", "Start": "chromStart"}
-                    )
-                ).with_columns(
-                    pl.col("chrom").cast(pl.Utf8),
-                    pl.col("chromStart").cast(pl.UInt32),
-                )
-                filt = pl_df.join(inter_pl, on=["chrom", "chromStart"], how="inner")
-                new_frames.append(filt)
+                new_frames.append(counts)
             except Exception as e:
                 logging.error(
                     f"Error processing file {bed}: {str(e)} "
@@ -322,173 +367,71 @@ def merge_modkit_files(
             logging.warning("No valid data to merge after filtering")
             return
 
-        # Combine new data (all Polars)
-        new_df = pl.concat(new_frames) if len(new_frames) > 1 else new_frames[0]
+        new_counts = _sum_counts(pl.concat(new_frames))
 
         # Critical section: read/merge/write parquet guarded by an exclusive lock
         lock_path = f"{output_file}.lock"
         with _exclusive_file_lock(lock_path):
-            # Use a shared StringCache during the merge to avoid costly categorical re-encodings
-            with pl.StringCache():
-                # If no existing file, just save the new data
-                if not os.path.exists(existing_file):
-                    pl_df = new_df
-                    # Atomic write: write to temp then replace
-                    fd, tmp_path = tempfile.mkstemp(
-                        prefix="lj_parquet_",
-                        suffix=".parquet",
-                        dir=os.path.dirname(output_file) or ".",
-                    )
-                    os.close(fd)
-                    try:
-                        pl_df.write_parquet(tmp_path)
-                        os.replace(tmp_path, output_file)
-                    finally:
-                        try:
-                            if os.path.exists(tmp_path):
-                                os.remove(tmp_path)
-                        except Exception:
-                            pass
-
-                    # Save metadata with cumulative BAM file count (atomic)
-                    metadata = {
-                        "bam_file_count": cumulative_bam_file_count,
-                        "last_updated": datetime.now().isoformat(),
-                        "sample_id": sample_id,
-                        "files_added_in_this_update": num_bam_files_seen,
-                        "column_format": "optimized",  # Mark as optimized format
-                    }
-                    metadata_file = output_file.replace(".parquet", "_metadata.json")
-                    fdm, tmp_meta = tempfile.mkstemp(
-                        prefix="lj_meta_",
-                        suffix=".json",
-                        dir=os.path.dirname(metadata_file) or ".",
-                    )
-                    os.close(fdm)
-                    try:
-                        with open(tmp_meta, "w") as f:
-                            json.dump(metadata, f, indent=2)
-                        os.replace(tmp_meta, metadata_file)
-                    finally:
-                        try:
-                            if os.path.exists(tmp_meta):
-                                os.remove(tmp_meta)
-                        except Exception:
-                            pass
-
-                    logging.info(
-                        f"Created new optimized parquet file with {cumulative_bam_file_count} cumulative BAM files"
-                    )
-                    return
-
-                # Process existing data in chunks
-                existing_df = pl.scan_parquet(existing_file)
-                # New data is already Polars
-                pl_new_df = new_df
-
-                # Convert existing data to regular DataFrame for concatenation
-                existing_df = existing_df.collect()
-
-                # Check if existing file is in old format (18 columns) or new format (8 columns)
-                is_old_format = (
-                    len(existing_df.columns) > 10
-                )  # More than 10 columns indicates old format
-
-                if is_old_format:
-                    # Convert old format to new format by selecting only essential columns
-                    logging.info(
-                        "Converting existing file from old format to optimized format"
-                    )
-                    existing_df = existing_df.select(essential_cols)
-
-                # Ensure consistent data types and column order
-                for c in categorical_cols:
-                    if c in existing_df.columns and c in pl_new_df.columns:
-                        existing_df = existing_df.with_columns(
-                            pl.col(c).cast(pl.Categorical)
-                        )
-                        pl_new_df = pl_new_df.with_columns(
-                            pl.col(c).cast(pl.Categorical)
-                        )
-
-                # Ensure columns are in the same order
-                pl_new_df = pl_new_df.select(existing_df.columns)
-
-                # Validate column names match
-                if set(existing_df.columns) != set(pl_new_df.columns):
-                    missing_cols = set(existing_df.columns) - set(pl_new_df.columns)
-                    extra_cols = set(pl_new_df.columns) - set(existing_df.columns)
-                    raise ValueError(
-                        f"Column mismatch: missing {missing_cols}, extra {extra_cols}"
-                    )
-
-                # Combine existing and new data
-                combined = pl.concat([existing_df, pl_new_df])
-
-                # Define aggregation expressions for essential columns only
-                exprs = [
-                    pl.first("mod_code"),
-                    pl.first("strand"),
-                    pl.mean("percent_modified").alias("percent_modified"),
-                    *[
-                        pl.sum(c).alias(c)
-                        for c in ["valid_cov", "n_mod", "n_canonical"]
-                    ],
-                ]
-
-                # Perform groupby and aggregation
-                grouped = combined.group_by(["chrom", "chromStart"]).agg(exprs)
-
-                # Atomic write: write to temp then replace
-                fd2, tmp_out = tempfile.mkstemp(
-                    prefix="lj_parquet_",
-                    suffix=".parquet",
-                    dir=os.path.dirname(output_file) or ".",
+            # The same steps on the first write and on every merge (METH-2). An
+            # existing file is re-read through _cpg_counts, which leaves a
+            # per-CpG file as it is and migrates an older stranded one.
+            if os.path.exists(existing_file):
+                existing = pl.read_parquet(
+                    existing_file,
+                    columns=["chrom", "chromStart", "strand", "n_mod", "n_canonical"],
                 )
-                os.close(fd2)
+                counts = _sum_counts(pl.concat([_cpg_counts(existing, panel_starts), new_counts]))
+            else:
+                counts = new_counts
+            table = _cpg_table(counts)
+
+            # Atomic write: write to temp then replace
+            fd, tmp_out = tempfile.mkstemp(
+                prefix="lj_parquet_",
+                suffix=".parquet",
+                dir=os.path.dirname(output_file) or ".",
+            )
+            os.close(fd)
+            try:
+                table.write_parquet(tmp_out)
+                os.replace(tmp_out, output_file)
+            finally:
                 try:
-                    grouped.write_parquet(tmp_out)
-                    os.replace(tmp_out, output_file)
-                finally:
-                    try:
-                        if os.path.exists(tmp_out):
-                            os.remove(tmp_out)
-                    except Exception:
-                        pass
+                    if os.path.exists(tmp_out):
+                        os.remove(tmp_out)
+                except Exception:
+                    pass
 
-                # Save metadata with updated cumulative BAM file count (atomic)
-                metadata = {
-                    "bam_file_count": cumulative_bam_file_count,
-                    "last_updated": datetime.now().isoformat(),
-                    "sample_id": sample_id,
-                    "files_added_in_this_update": num_bam_files_seen,
-                    "column_format": "optimized",  # Mark as optimized format
-                }
-                metadata_file = output_file.replace(".parquet", "_metadata.json")
-                fd3, tmp_meta2 = tempfile.mkstemp(
-                    prefix="lj_meta_",
-                    suffix=".json",
-                    dir=os.path.dirname(metadata_file) or ".",
-                )
-                os.close(fd3)
+            # Save metadata with updated cumulative BAM file count (atomic)
+            metadata = {
+                "bam_file_count": cumulative_bam_file_count,
+                "last_updated": datetime.now().isoformat(),
+                "sample_id": sample_id,
+                "files_added_in_this_update": num_bam_files_seen,
+                "column_format": CPG_COUNTS_FORMAT,
+            }
+            metadata_file = output_file.replace(".parquet", "_metadata.json")
+            fdm, tmp_meta = tempfile.mkstemp(
+                prefix="lj_meta_",
+                suffix=".json",
+                dir=os.path.dirname(metadata_file) or ".",
+            )
+            os.close(fdm)
+            try:
+                with open(tmp_meta, "w") as f:
+                    json.dump(metadata, f, indent=2)
+                os.replace(tmp_meta, metadata_file)
+            finally:
                 try:
-                    with open(tmp_meta2, "w") as f:
-                        json.dump(metadata, f, indent=2)
-                    os.replace(tmp_meta2, metadata_file)
-                finally:
-                    try:
-                        if os.path.exists(tmp_meta2):
-                            os.remove(tmp_meta2)
-                    except Exception:
-                        pass
+                    if os.path.exists(tmp_meta):
+                        os.remove(tmp_meta)
+                except Exception:
+                    pass
 
-                logging.info(
-                    f"Updated optimized parquet file with {cumulative_bam_file_count} cumulative BAM files (added {num_bam_files_seen} in this update)"
-                )
-
-                logging.debug(
-                    f"Merged with optimized Polars and cache saved to: {output_file}"
-                )
+            logging.info(
+                f"Updated methylation parquet: {table.height} CpGs from "
+                f"{cumulative_bam_file_count} cumulative BAM files (added {num_bam_files_seen})"
+            )
 
     except Exception as e:
         logging.error(f"Error in merge_modkit_files: {str(e)}")

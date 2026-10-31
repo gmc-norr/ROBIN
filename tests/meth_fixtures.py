@@ -134,6 +134,23 @@ def write_panel(path: str, rows: List[Tuple[int, int, str]]) -> str:
     return path
 
 
+def write_per_bam_parquet(path: str, rows: List[Tuple[int, str, int, int]], chrom: str = CHROM) -> str:
+    """A per-BAM parquet as run_matkit writes it, from (pos, strand, n_mod, n_canonical) rows."""
+    from robin.analysis.utilities import matkit
+
+    counts, sites = {}, set()
+    for pos, strand, n_mod, n_can in rows:
+        c = [0] * matkit.COUNT_LEN
+        c[matkit.COUNT_IDX_MOD] = n_mod
+        c[matkit.COUNT_IDX_CANONICAL] = n_can
+        c[matkit.COUNT_IDX_TOTAL] = n_mod + n_can
+        key = (chrom, pos, strand, "m")
+        counts[key] = c
+        sites.add(key)
+    matkit.write_counts_to_parquet(counts, sites, str(path))
+    return str(path)
+
+
 def modkit_available() -> bool:
     return shutil.which("modkit") is not None
 
