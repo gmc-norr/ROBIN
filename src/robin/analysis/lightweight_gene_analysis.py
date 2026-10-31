@@ -56,6 +56,7 @@ This module is designed to be much faster than full variant calling pipelines
 while still providing valuable insights into genes of interest.
 """
 
+import datetime
 import os
 import logging
 from typing import Dict, Any, Optional, List, Tuple
@@ -1688,26 +1689,49 @@ def lga_results_belong_to_sample(json_path: str, sample_folder: str) -> bool:
 def pick_lga_results(
     candidates: list[str], sample_folder: str
 ) -> tuple[Optional[str], bool]:
-    """Return the first results file that can be shown, and, when there is
+    """Return the newest results file that can be shown, and, when there is
     none, whether a stale one is on disk.
 
-    ``candidates`` are the paths a results file may live at, best location
-    first. The first one that exists *and* proves it used this sample's own BAM
-    is returned; a file that exists but can't prove that is skipped, so one old
-    untrusted file can never hide a fresh trusted one.
+    ``candidates`` are the paths a results file may live at. Only files that
+    exist *and* prove they used this sample's own BAM are considered, so one
+    old untrusted file can never hide a fresh trusted one. Both locations are
+    current - a run given the sample folder writes the nested file, a run
+    given the root writes the flat one - so among trusted files the one whose
+    ``metadata.generated_at`` is latest wins: otherwise an old positive in one
+    location hid a fresh negative in the other. A missing or unreadable date
+    counts as oldest; ties keep candidate order.
 
     Returns ``(path, False)`` when a trusted file is found, ``(None, True)``
     when at least one candidate exists but none is trusted, and
     ``(None, False)`` when none exists.
     """
     found_untrusted = False
+    trusted = []
     for candidate in candidates:
         if not os.path.exists(candidate):
             continue
         if lga_results_belong_to_sample(candidate, sample_folder):
-            return candidate, False
-        found_untrusted = True
-    return None, found_untrusted
+            trusted.append(candidate)
+        else:
+            found_untrusted = True
+    if not trusted:
+        return None, found_untrusted
+    # max() keeps the first of equal keys, so ties keep candidate order.
+    return max(trusted, key=_lga_results_generated_at), False
+
+
+def _lga_results_generated_at(json_path: str) -> datetime.datetime:
+    """When a results file was written, from its own metadata; oldest if unknown."""
+    import json
+
+    try:
+        with open(json_path) as f:
+            stamp = json.load(f)["metadata"]["generated_at"]
+        when = datetime.datetime.fromisoformat(stamp)
+    except (OSError, ValueError, KeyError, TypeError):
+        return datetime.datetime.min
+    # export_json writes local naive times; compare everything that way.
+    return when.replace(tzinfo=None) if when.tzinfo else when
 
 
 def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> None:

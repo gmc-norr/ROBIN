@@ -213,3 +213,53 @@ def test_pick_lga_results_keeps_the_first_of_two_trusted_candidates(tmp_path):
         str(first),
         False,
     )
+
+
+# Both layouts are current: a run given the sample folder writes the nested
+# file, a run given the root writes the flat one. When both are trusted, the
+# newer analysis must win (fix-series review, finding 2).
+
+
+def test_pick_lga_results_prefers_the_newer_of_two_trusted_candidates(tmp_path):
+    sample = tmp_path / "root" / "A"
+    bam = str(sample / "igv" / "igv_ready.bam")
+    nested = _results_file(sample / "A" / RESULTS, {"input_bam": bam, "generated_at": "2026-10-30T10:00:00"})
+    flat = _results_file(sample / RESULTS, {"input_bam": bam, "generated_at": "2026-10-31T10:00:00"})
+    assert pick_lga_results([str(nested), str(flat)], str(sample)) == (str(flat), False)
+
+
+def test_pick_lga_results_keeps_a_newer_first_candidate(tmp_path):
+    sample = tmp_path / "root" / "A"
+    bam = str(sample / "igv" / "igv_ready.bam")
+    nested = _results_file(sample / "A" / RESULTS, {"input_bam": bam, "generated_at": "2026-10-31T10:00:00"})
+    flat = _results_file(sample / RESULTS, {"input_bam": bam, "generated_at": "2026-10-30T10:00:00"})
+    assert pick_lga_results([str(nested), str(flat)], str(sample)) == (str(nested), False)
+
+
+def test_a_trusted_file_without_a_date_loses_to_one_with_a_date(tmp_path):
+    sample = tmp_path / "root" / "A"
+    bam = str(sample / "igv" / "igv_ready.bam")
+    nested = _results_file(sample / "A" / RESULTS, {"input_bam": bam, "generated_at": "not a date"})
+    flat = _results_file(sample / RESULTS, {"input_bam": bam, "generated_at": "2026-10-30T10:00:00"})
+    assert pick_lga_results([str(nested), str(flat)], str(sample)) == (str(flat), False)
+
+
+def test_a_fresh_run_in_the_other_layout_is_the_one_shown(tmp_path):
+    """The review's two real runs: an old positive, then a fresh negative."""
+    root = tmp_path / "root"
+    sample = root / "A"
+    bam = sample / "igv" / "igv_ready.bam"
+    write_bam(bam, ALT_AT_11)
+    write_bed(sample / "targets_exceeding_threshold.bed", [(0, 50, "TEST")])
+    vcf = write_clinvar(tmp_path / "clinvar.vcf", [(11, "C", "T")])
+    job, _ = _job(vcf, sample)
+    lightweight_gene_analysis_handler(job, work_dir=str(sample))  # writes A/A/results
+    write_bam(bam, REF_ONLY)
+    lightweight_gene_analysis_handler(job, work_dir=str(root))  # writes A/results
+    nested, flat = sample / "A" / RESULTS, sample / RESULTS
+
+    def status(p):
+        return json.loads(p.read_text())["genes"]["TEST"]["summary"]["pathogenic_status"]
+
+    assert (status(nested), status(flat)) == ("present_with_good_coverage", "none_detected")
+    assert pick_lga_results([str(nested), str(flat)], str(sample)) == (str(flat), False)
