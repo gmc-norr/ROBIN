@@ -79,6 +79,7 @@ REVIEW_EVIDENCE = (
     "mnv_requires_review",
     "reference_mismatch",
     "no_usable_coverage",
+    "no_reads",
 )
 
 
@@ -501,7 +502,10 @@ class LightweightGeneAnalysis:
             total_coverage=coverage_stats["total_coverage"],
             mean_coverage=coverage_stats["mean_coverage"],
             coverage_std=coverage_stats["coverage_std"],
-            pathogenic_snps_found=len(intersecting_variants),
+            # Every checked site stays in the details; only supported ones count
+            pathogenic_snps_found=sum(
+                is_supported(v.get("evidence_analysis")) for v in intersecting_variants
+            ),
             pathogenic_snps_details=intersecting_variants,
             coverage_profile=coverage_data,
             pileup_data=pileup_data,
@@ -615,7 +619,10 @@ class LightweightGeneAnalysis:
                     )  # Both without chr
                 )
 
-                if chrom_match and pos >= region["start"] and pos <= region["end"]:
+                # pos is 1-based (VCF); the region is a 0-based, half-open
+                # BED interval, i.e. 1-based start+1..end. A site at pos ==
+                # start is the base before it and is never piled up.
+                if chrom_match and region["start"] < pos <= region["end"]:
 
                     # Create a copy of variant info with region information
                     variant_copy = variant_info.copy()
@@ -1009,6 +1016,29 @@ class LightweightGeneAnalysis:
                     variant, pileup_entry
                 )
 
+                intersecting_variants.append(variant_copy)
+            else:
+                # No read covers this site, so it was never looked at. Keep it
+                # as needing review: dropping it let "None Detected" stand on
+                # sites that were never checked.
+                variant_copy = variant.copy()
+                variant_copy["coverage_at_variant"] = 0
+                is_indel = len(variant.get("reference", "N")) != len(
+                    variant.get("alternate", "N")
+                )
+                variant_copy["evidence_analysis"] = {
+                    "reference_support": 0,
+                    "alternate_support": 0,
+                    "variant_allele_frequency": 0.0,
+                    "evidence_level": "no_reads",
+                    "zygosity": "unknown",
+                    "total_coverage": 0,
+                    "base_counts": {},
+                    "mean_quality": 0,
+                    "has_variants": False,
+                    "variant_type": "indel" if is_indel else "snv",
+                    "is_indel": is_indel,
+                }
                 intersecting_variants.append(variant_copy)
 
         return intersecting_variants
@@ -1578,6 +1608,11 @@ class LightweightGeneAnalysis:
             )
             summary["insufficient_evidence_sites"] = sum(
                 1 for v in checked if needs_review(v.get("evidence_analysis"))
+            )
+            summary["sites_without_reads"] = sum(
+                1
+                for v in checked
+                if (v.get("evidence_analysis") or {}).get("evidence_level") == "no_reads"
             )
 
             if summary["high_coverage_variants"] > 0:

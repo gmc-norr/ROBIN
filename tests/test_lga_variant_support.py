@@ -190,3 +190,62 @@ def test_an_insertion_site_with_only_deletions_still_needs_review(tmp_path):
     variant = data["genes"]["TEST"]["variants"][0]
     assert variant["needs_review"] is True
     assert data["genes"]["TEST"]["summary"]["pathogenic_status"] == "insufficient_evidence"
+
+
+# A ClinVar site inside a checked region that no read covers was dropped
+# before export, so "None Detected" could stand on sites never looked at
+# (fix-series review, finding 4, second part; the user chose to flag them).
+# Reads cover 1-based 1-50 of a 1-100 region; the site at 80 has no reads.
+
+
+def _analyse_region(tmp_path, reads, sites, bed=((0, 100, "TEST"),)):
+    bam = write_bam(tmp_path / "s.bam", reads)
+    bed_path = write_bed(tmp_path / "s.bed", list(bed))
+    vcf = write_clinvar(tmp_path / "clinvar.vcf", sites)
+    analysis = LightweightGeneAnalysis(str(tmp_path / "work"), str(vcf))
+    out = tmp_path / "results.json"
+    analysis.export_json(analysis.analyze_bed_regions(str(bam), str(bed_path)), str(out))
+    return json.loads(out.read_text())
+
+
+def test_a_site_with_no_reads_needs_review(tmp_path):
+    data = _analyse_region(tmp_path, [REF_READ] * 20, [(80, "C", "T")])
+    gene = data["genes"]["TEST"]
+    variant = gene["variants"][0]
+    assert variant["position"] == 80
+    assert variant["evidence_analysis"]["evidence_level"] == "no_reads"
+    assert variant["needs_review"] is True
+    assert gene["summary"]["pathogenic_status"] == "insufficient_evidence"
+    assert gene["summary"]["sites_without_reads"] == 1
+
+
+def test_a_reference_only_site_and_an_unread_site_is_not_none_detected(tmp_path):
+    data = _analyse_region(tmp_path, [REF_READ] * 20, [(11, "C", "T"), (80, "C", "T")])
+    summary = data["genes"]["TEST"]["summary"]
+    assert summary["pathogenic_status"] == "insufficient_evidence"
+    assert summary["sites_checked"] == 2
+
+
+def test_a_supported_site_still_wins_over_an_unread_one(tmp_path):
+    data = _analyse_region(tmp_path, [ALT_READ] * 20, [(11, "C", "T"), (80, "C", "T")])
+    summary = data["genes"]["TEST"]["summary"]
+    assert summary["pathogenic_status"] == "present_with_good_coverage"
+    assert summary["sites_without_reads"] == 1
+
+
+def test_a_site_just_before_the_bed_start_is_not_checked(tmp_path):
+    # BED (10, 60) covers 1-based 11-60. POS 10 is the base before it: never
+    # piled up, so it must not be picked at all, or it would read "no reads"
+    # while reads cover it.
+    data = _analyse_region(tmp_path, [REF_READ] * 20, [(10, "C", "T"), (20, "C", "T")],
+                           bed=((10, 60, "TEST"),))
+    assert [v["position"] for v in data["genes"]["TEST"]["variants"]] == [20]
+
+
+def test_analyze_genes_counts_only_supported_sites(tmp_path):
+    # The older per-gene path (no callers today) counted every checked site.
+    bam = write_bam(tmp_path / "s.bam", [REF_READ] * 20)
+    vcf = write_clinvar(tmp_path / "clinvar.vcf", SNV)
+    analysis = LightweightGeneAnalysis(str(tmp_path / "work"), str(vcf))
+    report = analysis.analyze_genes(str(bam), ["TEST"])["TEST"]
+    assert report.pathogenic_snps_found == 0

@@ -100,6 +100,20 @@
 - [ ] **Step 3:** replace the single `quote` variable with a stack of contexts: unquoted, `'`, `"`, `$(`, `(` and backtick. `$(` and backtick open a new unquoted context from inside `"` or unquoted; `)` closes `$(` or `(`; a backtick closes a backtick context. `{file}` is emitted for the innermost context: `"${ROBIN_FILE}"` in any unquoted one, `${ROBIN_FILE}` in `"`, `'"${ROBIN_FILE}"'` in `'`. Backslash escapes as today. The file name still never becomes shell text. Docstring lists the handled contexts and the limits (`case` patterns inside `$(…)`, here-documents).
 - [ ] **Step 4:** `t3c.sh` → 161 passed. Commit.
 
+### Task 7: A ClinVar site with no reads needs review (added after the final review; the user chose this)
+
+**Files:** `src/robin/analysis/lightweight_gene_analysis.py` (site selection ~L617, `_find_intersecting_variants`, `REVIEW_EVIDENCE`, the export summary, `_analyze_single_gene`); test `tests/test_lga_variant_support.py`.
+
+**Decision (user, 2026-10-31):** a ClinVar site inside a checked region that no read covers is kept, with evidence `no_reads` (a review level), so the gene reads "insufficient evidence"; each gene summary gets `sites_without_reads`. **Boundary:** sites are picked with `start <= pos <= end` (1-based POS against the 0-based BED start), so a site at `pos == start` is the base before the region and is never piled up; it must become `start < pos <= end`, or it would be flagged `no_reads` falsely. The unused `_analyze_single_gene` path counts only supported sites, like the region path.
+
+- [ ] **Step 1: tests** (BED `(0, 100)`, 20 reads covering 1-based 1–50, ClinVar SNVs at 11 and/or 80):
+  - `test_a_site_with_no_reads_needs_review` — only site 80: evidence `no_reads`, `needs_review`, gene `insufficient_evidence`, `sites_without_reads == 1`. RED (gene absent).
+  - `test_a_reference_only_site_and_an_unread_site_is_not_none_detected` — REF reads, sites 11 and 80 → `insufficient_evidence`. RED (`none_detected`).
+  - `test_a_supported_site_still_wins_over_an_unread_one` — ALT reads, sites 11 and 80 → `present_with_good_coverage`, `sites_without_reads == 1`. RED (no count).
+  - `test_a_site_just_before_the_bed_start_is_not_checked` — BED `(10, 60)`, site at POS 10 → not in the gene's variants. Guard (passes today; fails if the boundary is left).
+  - `test_analyze_genes_counts_only_supported_sites` — the unused per-gene path, REF reads at site 11 → `pathogenic_snps_found == 0`. RED (counts 1).
+- [ ] **Step 2:** run on the old code. **Step 3:** implement. **Step 4:** `t3c.sh` → 170 passed. Commit.
+
 ### Task 6: Record
 
 - [ ] `CHANGELOG.md` `[Unreleased]` → `### Fixed`: one line per finding, saying what users notice.
