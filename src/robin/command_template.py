@@ -29,31 +29,62 @@ def shell_command_for_file(template: str) -> str:
     stays one word: ``"${ROBIN_FILE}"`` outside quotes, ``${ROBIN_FILE}``
     inside double quotes, and ``'"${ROBIN_FILE}"'`` inside single quotes
     (close the quote, insert, reopen).
+
+    "Where it sits" is the innermost context. ``$(...)``, a backtick command
+    and a ``(...)`` group each start a new unquoted context, even inside
+    double quotes, so in ``"$(dirname "{file}")"`` the inner quotes are the
+    ones that count. A single quote-state misread that and left the path
+    unquoted, so it split at spaces. Not followed: ``case`` patterns inside
+    ``$(...)``, here-documents and comments. None of this affects safety:
+    the file name is never shell text, whatever the quoting.
     """
     ref = "${" + FILE_ENV_VAR + "}"
     out = []
-    quote = None  # None, "'" or '"'
+    # Innermost context last: "top", "$(", "(" and "`" are unquoted;
+    # "'" and '"' are quoted.
+    stack = ["top"]
     i = 0
     while i < len(template):
+        ctx = stack[-1]
         if template.startswith(_PLACEHOLDER, i):
-            if quote is None:
-                out.append(f'"{ref}"')
-            elif quote == '"':
+            if ctx == '"':
                 out.append(ref)
-            else:
+            elif ctx == "'":
                 out.append(f"'\"{ref}\"'")
+            else:
+                out.append(f'"{ref}"')
             i += len(_PLACEHOLDER)
             continue
         char = template[i]
         out.append(char)
-        if char == "\\" and quote != "'" and i + 1 < len(template):
-            out.append(template[i + 1])  # escaped character: never opens or closes a quote
+        if ctx == "'":
+            if char == "'":
+                stack.pop()
+            i += 1
+            continue
+        if char == "\\" and i + 1 < len(template):
+            out.append(template[i + 1])  # escaped character: never opens or closes anything
             i += 2
             continue
-        if quote is None and char in "'\"":
-            quote = char
-        elif char == quote:
-            quote = None
+        if template.startswith("$(", i):
+            out.append("(")
+            stack.append("$(")
+            i += 2
+            continue
+        if char == "`":
+            if ctx == "`":
+                stack.pop()
+            else:
+                stack.append("`")
+        elif ctx == '"':
+            if char == '"':
+                stack.pop()
+        elif char in "'\"":
+            stack.append(char)
+        elif char == "(":
+            stack.append("(")
+        elif char == ")" and ctx in ("$(", "("):
+            stack.pop()
         i += 1
     return "".join(out)
 

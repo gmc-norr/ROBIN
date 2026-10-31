@@ -27,6 +27,10 @@ def _printed_args(template, file_path, cwd):
         ("printf '%s\\n' 'in={file}'", ["in=" + PLAIN]),
         ("printf '%s\\n' {file} \"{file}\"", [PLAIN, PLAIN]),
         ("printf '%s\\n' \\\"{file}\\\"", ['"' + PLAIN + '"']),
+        # Guards for the context tracking (fix-series review, finding 5)
+        ("printf '%s\\n' \"$((1+2))\" \"{file}\"", ["3", PLAIN]),
+        ("( printf '%s\\n' \"{file}\" )", [PLAIN]),
+        ("d=`dirname \"{file}\"`; printf '%s\\n' \"$d\"", ["/d"]),
     ],
 )
 def test_placeholder_becomes_the_exact_path_in_every_quoting(tmp_path, template, expected):
@@ -46,8 +50,8 @@ def test_filename_with_shell_syntax_does_not_run(tmp_path, template):
 
 
 def test_filename_does_not_run_inside_command_substitution(tmp_path):
-    # Inside "$(...)" the shell starts a new quoting context. The name may split
-    # into words there, but nothing in it runs.
+    # Inside "$(...)" the shell starts a new quoting context. Nothing in the
+    # name runs there (an unquoted {file} there may still split into words).
     path = str(tmp_path / HOSTILE)
     _printed_args("printf '%s\\n' \"$(printf '%s ' {file})\"", path, tmp_path)
     assert not (tmp_path / "MARKER").exists()
@@ -56,6 +60,32 @@ def test_filename_does_not_run_inside_command_substitution(tmp_path):
 
 def test_template_without_placeholder_runs_unchanged(tmp_path):
     assert _printed_args("printf '%s\\n' {other} 'a b'", PLAIN, tmp_path) == ["{other}", "a b"]
+
+
+# Inside "$(...)" the shell starts a new quoting context, so a quoted
+# placeholder there must stay one word (fix-series review, finding 5).
+
+
+def test_a_quoted_placeholder_inside_command_substitution_stays_one_word(tmp_path):
+    path = str(tmp_path / "a b" / "s.bam")
+    template = "printf '%s\\n' \"$(dirname \"{file}\")/output.bai\""
+    assert _printed_args(template, path, tmp_path) == [str(tmp_path / "a b" / "output.bai")]
+
+
+def test_nested_command_substitutions_keep_the_path_whole(tmp_path):
+    # Three levels: with two, an odd count of '"' before {file} made the old
+    # one-level tracker land on the right answer by luck.
+    path = str(tmp_path / "a b" / "c d" / "s.bam")
+    template = "printf '%s\\n' \"$(basename \"$(dirname \"$(dirname \"{file}\")\")\")\""
+    assert _printed_args(template, path, tmp_path) == ["a b"]
+
+
+def test_a_hostile_name_inside_command_substitution_comes_back_exact(tmp_path):
+    path = str(tmp_path / HOSTILE)
+    template = "printf '%s\\n' \"$(basename \"{file}\")\""
+    assert _printed_args(template, path, tmp_path) == [HOSTILE]
+    assert not (tmp_path / "MARKER").exists()
+    assert not (tmp_path / "MARKER2").exists()
 
 
 # The two places Robin runs a user's command on a watched file.
