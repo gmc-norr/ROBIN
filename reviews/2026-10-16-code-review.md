@@ -51,6 +51,9 @@ This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [g
 | Variant results record their UTC offset | VAR-9 follow-up | `7689900` | The newest result is picked correctly across a clock change |
 | Variant results and CNV arrays are written whole or not at all | Found after this review | `fa77eb7` | No half-read files in the GUI; a failed write keeps the last good file |
 | `robin add-panel` says "No gene names found in column 4" | Found after this review | `edb76bd` | A clear error instead of `'chrom'` |
+| Results written whole keep the usual file permissions | Found after this review | `5749e5d` | Group members can still read results in a shared output folder |
+| A failed pileup reads "pileup failed"; the gene details count unread sites | VAR-8 follow-up | `c71527b`, `3fe7ba5` | The panel says why a gene reads "insufficient evidence" |
+| `{file}` after `$` inside single quotes is the placeholder | SEC-9 follow-up | `e8af255` | `'${file}'` prints `$` and the path, as the shell would |
 | `{file}` inside `$(...)` is quoted for that context | SEC-9 follow-up | `ab5151b` | Templates like `"$(dirname "{file}")/x.bai"` work on paths with spaces |
 
 Every change has a regression test in `tests/`. The details are in `CHANGELOG.md` under `[Unreleased]`. Add a row here each time a fix lands.
