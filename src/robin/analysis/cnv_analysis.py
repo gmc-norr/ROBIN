@@ -81,7 +81,8 @@ import pickle
 import gc
 import subprocess
 import sys
-from typing import Dict, Optional, List, Tuple
+from types import MappingProxyType
+from typing import Dict, Mapping, Optional, List, Tuple
 from dataclasses import dataclass
 
 import numpy as np
@@ -116,26 +117,44 @@ _sample_cache = {}
 _current_sample_id = None
 
 
-def get_cached_ref_cnv_dict(ref_cnv_dict_path: str, logger) -> dict:
+def _read_only_control(control) -> Mapping[str, np.ndarray]:
+    """Copy the control into read-only int64 arrays behind a read-only mapping.
+
+    The cached control is shared by every sample a worker sees. A read-only
+    mapping is not a dict, so cnv_from_bam.iterate_bam_file refuses it as
+    copy_numbers (a TypeError) instead of adding a BAM's reads into it.
     """
-    Get reference CNV dictionary with caching to avoid reloading for every sample.
-    
+    frozen = {}
+    for name, counts in control.items():
+        arr = np.array(counts, dtype=np.int64)
+        arr.setflags(write=False)
+        frozen[name] = arr
+    return MappingProxyType(frozen)
+
+
+def get_cached_ref_cnv_dict(ref_cnv_dict_path: str, logger) -> Mapping[str, np.ndarray]:
+    """
+    Get the control's read counts, loaded once per path and cached.
+
+    The result is read-only (see _read_only_control): build its profile with
+    reference_cnv_profile, never with iterate_bam_file.
+
     Args:
         ref_cnv_dict_path: Path to reference CNV pickle file
         logger: Logger instance
-        
+
     Returns:
-        Reference CNV dictionary
+        Read-only mapping of contig to read starts per 1 kb bin
     """
     global _ref_cnv_dict_cache, _ref_cnv_dict_path_cache
-    
+
     # Check if we need to load the reference dict
     if _ref_cnv_dict_cache is None or _ref_cnv_dict_path_cache != ref_cnv_dict_path:
         logger.info(f"Loading reference CNV dict from {ref_cnv_dict_path} (first time or path changed)")
         load_start = time.time()
-        
+
         with open(ref_cnv_dict_path, "rb") as f:
-            _ref_cnv_dict_cache = pickle.load(f)
+            _ref_cnv_dict_cache = _read_only_control(pickle.load(f))
         _ref_cnv_dict_path_cache = ref_cnv_dict_path
         
         load_time = time.time() - load_start
@@ -400,13 +419,14 @@ def run_cnv_analysis_subprocess(
         # Load and cache the reference dict
         ref_cnv_dict_loaded = get_cached_ref_cnv_dict(ref_cnv_dict, logger)
         ref_cnv_dict_path = os.path.join(temp_dir, "ref_cnv_dict.pkl")
+        # dict(): the cached control is a read-only mapping, which pickle refuses.
         with open(ref_cnv_dict_path, "wb") as f:
-            pickle.dump(ref_cnv_dict_loaded, f, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(dict(ref_cnv_dict_loaded), f, protocol=pickle.HIGHEST_PROTOCOL)
     else:
-        # Already a dict, serialize it
+        # Already a mapping, serialize it
         ref_cnv_dict_path = os.path.join(temp_dir, "ref_cnv_dict.pkl")
         with open(ref_cnv_dict_path, "wb") as f:
-            pickle.dump(ref_cnv_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(dict(ref_cnv_dict), f, protocol=pickle.HIGHEST_PROTOCOL)
 
     # Get path to the subprocess script
     script_dir = os.path.dirname(os.path.abspath(__file__))

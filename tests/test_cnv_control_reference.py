@@ -11,6 +11,8 @@ of an early run. All BAMs and controls here are synthetic.
 import copy
 import logging
 import os
+import pickle
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -101,6 +103,45 @@ def test_a_normal_sample_after_an_abnormal_one_is_unchanged(tmp_path, cached_con
     assert list(after_a) == list(fresh)
     for name in fresh:
         np.testing.assert_array_equal(after_a[name], fresh[name])
+
+
+@pytest.fixture
+def control_file(tmp_path):
+    """A pickled synthetic control, with the module's control cache cleared around the test."""
+    path = tmp_path / "control.pkl"
+    with open(path, "wb") as f:
+        pickle.dump(flat_control(CONTIGS, 3), f)
+    cnv_analysis.clear_ref_cnv_dict_cache()
+    yield str(path)
+    cnv_analysis.clear_ref_cnv_dict_cache()
+
+
+def test_the_cached_control_cannot_be_changed(control_file):
+    cached = cnv_analysis.get_cached_ref_cnv_dict(control_file, LOG)
+    assert _changed_contigs(cached, flat_control(CONTIGS, 3)) == []
+    with pytest.raises(TypeError):
+        cached["chr1"] = [0]
+    with pytest.raises(ValueError):
+        cached["chr1"][0] = 9
+
+
+def test_the_cached_control_cannot_be_passed_to_the_library(tmp_path, control_file):
+    import cnv_from_bam
+
+    bam = write_bam(str(tmp_path / "s.bam"), CONTIGS, {c: every_kb(n) for c, n in CONTIGS.items()})
+    cached = cnv_analysis.get_cached_ref_cnv_dict(control_file, LOG)
+    with pytest.raises(TypeError):
+        cnv_from_bam.iterate_bam_file(bam, copy_numbers=cached, log_level=int(logging.ERROR))
+    assert _changed_contigs(cached, flat_control(CONTIGS, 3)) == []
+
+
+def test_the_subprocess_runner_still_writes_the_control(tmp_path, control_file, monkeypatch):
+    monkeypatch.setattr(cnv_analysis.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1))
+    out = tmp_path / "out"
+    assert cnv_analysis.run_cnv_analysis_subprocess(str(tmp_path / "s.bam"), {}, control_file, str(out), LOG) is None
+    with open(out / "ref_cnv_dict.pkl", "rb") as f:
+        written = pickle.load(f)
+    assert _changed_contigs(written, flat_control(CONTIGS, 3)) == []
 
 
 def test_a_contig_only_the_sample_has_is_skipped(tmp_path, cached_control):
