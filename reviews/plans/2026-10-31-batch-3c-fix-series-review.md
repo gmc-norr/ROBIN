@@ -114,6 +114,17 @@
   - `test_analyze_genes_counts_only_supported_sites` — the unused per-gene path, REF reads at site 11 → `pathogenic_snps_found == 0`. RED (counts 1).
 - [ ] **Step 2:** run on the old code. **Step 3:** implement. **Step 4:** `t3c.sh` → 170 passed. Commit.
 
+### Tasks 8-13: the remaining bugs found along the way (user: "fix all bugs you find")
+
+Each with a test seen failing first; suite count rises by the tests named.
+
+- **Task 8 — CNV absolute view draws no breakpoint lines.** `cnv.py` `_render_cnv_from_state` reads `r["end_pos"]` from an array whose fields are `name, start, end`; the error is swallowed. Add module-level `breakpoint_midpoints(arr, chromosome) -> list[int]` (rows of that chromosome, `(start + end) // 2`, as the difference view already draws) and use it in all three places. Tests: the helper on an array written by `save_cnv_files`; ast: `_render_cnv_from_state` and `_refresh_cnv_sync` call it and no `"end_pos"` key is read from `bp_array` rows.
+- **Task 9 — the per-gene path never piles up its first site.** `_get_gene_coordinates` returns the 1-based `min(position)` as the 0-based pileup start, so a one-site gene piles up an empty range. Return `start = min - 1`. Test: `analyze_genes` with 20 ALT reads at site 11 → `pathogenic_snps_found == 1`. (Correction: the earlier "looks for contig 1" diagnosis was wrong; `_perform_targeted_pileup` maps `1` to `chr1`.)
+- **Task 10 — `${file}` in a template is mangled.** `{file}` right after `$` is a shell parameter expansion, not the placeholder; leave it alone. Test: `file=x; printf '%s\n' "${file}"` → `["x"]`; `{file}` still works next to it.
+- **Task 11 — results dates ignore time zones.** `export_json` writes `datetime.now().astimezone().isoformat()` (local time with offset); `_lga_results_generated_at` compares in UTC, treating an old naive stamp as local time. Tests: the stamp carries an offset; across the autumn fall-back, `02:10+01:00` beats `02:30+02:00`.
+- **Task 12 — torn files.** `export_json` and the five `np.save` calls in `save_cnv_files` write a temp file in the same folder, then `os.replace`. Tests: a write that fails part-way leaves the previous file intact (patch `json.dump` / `numpy.lib.format.write_array` to raise after writing).
+- **Task 13 — `add-panel` says `'chrom'`.** A BED whose gene cells are only commas fails with `Error generating unique gene BED file: 'chrom'`. Say `No gene names found in column 4`. Test: the existing failed-panel test's output names that.
+
 ### Task 6: Record
 
 - [ ] `CHANGELOG.md` `[Unreleased]` → `### Fixed`: one line per finding, saying what users notice.
