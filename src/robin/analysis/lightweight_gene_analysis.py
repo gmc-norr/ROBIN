@@ -822,9 +822,12 @@ class LightweightGeneAnalysis:
         positions = [v["position"] for v in gene_variants]
         chromosomes = set(v["chromosome"] for v in gene_variants)
 
+        # Positions are 1-based (VCF); the pileup takes a 0-based, half-open
+        # range, so 1-based min..max is min-1..max. Using min as the start
+        # skipped the first site, and a one-site gene piled up nothing.
         return {
             "chromosome": list(chromosomes)[0],
-            "start": min(positions),
+            "start": min(positions) - 1,
             "end": max(positions),
         }
 

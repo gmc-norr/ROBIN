@@ -249,3 +249,14 @@ def test_analyze_genes_counts_only_supported_sites(tmp_path):
     analysis = LightweightGeneAnalysis(str(tmp_path / "work"), str(vcf))
     report = analysis.analyze_genes(str(bam), ["TEST"])["TEST"]
     assert report.pathogenic_snps_found == 0
+
+
+def test_analyze_genes_piles_up_its_first_site(tmp_path):
+    # _get_gene_coordinates used the 1-based min position as the 0-based
+    # pileup start, so the first site - here the only one - was never seen.
+    bam = write_bam(tmp_path / "s.bam", [ALT_READ] * 20)
+    vcf = write_clinvar(tmp_path / "clinvar.vcf", SNV)
+    analysis = LightweightGeneAnalysis(str(tmp_path / "work"), str(vcf))
+    report = analysis.analyze_genes(str(bam), ["TEST"])["TEST"]
+    assert [e["position"] for e in report.pileup_data] == [11]
+    assert report.pathogenic_snps_found == 1
