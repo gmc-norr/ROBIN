@@ -78,6 +78,7 @@ REVIEW_EVIDENCE = (
     "insertion_requires_review",
     "mnv_requires_review",
     "reference_mismatch",
+    "no_usable_coverage",
 )
 
 
@@ -1100,7 +1101,11 @@ class LightweightGeneAnalysis:
             vaf = alt_support / total_coverage if total_coverage > 0 else 0
 
             # Determine evidence level for SNVs
-            if total_coverage > 0 and ref_support + alt_support == 0:
+            if total_coverage == 0:
+                # No usable base here (e.g. every read is deleted): no evidence
+                # either way, so it can't read "None Detected"
+                evidence_level = "no_usable_coverage"
+            elif ref_support + alt_support == 0:
                 # Reads show neither allele: wrong build or position, can't call
                 evidence_level = "reference_mismatch"
             elif alt_support == 0:

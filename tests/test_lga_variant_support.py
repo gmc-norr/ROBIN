@@ -158,3 +158,35 @@ def test_column_where_every_read_is_deleted_is_piled_up(tmp_path):
     assert entry["reference"] in ("A", "T", "G", "C", "N")
     assert entry["variant_alleles"] == []
     assert entry["has_variants"] is False
+
+
+# A column with zero usable bases (every read deleted there) has no evidence
+# either way, so an SNV there must need review, not read "None Detected"
+# (fix-series review, finding 4).
+DELETED_AT_11 = [(0, "C" * 49, "10M1D39M")] * 20
+
+
+def test_an_snv_site_with_only_deletions_needs_review(tmp_path):
+    _, data = _analyse(tmp_path, DELETED_AT_11)
+    variant = data["genes"]["TEST"]["variants"][0]
+    assert variant["coverage_at_variant"] == 0
+    assert variant["evidence_analysis"]["evidence_level"] == "no_usable_coverage"
+    assert variant["needs_review"] is True
+    assert variant["supported"] is False
+
+
+def test_a_gene_whose_only_site_has_no_usable_bases_is_not_none_detected(tmp_path):
+    _, data = _analyse(tmp_path, DELETED_AT_11)
+    summary = data["genes"]["TEST"]["summary"]
+    assert summary["pathogenic_status"] == "insufficient_evidence"
+    assert summary["total_variants"] == 0
+
+
+def test_an_insertion_site_with_only_deletions_still_needs_review(tmp_path):
+    # Only the SNV branch changes: indel sites are left alone, because a column
+    # where every read is deleted is real evidence for a ClinVar deletion there.
+    # This insertion site already needs review (measured: "reference_mismatch").
+    _, data = _analyse(tmp_path, DELETED_AT_11, sites=[(11, "C", "CA")])
+    variant = data["genes"]["TEST"]["variants"][0]
+    assert variant["needs_review"] is True
+    assert data["genes"]["TEST"]["summary"]["pathogenic_status"] == "insufficient_evidence"
