@@ -942,6 +942,12 @@ def _generate_unique_gene_bed(input_bed_path: Path, output_bed_path: Path) -> bo
                             'gene': gene
                         })
         
+        # A file whose gene cells are only commas passes the validator but
+        # names no gene; say so instead of failing on a missing 'chrom' column
+        if not processed_regions:
+            click.echo("Error: No gene names found in column 4", err=True)
+            return False
+
         # Convert to DataFrame and remove duplicates
         processed_df = pd.DataFrame(processed_regions)
         

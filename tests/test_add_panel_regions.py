@@ -127,3 +127,11 @@ def test_a_failed_panel_leaves_no_files(tmp_path, monkeypatch):
     assert result.exit_code == 1, result.output
     assert lines is None
     assert sorted(p.name for p in (tmp_path / "res").iterdir()) == []
+
+
+def test_a_bed_with_no_gene_names_says_so(tmp_path, monkeypatch):
+    # It used to fail with "Error generating unique gene BED file: 'chrom'".
+    result, _ = _run_add_panel(tmp_path, monkeypatch, "chr7\t100\t200\t,\nchr17\t300\t400\t , \n")
+    assert result.exit_code == 1
+    assert "No gene names found in column 4" in result.output
+    assert "'chrom'" not in result.output
