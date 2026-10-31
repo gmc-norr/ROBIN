@@ -223,7 +223,8 @@ def test_a_reference_only_site_and_an_unread_site_is_not_none_detected(tmp_path)
     data = _analyse_region(tmp_path, [REF_READ] * 20, [(11, "C", "T"), (80, "C", "T")])
     summary = data["genes"]["TEST"]["summary"]
     assert summary["pathogenic_status"] == "insufficient_evidence"
-    assert summary["sites_checked"] == 2
+    # "checked" means the reads were looked at; the unread site is counted apart
+    assert (summary["sites_checked"], summary["sites_without_reads"]) == (1, 1)
 
 
 def test_a_supported_site_still_wins_over_an_unread_one(tmp_path):
@@ -231,6 +232,25 @@ def test_a_supported_site_still_wins_over_an_unread_one(tmp_path):
     summary = data["genes"]["TEST"]["summary"]
     assert summary["pathogenic_status"] == "present_with_good_coverage"
     assert summary["sites_without_reads"] == 1
+
+
+def test_a_failed_pileup_is_not_called_no_reads(tmp_path):
+    # Without a BAM index the pileup can't run at all. That is not "no read
+    # covers this site", and must not be labelled so.
+    bam = write_bam(tmp_path / "s.bam", [REF_READ] * 20)
+    for index in (tmp_path / "s.bam.bai", tmp_path / "s.bai"):
+        index.unlink(missing_ok=True)
+    bed = write_bed(tmp_path / "s.bed", [(0, 100, "TEST")])
+    vcf = write_clinvar(tmp_path / "clinvar.vcf", [(11, "C", "T")])
+    analysis = LightweightGeneAnalysis(str(tmp_path / "work"), str(vcf))
+    out = tmp_path / "results.json"
+    analysis.export_json(analysis.analyze_bed_regions(str(bam), str(bed)), str(out))
+    gene = json.loads(out.read_text())["genes"]["TEST"]
+    assert gene["variants"][0]["evidence_analysis"]["evidence_level"] == "pileup_failed"
+    assert gene["variants"][0]["needs_review"] is True
+    assert gene["summary"]["pathogenic_status"] == "insufficient_evidence"
+    s = gene["summary"]
+    assert (s["sites_checked"], s["sites_without_reads"], s["sites_pileup_failed"]) == (0, 0, 1)
 
 
 def test_a_site_just_before_the_bed_start_is_not_checked(tmp_path):

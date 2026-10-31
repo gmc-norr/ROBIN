@@ -80,6 +80,7 @@ REVIEW_EVIDENCE = (
     "reference_mismatch",
     "no_usable_coverage",
     "no_reads",
+    "pileup_failed",
 )
 
 
@@ -466,8 +467,11 @@ class LightweightGeneAnalysis:
         if not gene_coords:
             raise ValueError(f"Could not determine coordinates for gene: {gene_name}")
 
-        # Perform targeted pileup using pysam
+        # Perform targeted pileup using pysam (None: it could not run)
         pileup_data = self._perform_targeted_pileup(bam_path, gene_coords)
+        pileup_failed = pileup_data is None
+        if pileup_failed:
+            pileup_data = []
 
         # Extract coverage data from pileup for backward compatibility
         coverage_data = [
@@ -476,7 +480,7 @@ class LightweightGeneAnalysis:
 
         # Intersect with pathogenic variants
         intersecting_variants = self._find_intersecting_variants(
-            gene_coords, gene_variants, pileup_data
+            gene_coords, gene_variants, pileup_data, pileup_failed=pileup_failed
         )
 
         # Calculate coverage statistics
@@ -754,6 +758,9 @@ class LightweightGeneAnalysis:
         for chromosome, start, end in intervals:
             coords = {"chromosome": chromosome, "start": start, "end": end}
             interval_pileup = self._perform_targeted_pileup(bam_path, coords)
+            interval_failed = interval_pileup is None  # it could not run
+            if interval_failed:
+                interval_pileup = []
             interval_variants = [
                 v
                 for v in variants
@@ -763,7 +770,8 @@ class LightweightGeneAnalysis:
             ]
             intersecting_variants.extend(
                 self._find_intersecting_variants(
-                    coords, interval_variants, interval_pileup
+                    coords, interval_variants, interval_pileup,
+                    pileup_failed=interval_failed,
                 )
             )
             pileup_data.extend(interval_pileup)
@@ -833,8 +841,14 @@ class LightweightGeneAnalysis:
 
     def _perform_targeted_pileup(
         self, bam_path: str, gene_coords: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
-        """Perform targeted pileup using pysam for a specific gene region."""
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Perform targeted pileup using pysam for a specific gene region.
+
+        Returns one entry per covered position; ``[]`` when the pileup ran and
+        no read covers the region. ``None`` when it could not run or failed
+        part-way (BAM unreadable, no index, contig missing, an error), so the
+        sites can be marked "pileup_failed" rather than "no reads".
+        """
 
         print(f"         Opening BAM file: {bam_path}")
 
@@ -844,7 +858,7 @@ class LightweightGeneAnalysis:
         except Exception as e:
             print(f"         Error opening BAM file: {e}")
             self.logger.error(f"Error opening BAM file {bam_path}: {e}")
-            return []
+            return None
 
         # Check if BAM file has an index
         try:
@@ -855,9 +869,10 @@ class LightweightGeneAnalysis:
             print(f"         Try running: samtools index {bam_path}")
             self.logger.error(f"BAM file missing index: {e}")
             bam_file.close()
-            return []
+            return None
 
         pileup_data = []
+        failed = False
 
         try:
             # Get the chromosome name as it appears in the BAM file
@@ -880,7 +895,7 @@ class LightweightGeneAnalysis:
                 self.logger.warning(
                     f"Chromosome {chrom_name} not found in BAM file. Available: {list(bam_file.references)[:5]}..."
                 )
-                return []
+                return None
 
             # Get pileup for the specific region
             start_pos = gene_coords["start"]
@@ -981,6 +996,7 @@ class LightweightGeneAnalysis:
             )
 
         except Exception as e:
+            failed = True
             print(f"         Error during pileup analysis: {e}")
             self.logger.error(f"Error during pileup analysis: {e}")
             import traceback
@@ -990,15 +1006,21 @@ class LightweightGeneAnalysis:
         finally:
             bam_file.close()
 
-        return pileup_data
+        # A pileup that stopped part-way would make every later site look unread
+        return None if failed else pileup_data
 
     def _find_intersecting_variants(
         self,
         gene_coords: Dict[str, Any],
         gene_variants: List[Dict],
         pileup_data: List[Dict[str, Any]],
+        pileup_failed: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Find pathogenic variants that intersect with coverage data and analyze evidence."""
+        """Find pathogenic variants that intersect with coverage data and analyze evidence.
+
+        A site with no pileup column is "no_reads", or "pileup_failed" when the
+        pileup itself could not run (then nothing about the reads is known).
+        """
 
         # Create position lookup for fast access
         pileup_by_position = {entry["position"]: entry for entry in pileup_data}
@@ -1033,7 +1055,7 @@ class LightweightGeneAnalysis:
                     "reference_support": 0,
                     "alternate_support": 0,
                     "variant_allele_frequency": 0.0,
-                    "evidence_level": "no_reads",
+                    "evidence_level": "pileup_failed" if pileup_failed else "no_reads",
                     "zygosity": "unknown",
                     "total_coverage": 0,
                     "base_counts": {},
@@ -1601,7 +1623,22 @@ class LightweightGeneAnalysis:
             supported = [v for v in checked if v["supported"]]
 
             summary = gene_data["summary"]
-            summary["sites_checked"] = len(checked)
+
+            def _level_count(level):
+                return sum(
+                    1
+                    for v in checked
+                    if (v.get("evidence_analysis") or {}).get("evidence_level") == level
+                )
+
+            # Sites whose reads were looked at; unread ones are counted apart
+            summary["sites_without_reads"] = _level_count("no_reads")
+            summary["sites_pileup_failed"] = _level_count("pileup_failed")
+            summary["sites_checked"] = (
+                len(checked)
+                - summary["sites_without_reads"]
+                - summary["sites_pileup_failed"]
+            )
             summary["total_variants"] = len(supported)
             summary["high_coverage_variants"] = sum(
                 1 for v in supported if v["coverage_status"] == "high"
@@ -1612,12 +1649,6 @@ class LightweightGeneAnalysis:
             summary["insufficient_evidence_sites"] = sum(
                 1 for v in checked if needs_review(v.get("evidence_analysis"))
             )
-            summary["sites_without_reads"] = sum(
-                1
-                for v in checked
-                if (v.get("evidence_analysis") or {}).get("evidence_level") == "no_reads"
-            )
-
             if summary["high_coverage_variants"] > 0:
                 summary["pathogenic_status"] = "present_with_good_coverage"
             elif summary["total_variants"] > 0:
