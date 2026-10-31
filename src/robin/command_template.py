@@ -34,7 +34,8 @@ def shell_command_for_file(template: str) -> str:
     and a ``(...)`` group each start a new unquoted context, even inside
     double quotes, so in ``"$(dirname "{file}")"`` the inner quotes are the
     ones that count. A single quote-state misread that and left the path
-    unquoted, so it split at spaces. Not followed: ``case`` patterns inside
+    unquoted, so it split at spaces. ``${file}`` is the shell's own variable
+    ``file`` and is left alone. Not followed: ``case`` patterns inside
     ``$(...)``, here-documents and comments. None of this affects safety:
     the file name is never shell text, whatever the quoting.
     """
@@ -46,7 +47,12 @@ def shell_command_for_file(template: str) -> str:
     i = 0
     while i < len(template):
         ctx = stack[-1]
-        if template.startswith(_PLACEHOLDER, i):
+        # "${file}" is the shell's own parameter expansion of a variable named
+        # file, not the placeholder ("\${file}" is a literal $ and then it is).
+        after_dollar = (
+            i > 0 and template[i - 1] == "$" and not (i > 1 and template[i - 2] == "\\")
+        )
+        if template.startswith(_PLACEHOLDER, i) and not after_dollar:
             if ctx == '"':
                 out.append(ref)
             elif ctx == "'":

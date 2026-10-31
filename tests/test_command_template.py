@@ -80,6 +80,13 @@ def test_nested_command_substitutions_keep_the_path_whole(tmp_path):
     assert _printed_args(template, path, tmp_path) == ["a b"]
 
 
+def test_a_shell_variable_named_file_is_left_alone(tmp_path):
+    # "${file}" is the shell's own parameter expansion, not the placeholder.
+    # It used to become "$"${ROBIN_FILE}"", i.e. the PID followed by text.
+    template = "file=x; printf '%s\\n' \"${file}\" ${file} {file}"
+    assert _printed_args(template, PLAIN, tmp_path) == ["x", "x", PLAIN]
+
+
 def test_a_hostile_name_inside_command_substitution_comes_back_exact(tmp_path):
     path = str(tmp_path / HOSTILE)
     template = "printf '%s\\n' \"$(basename \"{file}\")\""
