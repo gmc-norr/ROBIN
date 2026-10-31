@@ -46,7 +46,7 @@ and this project (almost) adheres to [Semantic Versioning](https://semver.org/sp
 - **A multi-BAM CNV batch counts each BAM once (CNV-3):** the batch's last BAM was added to the sample's counts a second time, and the saved counts kept it for the rest of the run.
 
 ### Changed
-- **CNV results for the same data change (CNV-1):** `CNV2.npy` is now the control alone, so `CNV3.npy`, the sex estimate and the chromosome statistics change with it, most early in a run and later in a long run. A contig that only the sample's BAM has (not in the control) is left out of `CNV3.npy`; it used to be compared with its own reads. CNV runs are also faster: the control is no longer re-read alongside each BAM.
+- **CNV results for the same data change (CNV-1):** `CNV2.npy` is now the control alone, so `CNV3.npy`, the sex estimate and the chromosome statistics change with it, most early in a run and later in a long run. A contig that only the sample's BAM has (not in the control) is left out of `CNV3.npy`; it used to be compared with its own reads. CNV runs are also faster: each BAM is read once, not a second time for the control's profile.
 - **Lightweight variant results:**
   - New gene status "Insufficient Evidence": a site with 1–2 alternate reads, an indel or multi-base change (which a pileup can't call), or reads showing neither allele.
   - Each checked site has `supported` and `needs_review`. The per-gene counts and the totals count supported sites only.
