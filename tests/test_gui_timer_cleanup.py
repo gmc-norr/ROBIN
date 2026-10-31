@@ -39,19 +39,28 @@ GUI_FILES = [  # the eight sites GUI-2 names, plus gui_launcher as a ninth
 
 
 def test_no_refresh_timer_is_torn_down_on_disconnect():
-    """GUI-2: on_disconnect also fires on reconnect in NiceGUI 3, and nothing reactivates."""
+    """GUI-2: on_disconnect also fires on reconnect in NiceGUI 3, and nothing reactivates.
+
+    Scans every source file, not only GUI_FILES, so a new page that hangs its
+    timer off on_disconnect is caught too, and shortening the list cannot make
+    this pass."""
+    scanned = sorted((REPO_ROOT / "src" / "robin").rglob("*.py"))
+    scanned_rel = {p.relative_to(REPO_ROOT).as_posix() for p in scanned}
+    assert set(GUI_FILES) <= scanned_rel
     offenders = []
-    for rel in GUI_FILES:
-        text = (REPO_ROOT / rel).read_text()
-        for n, line in enumerate(text.splitlines(), 1):
+    for path in scanned:
+        for n, line in enumerate(path.read_text().splitlines(), 1):
             if "on_disconnect" in line:
-                offenders.append(f"{rel}:{n}")
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{n}")
     assert offenders == []
 
 
 def test_every_file_that_had_one_now_uses_on_delete():
+    # Nine sites: a shorter list would quietly test less.
+    assert len(GUI_FILES) == 9
     for rel in GUI_FILES:
-        assert "on_delete" in (REPO_ROOT / rel).read_text(), rel
+        # The call itself: a bare "on_delete" would also match "on_deleted".
+        assert "client.on_delete(" in (REPO_ROOT / rel).read_text(), rel
 
 
 def test_on_delete_exists_in_the_installed_nicegui():
