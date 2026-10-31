@@ -30,6 +30,17 @@ def _cnv_contig_ok(contig: str) -> bool:
     return contig in CNV_PLOT_CONTIGS
 
 
+def breakpoint_midpoints(arr: Any, chromosome: str) -> List[int]:
+    """Where to draw each breakpoint of ``chromosome``: the middle of its window.
+
+    ``arr`` is ``cnv_data_array.npy`` as ``save_cnv_files`` writes it, with
+    fields ``name, start, end``. Both CNV views draw from this, so they agree.
+    """
+    return [
+        (int(r["start"]) + int(r["end"])) // 2 for r in arr if r["name"] == chromosome
+    ]
+
+
 def _is_dark_mode() -> bool:
     """Quasar ``body--dark`` via app storage (see theme.frame)."""
     try:
@@ -1715,10 +1726,9 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                 idx_cyto_abs is not None
                                 and state.get("bp_array") is not None
                             ):
-                                arr = state["bp_array"]
-                                pos = [
-                                    int(r["end_pos"]) for r in arr if r["name"] == selected
-                                ]
+                                # The array's fields are name, start, end;
+                                # "end_pos" never existed, so no line drew.
+                                pos = breakpoint_midpoints(state["bp_array"], selected)
                                 lines = [
                                     {
                                         "xAxis": float(p),
@@ -2218,16 +2228,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         selected = launcher._cnv_state.setdefault(
                             str(sample_dir), {}
                         ).get("selected_chrom", "All")
-                        filtered_breakpoints = 0
-                        breakpoint_lines = []
-                        for r in arr:
-                            if selected == "All" or r["name"] == selected:
-                                # Use the midpoint of the breakpoint as the line position
-                                start_pos = int(r["start"])
-                                end_pos = int(r["end"])
-                                midpoint = (start_pos + end_pos) // 2
-                                breakpoint_lines.append(midpoint)
-                                filtered_breakpoints += 1
+                        # Lines are drawn only for one chromosome (see below)
+                        breakpoint_lines = breakpoint_midpoints(arr, selected)
                         # Only add density overlay in single-chromosome view; preserve existing diff series
                         current_series = [
                             s
@@ -2274,14 +2276,9 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                             if not s.get("name", "").startswith("Breakpoint")
                         ]
                         if selected != "All" and state.get("show_bp", True):
-                            arr = state["bp_array"]
-                            breakpoint_lines = []
-                            for r in arr:
-                                if selected == "All" or r["name"] == selected:
-                                    start_pos = int(r["start"])
-                                    end_pos = int(r["end"])
-                                    midpoint = (start_pos + end_pos) // 2
-                                    breakpoint_lines.append(midpoint)
+                            breakpoint_lines = breakpoint_midpoints(
+                                state["bp_array"], selected
+                            )
                             if current_series:
                                 main_series = current_series[0]
                                 markLine_data = []
