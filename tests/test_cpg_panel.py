@@ -70,6 +70,15 @@ def test_a_duplicated_panel_row_does_not_double_the_counts(tmp_path):
     assert list(out["n_canonical"]) == [1]
 
 
+def test_a_wide_bed_panel_is_read_by_its_first_three_columns(tmp_path):
+    # pandas with header=None and fewer names than columns turns the extra
+    # leading columns into the index (see the add-panel learning).
+    bed = tmp_path / "panel.bed"
+    bed.write_text("chr1\t900\t902\tcg900\t0\t+\n")
+    out = _merge(tmp_path, _per_bam(tmp_path / "b.parquet", [(900, "+", 2, 1)]), str(bed))
+    assert set(out["chromStart"]) == {900}
+
+
 def test_a_negative_panel_row_is_harmless(tmp_path):
     per_bam = _per_bam(tmp_path / "b.parquet", [(900, "+", 1, 1)])
     out = _merge(tmp_path, per_bam, _panel(tmp_path / "parquet_filter.txt", [(-1, 0), (900, 902)]))

@@ -115,11 +115,14 @@ def _read_cpg_panel(filter_bed_file: str) -> pd.DataFrame:
                 rename[c] = "End"
         bed_df = bed_df.rename(columns=rename)
     else:
+        # usecols: with header=None and fewer names than columns, pandas would
+        # turn the extra leading columns into the index.
         bed_df = pd.read_csv(
             filter_bed_file,
             sep="\t",
             header=None,
-            names=["Chromosome", "Start", "End", "cg_label"],
+            usecols=[0, 1, 2],
+            names=["Chromosome", "Start", "End"],
             compression="gzip" if filter_bed_file.endswith(".gz") else None,
             dtype={"Chromosome": str},
         )
