@@ -696,7 +696,9 @@ def estimate_sex_from_cnv(cnv_data: Dict, logger) -> str:
         return "Unknown"
 
 
-def detect_breakpoints_from_cnv(cnv_data: Dict, bin_width: int, logger) -> List[Dict]:
+def detect_breakpoints_from_cnv(
+    cnv_data: Dict, bin_width: int, logger
+) -> Optional[List[Dict]]:
     """
     Detect breakpoints in CNV data using change point detection.
 
@@ -706,9 +708,13 @@ def detect_breakpoints_from_cnv(cnv_data: Dict, bin_width: int, logger) -> List[
         logger: Logger instance
 
     Returns:
-        List of detected breakpoints
+        List of detected breakpoints; ``[]`` when detection ran and found
+        none. ``None`` when it failed - outright, or on every chromosome it
+        tried - so callers keep the last good breakpoints instead of saving
+        an empty result that reads as "none found".
     """
     breakpoints = []
+    attempted = failed = 0
 
     try:
         logger.debug("Detecting breakpoints in CNV data")
@@ -716,6 +722,7 @@ def detect_breakpoints_from_cnv(cnv_data: Dict, bin_width: int, logger) -> List[
         # Simple sequential processing for all datasets
         for key, data in cnv_data.items():
             if key != "chrM" and len(data) > 3:
+                attempted += 1
                 try:
                     paired_changepoints = run_ruptures(
                         data, penalty_value=10, bin_width=bin_width
@@ -732,14 +739,18 @@ def detect_breakpoints_from_cnv(cnv_data: Dict, bin_width: int, logger) -> List[
                                 }
                             )
                 except Exception as e:
-                    logger.debug(f"Error processing chromosome {key}: {e}")
+                    failed += 1
+                    logger.warning(f"Breakpoint detection failed on {key}: {e}")
 
+        if attempted and failed == attempted:
+            logger.warning("Breakpoint detection failed on every chromosome")
+            return None
         logger.debug(f"Detected {len(breakpoints)} breakpoints")
         return breakpoints
 
     except Exception as e:
         logger.error(f"Error in breakpoint detection: {e}")
-        return []
+        return None
 
 
 def calculate_chromosome_stats_from_cnv(cnv_data: Dict, logger) -> Dict:
@@ -910,14 +921,20 @@ def generate_bed_files(bed_dir, analysis_counter, breakpoints, cnv_data, bin_wid
         # Generate BED file for breakpoints. Written even when there are none:
         # the master BED reads the newest breakpoints_NNN.bed, so skipping it
         # left the previous run's breakpoints in place after a flat run.
-        breakpoint_file = os.path.join(
-            bed_dir, f"breakpoints_{analysis_counter:03d}.bed"
-        )
-        with open(breakpoint_file, "w") as f:
-            for bp in breakpoints or []:
-                f.write(
-                    f"{bp['chromosome']}\t{bp['start']}\t{bp['end']}\tbreakpoint\n"
-                )
+        # None means detection failed: then keep the last good file.
+        if breakpoints is None:
+            logger.warning(
+                "Breakpoint detection failed; keeping the previous breakpoints BED"
+            )
+        else:
+            breakpoint_file = os.path.join(
+                bed_dir, f"breakpoints_{analysis_counter:03d}.bed"
+            )
+            with open(breakpoint_file, "w") as f:
+                for bp in breakpoints:
+                    f.write(
+                        f"{bp['chromosome']}\t{bp['start']}\t{bp['end']}\tbreakpoint\n"
+                    )
 
         logger.debug(f"Generated BED files in {bed_dir}")
 
@@ -972,11 +989,13 @@ def save_cnv_files(
 
         # Save breakpoint data as structured array. An empty one when there
         # are none, so the GUI never shows the previous run's breakpoints.
-        breakpoint_array = np.array(
-            [(bp["chromosome"], bp["start"], bp["end"]) for bp in breakpoints or []],
-            dtype=[("name", "U10"), ("start", "i8"), ("end", "i8")],
-        )
-        np.save(os.path.join(sample_dir, "cnv_data_array.npy"), breakpoint_array)
+        # None means detection failed: then keep the last good array.
+        if breakpoints is not None:
+            breakpoint_array = np.array(
+                [(bp["chromosome"], bp["start"], bp["end"]) for bp in breakpoints],
+                dtype=[("name", "U10"), ("start", "i8"), ("end", "i8")],
+            )
+            np.save(os.path.join(sample_dir, "cnv_data_array.npy"), breakpoint_array)
 
         # Helper for atomic pickle writes to avoid readers seeing partial files
         def _atomic_pickle_dump(obj, target_path: str) -> None:
@@ -1003,7 +1022,8 @@ def save_cnv_files(
             "timestamp": time.time(),
             "bin_width": bin_width,
             "variance": variance,
-            "breakpoints_count": len(breakpoints),
+            # None when detection failed (unknown, not zero)
+            "breakpoints_count": None if breakpoints is None else len(breakpoints),
             "sex_estimate": sex_estimate,
         }
         _atomic_pickle_dump(
@@ -1340,7 +1360,10 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2, referenc
         logger.debug(f"Analysis result: {analysis_result}")
         logger.info(f"CNV analysis complete for {sample_id}")
         logger.info(f"Sex Estimate: {analysis_result['sex_estimate']}")
-        logger.info(f"Breakpoints: {len(analysis_result['breakpoints'])} detected")
+        if analysis_result["breakpoints"] is None:
+            logger.info("Breakpoints: detection failed; the previous ones are kept")
+        else:
+            logger.info(f"Breakpoints: {len(analysis_result['breakpoints'])} detected")
         
         return analysis_result
 
@@ -1720,7 +1743,10 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2,
         logger.info(f"Multi-BAM CNV analysis complete for {sample_id}")
         logger.info(f"Files processed: {analysis_result['files_processed']}/{analysis_result['total_files']}")
         logger.info(f"Sex Estimate: {analysis_result['sex_estimate']}")
-        logger.info(f"Breakpoints: {len(analysis_result['breakpoints'])} detected")
+        if analysis_result["breakpoints"] is None:
+            logger.info("Breakpoints: detection failed; the previous ones are kept")
+        else:
+            logger.info(f"Breakpoints: {len(analysis_result['breakpoints'])} detected")
         
         return analysis_result
 
