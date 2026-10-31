@@ -8,7 +8,7 @@
 **Updated:** 2026-10-30. SEC-9 is added. Fixes made in our fork are listed under "This fork and the original ROBIN", and each fixed finding has a **Status** line. Batch 2 (VAR-9, VAR-8, VAR-10) is fixed too.\
 **Updated:** 2026-10-30. Batch 3, step 3's quick wins, is fixed in our fork: GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3 and VAR-7. JOB-6 is only partly fixed — the timeout constant and its configurability, not the two consequences that overlap JOB-7.\
 **Updated:** 2026-10-31. Two follow-ups from batch 3's own review are fixed in our fork: `robin add-panel` reads BED files wider than 6 columns (BED12 was saved garbled), and the variant panel's "Hide Results" keeps pointing at the file it showed.\
-**Updated:** 2026-10-31. Five findings from a review of the fix series (`reviews/2026-10-31-fix-series-review.md`) are fixed in our fork: stale CNV breakpoints after a flat run, an older LGA results file hiding a newer one, an LGA status timer that never stopped, SNV sites with no usable bases read as "None Detected", and `{file}` quoting inside `$(...)`.
+**Updated:** 2026-10-31. Five findings from a review of the fix series (`reviews/2026-10-31-fix-series-review.md`) are fixed in our fork: stale CNV breakpoints after a flat run, an older LGA results file hiding a newer one, an LGA status timer that never stopped, SNV sites with no usable bases read as "None Detected", and `{file}` quoting inside `$(...)`. ClinVar sites no read covers now need review too, and that batch's own review led to two more fixes (a failed CNV detection, a "(legacy location)" caption).
 
 ## This fork and the original ROBIN
 
@@ -42,6 +42,9 @@ This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [g
 | The newest trusted variant results file is the one shown | VAR-9 follow-up | `f3f29cd` | A fresh negative is no longer hidden by an older positive in the other results location |
 | The variant panel's status timer stops when a run ends | VAR-9 follow-up | `6acc03d` | An opened results view stays open instead of resetting every half second |
 | An SNV site with no usable bases needs review | VAR-8 follow-up | `b26c410` | Such a gene reads "insufficient evidence", not "None Detected" |
+| A ClinVar site no read covers needs review | VAR-8 follow-up | `65ab945` | Such a gene reads "insufficient evidence", and its summary counts `sites_without_reads`; a site just before a BED region is no longer picked |
+| A failed CNV breakpoint detection keeps the last good breakpoints | CNV-5 follow-up | `2ca41c7` | A warning in the log instead of a silent "no breakpoints" |
+| Fresh variant results are never captioned "(legacy location)" | VAR-9 follow-up | `0964752` | In a watch-folder setup, a result just produced no longer reads as old |
 | `{file}` inside `$(...)` is quoted for that context | SEC-9 follow-up | `ab5151b` | Templates like `"$(dirname "{file}")/x.bai"` work on paths with spaces |
 
 Every change has a regression test in `tests/`. The details are in `CHANGELOG.md` under `[Unreleased]`. Add a row here each time a fix lands.
@@ -273,7 +276,7 @@ Only two tests exist (added after this review), and no CI runs them.
 - **Where:** `cnv_analysis.py:574-580, 714-730`
 - **What's wrong:** ruptures always returns the series length as its last change point. That adds about 24 spurious regions to the master BED.
 - **Fix:** use `result[:-1]`.
-- **Status:** fixed in our fork (`53165ed`). `run_ruptures` drops the terminator where it is produced, so those regions leave the master BED and `breakpoints_count` falls by about 24 per run. A chromosome whose only change point is the series end now yields no region at all, and when every chromosome does, `cnv_data_array.npy` and `breakpoints_NNN.bed` were not written, so the previous run's breakpoints stayed in the GUI and the master BED. Since `4032f8b` both are written empty instead. Still open in the original ROBIN.
+- **Status:** fixed in our fork (`53165ed`). `run_ruptures` drops the terminator where it is produced, so those regions leave the master BED and `breakpoints_count` falls by about 24 per run. A chromosome whose only change point is the series end now yields no region at all, and when every chromosome does, `cnv_data_array.npy` and `breakpoints_NNN.bed` were not written, so the previous run's breakpoints stayed in the GUI and the master BED. Since `4032f8b` both are written empty instead; a detection that *failed* writes neither and logs a warning, so the last good breakpoints stay (`2ca41c7`). Still open in the original ROBIN.
 
 The CNV summary card and the report's CNV problems are covered in sections 6 and 7.
 
@@ -330,7 +333,7 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
 - **What's wrong:** Every covered ClinVar site in a region is counted as "found", even when its own evidence says `alternate_support=0, evidence_level="no_support"`. `export_json` then sets `pathogenic_status="present_with_good_coverage"` once coverage reaches 10 reads. The GUI's gene table and the HTML report (line 1233) show that status.
 - **Reproduced:** 20 reads with only the reference C at a pathogenic C>T site. The pileup correctly shows zero alternate reads, but the summary reports one gene with pathogenic variants.
 - **Fix:** keep "known site checked" separate from "variant supported". Base positive statuses and counts only on alternate-read evidence, and keep explicit "insufficient evidence" states.
-- **Status:** fixed in our fork (`aeb5339`): a site counts with 3 or more alternate reads; 1–2 reads, an indel or multi-base change, or reads showing neither allele give "insufficient evidence" (`e5527a3`), and so does an SNV site with no usable bases, e.g. every read deleted there (`b26c410`). ClinVar sites with no reads at all still drop out before export. The unused HTML report (`generate_report`, no callers) still uses the old counting. Still open in the original ROBIN.
+- **Status:** fixed in our fork (`aeb5339`): a site counts with 3 or more alternate reads; 1–2 reads, an indel or multi-base change, or reads showing neither allele give "insufficient evidence" (`e5527a3`), and so does an SNV site with no usable bases, e.g. every read deleted there (`b26c410`), and a ClinVar site no read covers (`65ab945`), which used to drop out before export, so a gene whose only site had no reads vanished from the results. The unused HTML report (`generate_report`, no callers) still uses the old counting. Still open in the original ROBIN.
 
 **VAR-9 · critical · Confirmed (reproduced; spot-checked)**: A missing BAM for sample A falls back to sample B's BAM. *(IR-02)*
 - **Where:** `analysis/lightweight_gene_analysis.py:1562-1605, 1665-1677, 1710-1730`; called from `gui/components/coverage.py:5882-5932, 6012-6069`
