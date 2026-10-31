@@ -918,38 +918,29 @@ def _generate_unique_gene_bed(input_bed_path: Path, output_bed_path: Path) -> bo
     try:
         import pandas as pd
         
-        # Read the input BED file - handle both 4-column and 6-column BED formats
-        try:
-            # Try 6-column format first (chrom, start, end, gene, score, strand)
-            df = pd.read_csv(
-                input_bed_path,
-                sep='\t',
-                header=None,
-                names=['chrom', 'start', 'end', 'gene', 'score', 'strand'],
-                comment='#'
-            )
-        except ValueError:
-            # Fallback to 4-column format (chrom, start, end, gene)
-            df = pd.read_csv(
-                input_bed_path,
-                sep='\t',
-                header=None,
-                names=['chrom', 'start', 'end', 'gene'],
-                comment='#'
-            )
-        
-        # Process gene names - handle comma-separated genes
+        # Read each line the way _validate_bed_file does and keep the first 4
+        # columns; any after them (score, strand, the rest of BED12) are
+        # ignored. read_csv with six column names took the extra columns of a
+        # wider file as its index and shifted every field: 7 or 8 columns
+        # failed on int('EGFR'), and BED12 was saved garbled with a success
+        # message.
         processed_regions = []
-        for _, row in df.iterrows():
-            genes = [g.strip() for g in str(row['gene']).split(',')]
-            for gene in genes:
-                if gene and gene != 'nan':  # Skip empty gene names and NaN values
-                    processed_regions.append({
-                        'chrom': row['chrom'],
-                        'start': int(row['start']),
-                        'end': int(row['end']),
-                        'gene': gene
-                    })
+        with open(input_bed_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split('\t')
+                chrom, start, end = parts[0], int(parts[1]), int(parts[2])
+                # Process gene names - handle comma-separated genes
+                for gene in (g.strip() for g in parts[3].split(',')):
+                    if gene:  # Skip empty gene names
+                        processed_regions.append({
+                            'chrom': chrom,
+                            'start': start,
+                            'end': end,
+                            'gene': gene
+                        })
         
         # Convert to DataFrame and remove duplicates
         processed_df = pd.DataFrame(processed_regions)
@@ -1157,7 +1148,8 @@ def add_panel(bed_file: Path, panel_name: str, validate_only: bool) -> None:
     Supported formats:
     - 4-column: chr1, 1000000, 2000000, GENE1
     - 6-column: chr1, 1000000, 2000000, GENE1, 0, +
-    
+    - wider, such as BED12: only the first 4 columns are used
+
     Gene names can be comma-separated for regions covering multiple genes.
     The output will be a unique gene list with one entry per gene.
 
