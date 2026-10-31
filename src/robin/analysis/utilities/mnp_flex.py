@@ -209,12 +209,13 @@ class APIClient:
 
     def process_streaming(self, file1: str, file2: str, out_file: str) -> None:
         """
-        One-pass merge-join of sorted inputs. Outputs one row per CpG position
-        (per strand) within each reference window, in stranded fashion:
+        One-pass merge-join of sorted inputs. Outputs each bedmethyl row that
+        lies within a reference window:
         chr start end coverage methylation_percentage IlmnID
 
-        Forward and reverse strand CpGs are reported separately (e.g. for a CpG
-        at 10524-10526: one row for 10524-10525, one for 10525-10526).
+        The cumulative parquet holds one row per CpG (both strands summed onto
+        the C), so a CpG at 10524-10526 gives one row, 10524-10525. A stranded
+        bedmethyl would give one row per strand.
         """
 
         def chr_pos_key(x):
