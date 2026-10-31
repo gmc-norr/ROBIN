@@ -9,7 +9,8 @@
 **Updated:** 2026-10-30. Batch 3, step 3's quick wins, is fixed in our fork: GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3 and VAR-7. JOB-6 is only partly fixed — the timeout constant and its configurability, not the two consequences that overlap JOB-7.\
 **Updated:** 2026-10-31. Two follow-ups from batch 3's own review are fixed in our fork: `robin add-panel` reads BED files wider than 6 columns (BED12 was saved garbled), and the variant panel's "Hide Results" keeps pointing at the file it showed.\
 **Updated:** 2026-10-31. Five findings from a review of the fix series (`reviews/2026-10-31-fix-series-review.md`) are fixed in our fork: stale CNV breakpoints after a flat run, an older LGA results file hiding a newer one, an LGA status timer that never stopped, SNV sites with no usable bases read as "None Detected", and `{file}` quoting inside `$(...)`. ClinVar sites no read covers now need review too, and that batch's own review led to two more fixes (a failed CNV detection, a "(legacy location)" caption). Six more bugs found along the way are fixed too; see the fork table.\
-**Updated:** 2026-10-31. Step 4 is fixed in our fork: CNV-1 (the control profile comes from the control's own counts, which also ends a 16-bit wrap found while fixing it), with CNV-3 (a batch's last BAM counted twice) in the same code.
+**Updated:** 2026-10-31. Step 4 is fixed in our fork: CNV-1 (the control profile comes from the control's own counts, which also ends a 16-bit wrap found while fixing it), with CNV-3 (a batch's last BAM counted twice) in the same code.\
+**Updated:** 2026-11-01. Step 5, the methylation maths, is fixed in our fork except METH-7 (left for later): METH-1 to METH-6, METH-13 and METH-14, checked against `modkit pileup --combine-strands` on synthetic reads, and part of METH-12.
 
 ## This fork and the original ROBIN
 
@@ -59,6 +60,10 @@ This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [g
 | The CNV control's profile comes from the control's own counts | CNV-1 | `b682da0`, `6ab6928`, `a06c4a2`, `2681f8b` | Gains and losses no longer fade over a run, and a sample no longer inherits the previous sample's events. CNV results change for the same data; a contig the control lacks leaves `CNV3.npy` |
 | The CNV control's profile no longer wraps at 16 bits | Found while fixing CNV-1 | `6ab6928` | Early in a run (up to about 24,000 reads), the CNV plot is no longer off by several copies |
 | A multi-BAM CNV batch counts each BAM once | CNV-3 | `391e159` | The batch's last BAM no longer counts double for the rest of the run |
+| Methylation counts are summed per CpG across batches and both strands | METH-1, METH-2, METH-4, METH-5 | `c50365a` | Methylation values and classifier results change; NanoDX sees minus-strand reads. A sample's old parquet is converted on its next merge |
+| matkit counts each call as modkit does | METH-3, METH-13, METH-14 | `d304ded` | Unsure calls leave coverage; implicit-mode Cs count as unmethylated; supplementary alignments no longer count; MGMT's input changes too |
+| The CpG panel is read as 0-based, and its cache can't go stale | METH-6, METH-5, part of METH-12 | `dfd909f` | The base before each CpG is no longer pulled in |
+| A test against modkit pins step 5 | Step 5 | `dfe9f29`, `1c6c65f`, `5bcd583` | Nothing |
 
 Every change has a regression test in `tests/`. The details are in `CHANGELOG.md` under `[Unreleased]`. Add a row here each time a fix lands.
 
@@ -113,7 +118,7 @@ Only two tests exist (added after this review), and no CI runs them.
 | 1 | SEC-1 *(fixed in our fork)* | Ray dashboard open on all network interfaces, with no password | Anyone on the network can run code as the ROBIN user | `cli.py:1725-1731`, `2435-2449` | Small (two places) |
 | 2 | SEC-8 *(fixed in our fork)* | MGMT runs the sample folder path through the shell | A crafted sample name runs commands; a space in a path breaks MGMT | `analysis/mgmt_analysis.py:836-838` | Small |
 | 3 | VAR-9 *(fixed in our fork)* | A missing BAM for sample A falls back to sample B's BAM | Another patient's variant evidence is saved under this sample | `analysis/lightweight_gene_analysis.py:1562-1605` | Small |
-| 4 | METH-1 | Methylation % is averaged without weighting by coverage | Every classifier gets biased input, and adding depth doesn't make it better | `analysis/temp_utilities.py:285-391` | Small |
+| 4 | METH-1 *(fixed in our fork)* | Methylation % is averaged without weighting by coverage | Every classifier gets biased input, and adding depth doesn't make it better | `analysis/temp_utilities.py:285-391` | Small |
 | 5 | CNV-1 *(fixed in our fork)* | CNV control reference is modified by every patient's reads | Real gains and losses fade over a run; false events appear in the next patient | `analysis/cnv_analysis.py:118-145` | Medium (build the control profile without patient reads) |
 | 6 | JOB-1 | One waiting slot per classifier type, shared by all samples | In multi-sample runs, a sample's final classification can silently never run | `workflow_ray.py:2462-2535` | Medium |
 | 7 | GUI-1 *(fixed in our fork)* | Classification panel freezes if any classifier is disabled | GUI keeps showing the first result for the rest of the run | `gui/components/classification.py:1003-1021` | Small (two loops) |
@@ -121,7 +126,7 @@ Only two tests exist (added after this review), and no CI runs them.
 | 9 | VAR-8 *(fixed in our fork)*, VAR-1, VAR-2, VAR-3 *(fixed in our fork)* | Variant summaries and ClinVar handling | Reference-only sites reported as pathogenic; IDH1 R132H-type alleles lost; "conflicting" shown as pathogenic; a stale index returns nothing | `lightweight_gene_analysis.py`, `snp_processing.py`, `clinvar_manager.py`, `reporting/sections/variants.py` | Small to medium |
 | 10 | TGT-1, TGT-2 | Early BAMs never reach the SNP input; the master BED can drop the panel | SNP calls and IGV miss reads that the coverage numbers include | `analysis/target_analysis.py`, `cnv_analysis.py`, `master_bed_generator.py` | Medium |
 | 11 | JOB-6 *(partly fixed in our fork)* | 60-second idle timeout (a test value) left in | A sample is marked Complete and finalised too early; SNP calls cover only part of the data | `gui_launcher.py:420` | One line |
-| 12 | METH-3, METH-4 | matkit counts failed calls in coverage; NanoDX drops minus-strand calls | Methylation pushed down; about half the reads never reach NanoDX | `utilities/matkit.py`, `nanodx_analysis.py` | Medium |
+| 12 | METH-3, METH-4 *(fixed in our fork)* | matkit counts failed calls in coverage; NanoDX drops minus-strand calls | Methylation pushed down; about half the reads never reach NanoDX | `utilities/matkit.py`, `nanodx_analysis.py` | Medium |
 | 13 | ERR-1 | Failed jobs counted as "completed"; errors never sent to the GUI | Stale or empty results look current | `workflow_ray.py`, the handlers | Medium |
 | 14 | JOB-2 | Same BAM can be processed twice, for example after a restart | Coverage and counts doubled | `workflow_ray.py:4949-4977` | Medium |
 | 15 | REP-1 *(fixed in our fork)* | PDF report uses the wrong Random Forest cut-offs | The PDF can say "High" where the GUI says "Medium" | `reporting/sections/classification.py:399` | One line |
@@ -166,6 +171,7 @@ Only two tests exist (added after this review), and no CI runs them.
   - 50 reads at 80%, then 1 read at 0%: stored 40.0%, true 78.4%.
   - Simulation of 500 CpGs at 80%, arriving at 20× depth one read per batch: NanoDX "methylated" calls (≥60%) fell to 81% of sites, against 99% with weighting.
 - **Fix:** after summing, set `percent_modified = 100 * n_mod / valid_cov`.
+- **Status:** fixed in our fork (`c50365a`): every write sums `n_mod` and `n_canonical` per CpG and sets `percent_modified = 100 * n_mod / valid_cov`. The case above now stores 78.43%. Checked against `modkit pileup` on synthetic reads (`dfe9f29`; result `5bcd583`). Still open in the original ROBIN.
 
 **METH-2 · high · Confirmed**: The first write isn't aggregated, so random forest can see values over 100%.
 - **Where:** `temp_utilities.py:285-333`
@@ -174,12 +180,14 @@ Only two tests exist (added after this review), and no CI runs them.
   - The random forest path sums `score`, so the R script gets methylation of 200-300%.
   - Sturgeon counts the duplicate rows as separate sites.
 - **Fix:** always run the same aggregation before writing (this is the same fix as METH-1).
+- **Status:** fixed in our fork (`c50365a`): the first write goes through the same summing. Random forest's input is one row per CpG at the parquet's percent, never over 100 (`1c6c65f`). Still open in the original ROBIN.
 
 **METH-3 · high · Confirmed**: matkit puts failed calls into `valid_cov`.
 - **Where:** `utilities/matkit.py:1344, 1373-1385, 1132-1139`
 - **What's wrong:** The total is incremented for every read before it is classified, so fails are counted. The result is `n_mod / (mod + canonical + fail)`; modkit leaves fails out of the denominator.
 - **Example:** 6 modified, 2 canonical and 2 failed reads are stored as 60% instead of 75%. That moves the site across Sturgeon's 0.7 cut-off and onto NanoDX's 60% cut-off.
 - **Plausible, secondary:** with combine_mods, the call uses max(P_m, P_h, P_C) rather than comparing P_m+P_h with P_C. This matters in brain tissue, which has high 5hmC.
+- **Status:** fixed in our fork (`d304ded`): `valid_cov` is `n_mod + n_canonical` in the per-BAM parquet and in MGMT's BED. The "plausible, secondary" point is refuted: modkit 0.6.4's `--combine-mods` also takes the most likely class, so a read with 5mC 0.45 and 5hmC 0.45 is a failed call in both. Still open in the original ROBIN.
 
 **METH-4 · high · Confirmed**: NanoDX and PanNanoDX drop every minus-strand CpG call.
 - **Where:** `nanodx_analysis.py:342-349`, `utilities/merge_bedmethyl.py:490-501`
@@ -188,12 +196,14 @@ Only two tests exist (added after this review), and no CI runs them.
   - About half the reads never reach NanoDX.
   - Sturgeon gets the two strand rows as equal votes, ignoring coverage: 3 reads at 100% count the same as 20 reads at 0%.
 - **Fix:** shift − rows to position−1, then sum counts per CpG (the equivalent of `--combine-strands`).
+- **Status:** fixed in our fork (`c50365a`): a minus-strand row moves onto its CpG's C and the two strands' counts are summed, as `--combine-strands` does. NanoDX/PanNanoDX, Sturgeon, random forest and MNP-Flex each get one row per CpG (`1c6c65f`). Still open in the original ROBIN.
 
 **METH-5 · medium · Confirmed**: Panel intersect plus inner join double-counts sites.
 - **Where:** `temp_utilities.py:250-266`
 - **What's wrong:** `parquet_filter.txt` has 976 pairs of overlapping intervals, including 90 exact duplicates. After the widening in METH-6 there are 8,238. PyRanges `intersect` returns one row per overlap, so the join duplicates the site.
 - **Example:** in a CGCG, coverage is stored as 16 instead of 8.
 - **Fix:** use a semi-join, and remove duplicates from the panel.
+- **Status:** fixed in our fork (`dfd909f`, `c50365a`): exact duplicate panel rows are dropped, and rows are kept by a semi-join on the CpG's C, so each site counts once. Still open in the original ROBIN.
 
 **METH-6 · medium · Confirmed (spot-checked)**: `parquet_filter.txt` is already 0-based, so the v0.5 "1-based fix" is wrong.
 - **Where:** `temp_utilities.py:159-179`, `docs/releases/v0.5.md:19`
@@ -201,6 +211,7 @@ Only two tests exist (added after this review), and no CI runs them.
 - **What's wrong:** `Start - 1` widens every CpG to 3 bp, and the release note wrongly tells users their old parquets were wrong.
 - **Also:** the first data row is `chr1 -1 0 cg22940546`, which has a negative start.
 - **Fix:** read the file as plain 0-based BED, and correct the release note.
+- **Status:** fixed in our fork (`dfd909f`): the file is read as listed (cg13869341, cg02984631 and cg14817997 read "CG" in hg38 at their starts), the negative row is dropped, and `docs/releases/v0.5.md` carries a correction. 4,366 of the 900,614 rows are 1 bp long (3,091 "ch", 65 "rs" and 1,210 "cg" probes, some of them one base off a CpG in hg38); every row's start is treated as a CpG's C. Still open in the original ROBIN.
 
 **METH-7 · medium · Confirmed**: Classifiers never see coverage, and random forest gets a constant `cov=10`.
 - **Where:** `merge_bedmethyl.py:72-189, 751-797`, `random_forest_analysis.py:283-346`
@@ -230,6 +241,7 @@ Only two tests exist (added after this review), and no CI runs them.
 **METH-12 · low · Plausible**: The panel filter cache is keyed by the panel file's basename only.
 - **Where:** `temp_utilities.py:152`
 - **What's wrong:** A different panel file with the same name reuses the old ranges. The cache pickle is also written non-atomically, outside the lock.
+- **Status:** partly fixed in our fork (`dfd909f`): the cache's name carries a format version and the panel file's size and modification time, and it is written atomically, because every sample's old cache would otherwise have hidden METH-6's fix. Still open in the original ROBIN.
 
 **METH-13 · high · Confirmed (reproduced; spot-checked)**: Implicit canonical calls in MM tags are ignored, which pushes methylation up. *(IR-05)*
 - **Where:** `utilities/matkit.py:1287-1293, 1311-1333`
@@ -237,12 +249,14 @@ Only two tests exist (added after this review), and no CI runs them.
 - **Reproduced:** two reads cover `CGCG`, each with one confident modified call and one implicit canonical base. matkit stores 100% instead of 50% at each CpG.
 - **Who it affects:** only BAMs that use implicit mode. In `?` mode, skipped bases are "unknown", and ignoring them is correct. To check which mode a BAM uses: `samtools view x.bam | head -1 | grep -o 'MM:Z:C+[a-z]*[.?]\?'`.
 - **Fix:** follow the MM skip-mode rules when building each read's observations. Add test files for explicit, implicit and unknown modes, and compare with modkit.
+- **Status:** fixed in our fork (`d304ded`): in implicit mode, every C the MM tag skips is an unmethylated call; `?` mode is unchanged; an implicit group with no positions now counts every C instead of skipping the read. Still open in the original ROBIN.
 
 **METH-14 · medium · Confirmed (reproduced)**: Whether a low-quality read is filtered depends on where its alignments lie. *(IR-06)*
 - **Where:** `utilities/matkit.py:1263-1284`
 - **What's wrong:** A read is added to the "exclude" set only when its low-QS primary record is reached. Supplementary records that come earlier in coordinate order have already been counted, and are never removed.
 - **Reproduced:** the same QS=5 read keeps one methylation site when its supplementary alignment comes first, and none when its primary comes first. Both BAMs are coordinate-sorted.
 - **Fix:** decide whether a read passes the QS filter before counting any of its alignments.
+- **Status:** fixed in our fork (`d304ded`): only primary alignments count, as in modkit (its `--allow-non-primary` is off by default), so a low-QS read is dropped whatever the order of its records. Supplementary alignments no longer count toward methylation. Still open in the original ROBIN.
 
 **Not a problem:**
 - The 5hmC+5mC merge is by design.
@@ -791,7 +805,7 @@ Make each step below its own change, with its own regression test. The scripts i
    - VAR-3: force-rebuild the tabix index
    - VAR-7: keep all panel regions
 4. **CNV-1:** build the control profile without patient reads (see CNV-1; a deepcopy alone is not enough). *(done in our fork, with CNV-3)*
-5. **The methylation maths, as one change with a test against `modkit pileup --combine-strands`:**
+5. **The methylation maths, as one change with a test against `modkit pileup --combine-strands`:** *(done in our fork, except METH-7)*
    - METH-1 and METH-2: aggregate always, and recompute % from counts
    - METH-5: semi-join, and dedupe the panel
    - METH-6: drop the `Start-1`
@@ -817,4 +831,4 @@ Make each step below its own change, with its own regression test. The scripts i
 9. **Security hardening:** SEC-2 to SEC-7.
 10. **Pin and record versions** (PKG-1), **add CI with a test suite** (PKG-2), then start on the architecture items. Delete dead code first (ARCH-4), because it is cheap and stops fixes from landing in the wrong copy.
 
-Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9), the version pins, step 2 (VAR-9, VAR-8, VAR-10) and step 3's quick wins (GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3, VAR-7) are done too; see "This fork and the original ROBIN". Of step 3, only JOB-6 is partial: the timeout constant and its configurability are done, the merge-skip and the batch-BAM deletion that follow from the timeout firing are not, and they overlap JOB-7. The follow-ups batch 3's own review asked for soon are done as well, and so are the five findings of the 2026-10-31 review of the fix series. Step 4 (CNV-1) is done, with CNV-3, which sits in the same loop.
+Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9), the version pins, step 2 (VAR-9, VAR-8, VAR-10) and step 3's quick wins (GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3, VAR-7) are done too; see "This fork and the original ROBIN". Of step 3, only JOB-6 is partial: the timeout constant and its configurability are done, the merge-skip and the batch-BAM deletion that follow from the timeout firing are not, and they overlap JOB-7. The follow-ups batch 3's own review asked for soon are done as well, and so are the five findings of the 2026-10-31 review of the fix series. Step 4 (CNV-1) is done, with CNV-3, which sits in the same loop. Step 5 (the methylation maths) is done except METH-7, with a test against modkit.

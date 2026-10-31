@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.12, polars, pyranges, pysam (synthetic BAMs with MM/ML tags), `modkit` 0.6.4 (bioconda, via pixi; tests that need it skip without it).
 
+**Outcome:** supported (see Result). Built in `dfe9f29` (Task 1), `d304ded` (Task 2), `dfd909f` (Task 3), `c50365a` (Task 4), `1c6c65f` (Task 5); result `5bcd583`; suite 206 → 224. Differences from the plan: matkit now counts primary alignments only (modkit's default, measured), which settles METH-14 without a second pass over the BAM; the 5mC/5hmC rule needed no change (modkit also takes the most likely class); the migration of old files is the same step as every merge, not a branch; no consumer code changed (rule 6 passed once the parquet was right); MGMT's test checks rule 7 plus a 0.005 percent match, not rule 4's 1e-4 check, which a 2-decimal BED can't meet (changed after seeing a result; ledgered).
+
 **Spec:** `reviews/2026-10-16-code-review.md` section 1 (METH-1..6, METH-13, METH-14), and the user's agreement on 2026-10-31 (Gate A): the principle above; modkit installed as the reference; METH-7 left for later; the case file built. Data path mapped on `2f29cf7` (Explore report, summarised in the Spec notes below).
 
 **Spec notes (measured on `2f29cf7`):**
