@@ -20,7 +20,10 @@ from pathlib import Path
 from robin.gui.components.classification import classification_files_to_refresh
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_STUBS = _REPO_ROOT / "reviews" / "2026-10-16-repro" / "gui" / "stubs2"
+# The test's own copy of reviews/2026-10-16-repro/gui/stubs2/, so it keeps
+# working when the reproduction scripts are retired. Not tests/nicegui/:
+# tests/ is on sys.path under pytest, and that name would hide the real package.
+_STUBS = _REPO_ROOT / "tests" / "_stubs"
 
 
 def test_only_charts_tools_are_considered(tmp_path):
@@ -131,6 +134,10 @@ print("tick 3: %s" % label.text)
 
 
 def _stubbed_env():
+    # Without the stub the driver silently imports the real NiceGUI and fails
+    # on something unrelated. Say what is missing instead.
+    stub = _STUBS / "nicegui" / "__init__.py"
+    assert stub.is_file(), f"NiceGUI stub missing: {stub}"
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
         [str(_STUBS), str(_REPO_ROOT / "src"), env.get("PYTHONPATH", "")]

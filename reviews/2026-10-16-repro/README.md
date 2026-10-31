@@ -10,7 +10,7 @@ These are the scripts behind the "Confirmed" findings in [`../2026-10-16-code-re
 
 ## How to run
 
-Run from the repository root, in a Python 3.12 environment with pandas 2.1.4, numpy < 2, polars, pyranges 0.1.4 and pyarrow 16.1. Ray, NiceGUI, pysam and sturgeon are not needed: the scripts stub them out (see `orchestration/stubs.py` and `gui/stubs*/`). `gui/stubs2/` is also used by `tests/test_classification_refresh.py`, so it stays even though GUI-1's script is retired.
+Run from the repository root, in a Python 3.12 environment with pandas 2.1.4, numpy < 2, polars, pyranges 0.1.4 and pyarrow 16.1. Ray, NiceGUI, pysam and sturgeon are not needed: the scripts stub them out (see `orchestration/stubs.py` and `gui/stubs*/`). `gui/stubs2/` stays because `gui/test_mgmt_shared_state.py` still uses it; `tests/test_classification_refresh.py` has its own copy under `tests/_stubs/`, so retiring these scripts does not break it.
 
 ```
 python reviews/2026-10-16-repro/architecture/merge_mean.py
