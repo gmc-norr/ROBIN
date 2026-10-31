@@ -105,14 +105,17 @@ def _robin_cumulative(world, k: int, tmp) -> Dict[Tuple[int, str], Tuple[int, in
     return sites
 
 
-def _assert_matches(robin, reference):
+def _assert_matches(robin, reference, exact_percent=True):
+    """Locked rules 1-4. A BED prints percent to 2 decimals, as modkit does, so
+    for MGMT's BED (rule 7) only the 0.005 match with modkit applies."""
     assert sorted(robin) == sorted(reference)
     for key, (n_mod, n_can, valid, pct) in reference.items():
         r_mod, r_can, r_valid, r_pct = robin[key]
         assert (r_mod, r_can) == (n_mod, n_can), key
         assert r_valid == r_mod + r_can, key
         assert abs(r_pct - pct) <= 0.005, key
-        assert abs(r_pct - 100 * r_mod / r_valid) <= 1e-4, key
+        if exact_percent:
+            assert abs(r_pct - 100 * r_mod / r_valid) <= 1e-4, key
 
 
 @pytest.mark.parametrize("k", [1, 2, 4])
@@ -140,4 +143,4 @@ def test_the_mgmt_bed_matches_modkit_per_strand(world, tmp_path):
             key = (int(col[1]), col[5])
             if key in cpg_sites and int(col[9]) > 0:
                 robin[key] = (int(col[11]), int(col[12]), int(col[9]), float(col[10]))
-    _assert_matches(robin, world["stranded"])
+    _assert_matches(robin, world["stranded"], exact_percent=False)

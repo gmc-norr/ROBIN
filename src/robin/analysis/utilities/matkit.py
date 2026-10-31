@@ -806,7 +806,10 @@ def run_matkit(sortfile: str, temp: str) -> None:
         threshold=0.73,
         combine_mods=True,
         chrom_filter=None,
-        ignore_supp=False,
+        # Primary alignments only, as modkit pileup does by default. This also
+        # makes the QS rule independent of record order (METH-14): only a
+        # primary is ever counted, and it carries its own qs.
+        ignore_supp=True,
         ref_fasta=None,
     )
 
@@ -1067,7 +1070,8 @@ def write_bedmethyl_improved(output_path, counts, mod_sites, debug_probs=False):
             if not (c[COUNT_IDX_MOD] > 0 or c[COUNT_IDX_CANONICAL] > 0):
                 continue
             chrom, pos, strand, mod_code = site_key
-            total = c[COUNT_IDX_TOTAL]
+            # Valid coverage leaves failed calls out, as modkit does (METH-3).
+            total = c[COUNT_IDX_MOD] + c[COUNT_IDX_CANONICAL]
             percent = (c[COUNT_IDX_MOD] / total) * 100 if total else 0.0
             pos_plus_1 = pos + 1
             fields = [
@@ -1129,7 +1133,8 @@ def write_counts_to_parquet(counts: dict, mod_sites: set, output_path: str) -> N
             continue
         if not (c[COUNT_IDX_MOD] > 0 or c[COUNT_IDX_CANONICAL] > 0):
             continue
-        total = c[COUNT_IDX_TOTAL]
+        # Valid coverage leaves failed calls out, as modkit does (METH-3).
+        total = c[COUNT_IDX_MOD] + c[COUNT_IDX_CANONICAL]
         pct = (c[COUNT_IDX_MOD] / total) * 100.0 if total else 0.0
         chrom_b.append(_ensure_utf8(chrom).encode("utf-8"))
         chrom_start.append(pos)
@@ -1171,6 +1176,59 @@ def write_counts_to_parquet(counts: dict, mod_sites: set, output_path: str) -> N
         schema=PARQUET_SCHEMA_BINARY,
     )
     pq.write_table(table, output_path)
+
+
+_COMPLEMENT = {"A": "T", "C": "G", "G": "C", "T": "A", "N": "N"}
+
+
+def _mm_groups(mm: str):
+    """Yield (base, strand, codes, mode) for each group of an MM tag.
+
+    ``mode`` is "?" (skipped bases are unknown), "." or "" (skipped bases are
+    unmodified). ``codes`` is a list of single-letter codes or one ChEBI number.
+    """
+    for group in mm.split(";"):
+        head = group.split(",", 1)[0]
+        if len(head) < 3:
+            continue
+        base, strand, rest = head[0], head[1], head[2:]
+        mode = rest[-1] if rest[-1] in ".?" else ""
+        codes = rest[:-1] if mode else rest
+        yield base, strand, ([codes] if codes.isdigit() else list(codes)), mode
+
+
+def _with_implicit_canonical_calls(read, mods: dict) -> dict:
+    """Add the calls an implicit-mode MM tag makes by skipping bases (METH-13).
+
+    In implicit mode (``C+m.`` or ``C+m``), every candidate base the tag skips
+    is unmodified; pysam's ``modified_bases`` lists only the explicit calls, so
+    each skipped base is added here with probability 0 for each of the group's
+    codes. ``?`` mode is left alone: there a skipped base is no call.
+    """
+    tag = "MM" if read.has_tag("MM") else "Mm" if read.has_tag("Mm") else None
+    if tag is None:
+        return mods
+    seq = read.query_sequence
+    if not seq:
+        return mods
+    added = None
+    for base, mm_strand, codes, mode in _mm_groups(read.get_tag(tag)):
+        if mode == "?" or mm_strand != "+":
+            continue
+        # The tag counts bases on the read as sequenced; pysam reports
+        # positions on SEQ, where a reverse read's C is a G.
+        target = _COMPLEMENT.get(base, "N") if read.is_reverse else base
+        strand_flag = 1 if read.is_reverse else 0
+        candidates = [i for i, b in enumerate(seq) if b == target]
+        for code in codes:
+            key = (base, strand_flag, code)
+            listed = {pos for pos, _ in mods.get(key, ())}
+            skipped = [(pos, 0) for pos in candidates if pos not in listed]
+            if skipped:
+                if added is None:
+                    added = {k: list(v) for k, v in mods.items()}
+                added.setdefault(key, []).extend(skipped)
+    return mods if added is None else added
 
 
 def process_bam_counts_improved(
@@ -1288,6 +1346,7 @@ def process_bam_counts_improved(
             mods = read.modified_bases or {}
         except AttributeError:
             mods = {}
+        mods = _with_implicit_canonical_calls(read, mods)
 
         if not mods:
             continue
