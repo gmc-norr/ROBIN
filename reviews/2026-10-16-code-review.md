@@ -8,7 +8,7 @@
 **Updated:** 2026-10-30. SEC-9 is added. Fixes made in our fork are listed under "This fork and the original ROBIN", and each fixed finding has a **Status** line. Batch 2 (VAR-9, VAR-8, VAR-10) is fixed too.\
 **Updated:** 2026-10-30. Batch 3, step 3's quick wins, is fixed in our fork: GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3 and VAR-7. JOB-6 is only partly fixed — the timeout constant and its configurability, not the two consequences that overlap JOB-7.\
 **Updated:** 2026-10-31. Two follow-ups from batch 3's own review are fixed in our fork: `robin add-panel` reads BED files wider than 6 columns (BED12 was saved garbled), and the variant panel's "Hide Results" keeps pointing at the file it showed.\
-**Updated:** 2026-10-31. Five findings from a review of the fix series (`reviews/2026-10-31-fix-series-review.md`) are fixed in our fork: stale CNV breakpoints after a flat run, an older LGA results file hiding a newer one, an LGA status timer that never stopped, SNV sites with no usable bases read as "None Detected", and `{file}` quoting inside `$(...)`. ClinVar sites no read covers now need review too, and that batch's own review led to two more fixes (a failed CNV detection, a "(legacy location)" caption).
+**Updated:** 2026-10-31. Five findings from a review of the fix series (`reviews/2026-10-31-fix-series-review.md`) are fixed in our fork: stale CNV breakpoints after a flat run, an older LGA results file hiding a newer one, an LGA status timer that never stopped, SNV sites with no usable bases read as "None Detected", and `{file}` quoting inside `$(...)`. ClinVar sites no read covers now need review too, and that batch's own review led to two more fixes (a failed CNV detection, a "(legacy location)" caption). Six more bugs found along the way are fixed too; see the fork table.
 
 ## This fork and the original ROBIN
 
@@ -45,6 +45,12 @@ This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [g
 | A ClinVar site no read covers needs review | VAR-8 follow-up | `65ab945` | Such a gene reads "insufficient evidence", and its summary counts `sites_without_reads`; a site just before a BED region is no longer picked |
 | A failed CNV breakpoint detection keeps the last good breakpoints | CNV-5 follow-up | `2ca41c7` | A warning in the log instead of a silent "no breakpoints" |
 | Fresh variant results are never captioned "(legacy location)" | VAR-9 follow-up | `0964752` | In a watch-folder setup, a result just produced no longer reads as old |
+| The CNV plot's absolute view draws breakpoint lines | Found after this review | `80207bd` | Dashed breakpoint lines appear in the absolute view too |
+| The per-gene variant path piles up its first site | Found after this review | `e60306a` | Nothing in ROBIN calls it; scripts using `analyze_genes` see every site |
+| `${file}` in a command template is left to the shell | SEC-9 follow-up | `49a8a79` | A shell variable named `file` works in templates |
+| Variant results record their UTC offset | VAR-9 follow-up | `7689900` | The newest result is picked correctly across a clock change |
+| Variant results and CNV arrays are written whole or not at all | Found after this review | `fa77eb7` | No half-read files in the GUI; a failed write keeps the last good file |
+| `robin add-panel` says "No gene names found in column 4" | Found after this review | `edb76bd` | A clear error instead of `'chrom'` |
 | `{file}` inside `$(...)` is quoted for that context | SEC-9 follow-up | `ab5151b` | Templates like `"$(dirname "{file}")/x.bai"` work on paths with spaces |
 
 Every change has a regression test in `tests/`. The details are in `CHANGELOG.md` under `[Unreleased]`. Add a row here each time a fix lands.

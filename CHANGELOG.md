@@ -35,6 +35,12 @@ and this project (almost) adheres to [Semantic Versioning](https://semver.org/sp
 - **No "None Detected" on sites no read covers:** a ClinVar site inside a checked region with no reads at all was left out of the results, so a gene whose only such site was unread vanished, and a gene with one negative and one unread site read "None Detected". These sites now need review, and each gene's summary counts them (`sites_without_reads`). A site just before the start of a BED region is no longer checked: it was never part of the region.
 - **A failed CNV breakpoint detection keeps the last good breakpoints:** a detection that failed outright, or on every chromosome, used to look like "no breakpoints". It now writes nothing and logs a warning, and per-chromosome failures are logged as warnings too.
 - **Fresh variant results no longer say "(legacy location)":** in a watch-folder setup the GUI's own run writes to the location it captioned "legacy", so every new result read as old.
+- **The CNV plot's absolute view draws breakpoint lines again:** it read a field the breakpoint array never had, and the error was hidden, so its dashed lines never appeared. Both views now mark the middle of each breakpoint.
+- **Results files are never half-written:** the lightweight variant results and the CNV arrays are written to a temporary file and then swapped in, so the GUI can't read half a file and a failed write keeps the last good one.
+- **Variant results compare across a clock change:** results now record their UTC offset, so the newest of two results is picked correctly around the autumn clock change.
+- **`${file}` in a command template is the shell's own variable:** it used to be mangled into the shell's process ID.
+- **`robin add-panel` names the problem when no gene names are given:** a BED whose gene column holds only commas failed with `'chrom'`; it now says "No gene names found in column 4".
+- **The per-gene variant check sees its first site:** `analyze_genes` (no callers in ROBIN itself) started its pileup one base late, so a gene's first site was never checked.
 - **`{file}` inside `$(...)` stays one word:** in a command template like `"$(dirname "{file}")/out.bai"`, a watched path with a space was split, and the command quietly used a wrong path. The placeholder is now quoted for the context it sits in.
 
 ### Changed
