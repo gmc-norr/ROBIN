@@ -6,7 +6,8 @@
 **Prepared with:** Claude Code (an AI-assisted review), plus a correction pass by Codex and an independent review by GPT 6.1 Sol. Treat each finding as a lead to check, not as a final verdict.\
 **Updated:** 2026-10-16. The independent review's 11 findings are merged in; each keeps its original number (IR-01 to IR-11) next to its new ID. The CNV-1, GUI-1 and SEC-1 fix sizes are corrected, the status lines are up to date, and the reproduction scripts are added.\
 **Updated:** 2026-10-30. SEC-9 is added. Fixes made in our fork are listed under "This fork and the original ROBIN", and each fixed finding has a **Status** line. Batch 2 (VAR-9, VAR-8, VAR-10) is fixed too.\
-**Updated:** 2026-10-30. Batch 3, step 3's quick wins, is fixed in our fork: GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3 and VAR-7. JOB-6 is only partly fixed — the timeout constant and its configurability, not the two consequences that overlap JOB-7.
+**Updated:** 2026-10-30. Batch 3, step 3's quick wins, is fixed in our fork: GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3 and VAR-7. JOB-6 is only partly fixed — the timeout constant and its configurability, not the two consequences that overlap JOB-7.\
+**Updated:** 2026-10-31. Two follow-ups from batch 3's own review are fixed in our fork: `robin add-panel` reads BED files wider than 6 columns (BED12 was saved garbled), and the variant panel's "Hide Results" keeps pointing at the file it showed.
 
 ## This fork and the original ROBIN
 
@@ -34,6 +35,8 @@ This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [g
 | Refresh timers survive a reconnect | GUI-2 | `7ff93b1` | An open page keeps updating after a Wi-Fi blip or laptop sleep; a page that really closed is torn down up to 60 s later |
 | A ClinVar refresh rebuilds the tabix index | VAR-3 | `8a37a7a` | Pathogenic annotations no longer vanish after a ClinVar update |
 | `robin add-panel` keeps every region of a gene | VAR-7 | `1c8e95f` | Later exons and tiles stay in the panel, so coverage and SNP calling see them |
+| `robin add-panel` reads BED files wider than 6 columns, by their first 4 | Found while fixing VAR-7 | `5af0a47` | A BED12 panel is saved with its real regions. It used to be saved garbled, with "added successfully"; 7 or 8 columns failed |
+| The variant panel's "Hide Results" offers the file it showed | VAR-9 follow-up | `754741d` | After "Hide", "View" opens the trusted file again, not a hard-coded path |
 
 Every change has a regression test in `tests/`. The details are in `CHANGELOG.md` under `[Unreleased]`. Add a row here each time a fix lands.
 
@@ -314,7 +317,7 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
 **VAR-7 · high · Confirmed**: `robin add-panel` keeps only the first region of each gene.
 - **Where:** `cli.py:957`
 - **What's wrong:** `drop_duplicates(subset=['gene'])` drops every later exon or tile of a gene. In the test, a panel with 3 EGFR rows and 2 TP53 rows became 2 rows. Coverage, SNP calling and fusion detection then ignore the dropped regions.
-- **Status:** fixed in our fork (`1c8e95f`). The dedupe key is the whole region (`chrom`, `start`, `end`, `gene`), so every distinct region survives and an exactly repeated row still collapses. The second problem the reproduction script showed, under no finding ID — `read_csv` is given six column names, so an 8-column BED shifts every field and the function fails on `int('EGFR')` — is not addressed and is still open. Still open in the original ROBIN.
+- **Status:** fixed in our fork (`1c8e95f`). The dedupe key is the whole region (`chrom`, `start`, `end`, `gene`), so every distinct region survives and an exactly repeated row still collapses. The second problem the reproduction script showed, under no finding ID — `read_csv` is given six column names, so an 8-column BED shifts every field and the function fails on `int('EGFR')` — is fixed too (`5af0a47`). It was worse than an error: a BED12 panel passed, printed "added successfully", and was saved as columns 7–10. The BED is now read line by line like the validator, keeping the first 4 columns. Still open in the original ROBIN.
 
 **VAR-8 · high · Confirmed (reproduced)**: Reference-only samples are summarised as having pathogenic variants. *(IR-01)*
 - **Where:** `analysis/lightweight_gene_analysis.py:904-933, 1451-1488`, `gui/components/coverage.py:5290-5310`
@@ -790,4 +793,4 @@ Make each step below its own change, with its own regression test. The scripts i
 9. **Security hardening:** SEC-2 to SEC-7.
 10. **Pin and record versions** (PKG-1), **add CI with a test suite** (PKG-2), then start on the architecture items. Delete dead code first (ARCH-4), because it is cheap and stops fixes from landing in the wrong copy.
 
-Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9), the version pins, step 2 (VAR-9, VAR-8, VAR-10) and step 3's quick wins (GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3, VAR-7) are done too; see "This fork and the original ROBIN". Of step 3, only JOB-6 is partial: the timeout constant and its configurability are done, the merge-skip and the batch-BAM deletion that follow from the timeout firing are not, and they overlap JOB-7.
+Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9), the version pins, step 2 (VAR-9, VAR-8, VAR-10) and step 3's quick wins (GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3, VAR-7) are done too; see "This fork and the original ROBIN". Of step 3, only JOB-6 is partial: the timeout constant and its configurability are done, the merge-skip and the batch-BAM deletion that follow from the timeout firing are not, and they overlap JOB-7. The follow-ups batch 3's own review asked for soon are done as well.

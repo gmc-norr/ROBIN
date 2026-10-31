@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.12, pytest, click's `CliRunner`, `ast`.
 
+**Outcome:** built as planned, in `7f6e64c` (Task 1), `f84eb87` (Task 2), `5af0a47` (Task 3) and `754741d` (Task 4); suite 131 → 139. Two differences: Task 4's one test became two (one behaviour each), so the count is 139, not 138; and the BED12 RED measured two garbled rows (`100 200 0 1`, `300 400 0 1`), not one, because the test's two rows carry different thick coordinates. Item E-2 of the final review (the report's own `classifiers` dict) was not in scope and stays open.
+
 **Spec:** `/home/parlar_ai/robin-batch3-run/final-review.md` — the "should fix soon" rows of the deferred-minor triage (#8, #20, #21, #23), the "Known residues" rows for the 8-column BED and `_hide_lga_results`; and `reviews/2026-10-16-code-review.md` VAR-7 **Status** line (the 8-column problem, "still open").
 
 ## Global Constraints
