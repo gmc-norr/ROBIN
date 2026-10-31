@@ -87,6 +87,19 @@ def test_a_shell_variable_named_file_is_left_alone(tmp_path):
     assert _printed_args(template, PLAIN, tmp_path) == ["x", "x", PLAIN]
 
 
+def test_inside_single_quotes_a_dollar_before_the_placeholder_is_text(tmp_path):
+    # In '...' the shell expands nothing, so "$" is a plain character there
+    # and {file} is still the placeholder.
+    assert _printed_args("printf '%s\\n' '${file}'", PLAIN, tmp_path) == ["$" + PLAIN]
+
+
+def test_an_escaped_backslash_before_dollar_leaves_the_shell_variable(tmp_path):
+    # \\ is one literal backslash; the $ after it is unescaped, so ${file} is
+    # the shell's variable. Only an odd number of backslashes escapes the $.
+    template = "file=x; printf '%s\\n' \\\\${file} \\${file}"
+    assert _printed_args(template, PLAIN, tmp_path) == ["\\x", "$" + PLAIN]
+
+
 def test_a_hostile_name_inside_command_substitution_comes_back_exact(tmp_path):
     path = str(tmp_path / HOSTILE)
     template = "printf '%s\\n' \"$(basename \"{file}\")\""

@@ -48,10 +48,15 @@ def shell_command_for_file(template: str) -> str:
     while i < len(template):
         ctx = stack[-1]
         # "${file}" is the shell's own parameter expansion of a variable named
-        # file, not the placeholder ("\${file}" is a literal $ and then it is).
-        after_dollar = (
-            i > 0 and template[i - 1] == "$" and not (i > 1 and template[i - 2] == "\\")
-        )
+        # file, not the placeholder - except where "$" is just a character:
+        # inside '...', or escaped by an odd number of backslashes ("\${file}"
+        # is a literal $ and then the placeholder; "\\${file}" is not).
+        after_dollar = False
+        if ctx != "'" and i > 0 and template[i - 1] == "$":
+            backslashes = 0
+            while i - 2 - backslashes >= 0 and template[i - 2 - backslashes] == "\\":
+                backslashes += 1
+            after_dollar = backslashes % 2 == 0
         if template.startswith(_PLACEHOLDER, i) and not after_dollar:
             if ctx == '"':
                 out.append(ref)
