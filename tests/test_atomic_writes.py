@@ -21,6 +21,37 @@ from robin.analysis.lightweight_gene_analysis import LightweightGeneAnalysis
 LOG = logging.getLogger("test_atomic_writes")
 
 
+def _mode(path):
+    import os
+
+    return oct(os.stat(path).st_mode & 0o777)
+
+
+def test_written_files_get_the_same_permissions_as_open(tmp_path):
+    # The temp-file writers must honour the umask like open() does; mkstemp
+    # made them 0600, so group members lost read access to results.
+    import os
+
+    old = os.umask(0o022)
+    try:
+        reference = tmp_path / "reference.txt"
+        reference.write_text("x")
+        vcf = write_clinvar(tmp_path / "clinvar.vcf", [(11, "C", "T")])
+        LightweightGeneAnalysis(str(tmp_path / "work"), str(vcf)).export_json(
+            {}, str(tmp_path / "lightweight_gene_analysis_results.json")
+        )
+        signal = {"chr1": np.r_[np.zeros(100), np.ones(100) * 5]}
+        save_cnv_files(str(tmp_path), 1, signal, signal, signal, 1000, 0.1, [], "Unknown", {}, LOG)
+    finally:
+        os.umask(old)
+    written = ["lightweight_gene_analysis_results.json", "CNV.npy", "CNV_dict.npy",
+               "cnv_data_array.npy", "XYestimate.pkl"]
+    assert {name: _mode(tmp_path / name) for name in written} == {
+        name: _mode(reference) for name in written
+    }
+    assert _mode(reference) == oct(0o644)
+
+
 def test_a_failed_results_write_leaves_the_previous_file(tmp_path, monkeypatch):
     vcf = write_clinvar(tmp_path / "clinvar.vcf", [(11, "C", "T")])
     analysis = LightweightGeneAnalysis(str(tmp_path / "work"), str(vcf))

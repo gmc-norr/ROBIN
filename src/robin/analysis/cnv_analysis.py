@@ -943,30 +943,15 @@ def generate_bed_files(bed_dir, analysis_counter, breakpoints, cnv_data, bin_wid
 
 
 def _atomic_np_save(path: str, arr) -> None:
-    """``np.save`` to ``path`` whole or not at all: a temp file, then a rename.
+    """``np.save`` to ``path`` whole or not at all (see ``robin.utils.atomic_files``).
 
     The GUI reads these arrays while runs write them, and ``np.save`` in place
     let it see half a file; a failed write also destroyed the last good one.
     """
-    import tempfile
+    from robin.utils.atomic_files import atomic_open
 
-    fd, tmp_path = tempfile.mkstemp(
-        dir=os.path.dirname(os.path.abspath(path)),
-        prefix=os.path.basename(path) + ".",
-        suffix=".tmp",
-    )
-    try:
-        with os.fdopen(fd, "wb") as f:
-            np.save(f, arr)  # a file object: np.save adds no ".npy"
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    with atomic_open(path, "wb") as f:
+        np.save(f, arr)  # a file object: np.save adds no ".npy"
 
 
 def save_cnv_files(
@@ -1026,13 +1011,12 @@ def save_cnv_files(
             _atomic_np_save(os.path.join(sample_dir, "cnv_data_array.npy"), breakpoint_array)
 
         # Helper for atomic pickle writes to avoid readers seeing partial files
+        # (a random temp name, so two writers can't share one ".tmp")
         def _atomic_pickle_dump(obj, target_path: str) -> None:
-            tmp_path = target_path + ".tmp"
-            with open(tmp_path, "wb") as tf:
+            from robin.utils.atomic_files import atomic_open
+
+            with atomic_open(target_path, "wb") as tf:
                 pickle.dump(obj, tf, protocol=pickle.HIGHEST_PROTOCOL)
-                tf.flush()
-                os.fsync(tf.fileno())
-            os.replace(tmp_path, target_path)
 
         # Save sex estimation (atomic)
         _atomic_pickle_dump(sex_estimate, os.path.join(sample_dir, "XYestimate.pkl"))

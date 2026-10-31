@@ -1669,24 +1669,11 @@ class LightweightGeneAnalysis:
         # let a reader see half a file, and a failed write destroy the last
         # good one.
         import json
-        import tempfile
 
-        out_dir = os.path.dirname(os.path.abspath(str(output_path)))
-        fd, tmp_path = tempfile.mkstemp(
-            dir=out_dir, prefix=os.path.basename(str(output_path)) + ".", suffix=".tmp"
-        )
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(json_data, f, indent=2, default=str)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_path, output_path)
-        except BaseException:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+        from robin.utils.atomic_files import atomic_open
+
+        with atomic_open(str(output_path), "w") as f:
+            json.dump(json_data, f, indent=2, default=str)
 
         print(f"         JSON report generated: {output_path}")
         self.logger.info(f"Exported JSON report: {output_path}")

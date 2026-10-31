@@ -125,6 +125,15 @@ Each with a test seen failing first; suite count rises by the tests named.
 - **Task 12 — torn files.** `export_json` and the five `np.save` calls in `save_cnv_files` write a temp file in the same folder, then `os.replace`. Tests: a write that fails part-way leaves the previous file intact (patch `json.dump` / `numpy.lib.format.write_array` to raise after writing).
 - **Task 13 — `add-panel` says `'chrom'`.** A BED whose gene cells are only commas fails with `Error generating unique gene BED file: 'chrom'`. Say `No gene names found in column 4`. Test: the existing failed-panel test's output names that.
 
+### Tasks 14-19: from the second review (`/home/parlar_ai/robin-batch3-run/final-review-3c-part2.md`)
+
+- **Task 14 (Important) — atomic writes left files 0600.** `mkstemp` ignores the umask, so the LGA results JSON and the five CNV `.npy` files lost group read. New `src/robin/utils/atomic_files.py` `atomic_open(path, mode)`: `os.open(tmp, O_CREAT|O_EXCL|O_WRONLY, 0o666)` (the umask applies, as with `open()`), fsync, `os.replace`, temp removed on failure. `export_json`, `_atomic_np_save` and `_atomic_pickle_dump` use it. Test: under umask 022 every written file is 0644, like a file from `open()`.
+- **Task 15 — `sites_checked` counted unread sites.** It counts sites with reads; unread ones are in `sites_without_reads`.
+- **Task 16 — a failed pileup read as "no reads".** `_perform_targeted_pileup` returns `None` when it can't open the BAM, has no index, can't find the contig or fails part-way; the sites then get `pileup_failed` (a review level). Test: an unindexed BAM.
+- **Task 17 — two `${file}` edge cases.** Inside single quotes `$` is literal, so `'${file}'` is the placeholder; `\\${file}` is an escaped backslash and then the shell's variable (count the backslashes).
+- **Task 18 — the GUI never showed the count.** `_display_gene_details` shows "Sites without reads" when it is above 0.
+- **Task 19 — learning slip.** A new learning: the boundary rule lives in `_find_bed_clinvar_intersections`.
+
 ### Task 6: Record
 
 - [ ] `CHANGELOG.md` `[Unreleased]` → `### Fixed`: one line per finding, saying what users notice.
