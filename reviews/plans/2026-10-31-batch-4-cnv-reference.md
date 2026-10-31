@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.12, numpy, pytest, pysam (synthetic BAMs), `cnv_from_bam` 0.4.4 (installed in the test env from PyPI's wheel; tests that need it use `pytest.importorskip`).
 
+**Outcome:** built as planned in `b682da0` (Task 1), `6ab6928` (Task 2), `a06c4a2` (Task 3), `2681f8b` (Task 4) and `391e159` (Task 5); suite 186 → 206. Differences: Task 1 gained a test for empty input (9, not 8); Task 2's contig-only-in-the-sample test failed on the old code (chrUn was compared with its own reads), so it is a behaviour change, not a guard; Task 4's test runs on a control stored as lists and as arrays (2, not 1). A failing `==` on two 2,001-item lists made pytest spend minutes in difflib, which looked like a hang; the tests compare the names of contigs that differ instead. The wrap was measured to last up to about 24,000 sample reads, not 20,000. Found and left open: in subprocess mode (off by default) a multi-BAM batch keeps only its last BAM.
+
 **Spec:** `reviews/2026-10-16-code-review.md`, CNV-1 and CNV-3 (section 2), and these measurements on `b63d66a`:
 - `cnv_from_bam` 0.4.4 `src/lib.rs`: `iterate_bam_file(bam, copy_numbers=d)` merges the BAM's counts into `d` and replaces its values (`merge_and_reset`); `calculate_cnv` sums each contig's 1 kb bins in chunks of `bin_width // 1000` as **`u16`** (release build, no overflow checks, so sums wrap), takes the median of all chunk sums (`f64::round`, half away from zero; 0 becomes 1) and returns `sum / median * 2`.
 - Probe (synthetic BAM, current code): after one `run_cnv_analysis_direct`, a control of 3 reads per bin holds 4 — the BAM's reads were added.

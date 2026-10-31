@@ -8,7 +8,8 @@
 **Updated:** 2026-10-30. SEC-9 is added. Fixes made in our fork are listed under "This fork and the original ROBIN", and each fixed finding has a **Status** line. Batch 2 (VAR-9, VAR-8, VAR-10) is fixed too.\
 **Updated:** 2026-10-30. Batch 3, step 3's quick wins, is fixed in our fork: GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3 and VAR-7. JOB-6 is only partly fixed — the timeout constant and its configurability, not the two consequences that overlap JOB-7.\
 **Updated:** 2026-10-31. Two follow-ups from batch 3's own review are fixed in our fork: `robin add-panel` reads BED files wider than 6 columns (BED12 was saved garbled), and the variant panel's "Hide Results" keeps pointing at the file it showed.\
-**Updated:** 2026-10-31. Five findings from a review of the fix series (`reviews/2026-10-31-fix-series-review.md`) are fixed in our fork: stale CNV breakpoints after a flat run, an older LGA results file hiding a newer one, an LGA status timer that never stopped, SNV sites with no usable bases read as "None Detected", and `{file}` quoting inside `$(...)`. ClinVar sites no read covers now need review too, and that batch's own review led to two more fixes (a failed CNV detection, a "(legacy location)" caption). Six more bugs found along the way are fixed too; see the fork table.
+**Updated:** 2026-10-31. Five findings from a review of the fix series (`reviews/2026-10-31-fix-series-review.md`) are fixed in our fork: stale CNV breakpoints after a flat run, an older LGA results file hiding a newer one, an LGA status timer that never stopped, SNV sites with no usable bases read as "None Detected", and `{file}` quoting inside `$(...)`. ClinVar sites no read covers now need review too, and that batch's own review led to two more fixes (a failed CNV detection, a "(legacy location)" caption). Six more bugs found along the way are fixed too; see the fork table.\
+**Updated:** 2026-10-31. Step 4 is fixed in our fork: CNV-1 (the control profile comes from the control's own counts, which also ends a 16-bit wrap found while fixing it), with CNV-3 (a batch's last BAM counted twice) in the same code.
 
 ## This fork and the original ROBIN
 
@@ -55,6 +56,9 @@ This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [g
 | A failed pileup reads "pileup failed"; the gene details count unread sites | VAR-8 follow-up | `c71527b`, `3fe7ba5` | The panel says why a gene reads "insufficient evidence" |
 | `{file}` after `$` inside single quotes is the placeholder | SEC-9 follow-up | `e8af255` | `'${file}'` prints `$` and the path, as the shell would |
 | `{file}` inside `$(...)` is quoted for that context | SEC-9 follow-up | `ab5151b` | Templates like `"$(dirname "{file}")/x.bai"` work on paths with spaces |
+| The CNV control's profile comes from the control's own counts | CNV-1 | `b682da0`, `6ab6928`, `a06c4a2`, `2681f8b` | Gains and losses no longer fade over a run, and a sample no longer inherits the previous sample's events. CNV results change for the same data; a contig the control lacks leaves `CNV3.npy` |
+| The CNV control's profile no longer wraps at 16 bits | Found while fixing CNV-1 | `6ab6928` | Early in a run (up to about 24,000 reads), the CNV plot is no longer off by several copies |
+| A multi-BAM CNV batch counts each BAM once | CNV-3 | `391e159` | The batch's last BAM no longer counts double for the rest of the run |
 
 Every change has a regression test in `tests/`. The details are in `CHANGELOG.md` under `[Unreleased]`. Add a row here each time a fix lands.
 
@@ -110,7 +114,7 @@ Only two tests exist (added after this review), and no CI runs them.
 | 2 | SEC-8 *(fixed in our fork)* | MGMT runs the sample folder path through the shell | A crafted sample name runs commands; a space in a path breaks MGMT | `analysis/mgmt_analysis.py:836-838` | Small |
 | 3 | VAR-9 *(fixed in our fork)* | A missing BAM for sample A falls back to sample B's BAM | Another patient's variant evidence is saved under this sample | `analysis/lightweight_gene_analysis.py:1562-1605` | Small |
 | 4 | METH-1 | Methylation % is averaged without weighting by coverage | Every classifier gets biased input, and adding depth doesn't make it better | `analysis/temp_utilities.py:285-391` | Small |
-| 5 | CNV-1 | CNV control reference is modified by every patient's reads | Real gains and losses fade over a run; false events appear in the next patient | `analysis/cnv_analysis.py:118-145` | Medium (build the control profile without patient reads) |
+| 5 | CNV-1 *(fixed in our fork)* | CNV control reference is modified by every patient's reads | Real gains and losses fade over a run; false events appear in the next patient | `analysis/cnv_analysis.py:118-145` | Medium (build the control profile without patient reads) |
 | 6 | JOB-1 | One waiting slot per classifier type, shared by all samples | In multi-sample runs, a sample's final classification can silently never run | `workflow_ray.py:2462-2535` | Medium |
 | 7 | GUI-1 *(fixed in our fork)* | Classification panel freezes if any classifier is disabled | GUI keeps showing the first result for the rest of the run | `gui/components/classification.py:1003-1021` | Small (two loops) |
 | 8 | GUI-2 *(fixed in our fork)* | Refresh timers are switched off on any brief reconnect | An open page shows hours-old results, with no sign that they are stale | 8 GUI components | Small |
@@ -258,6 +262,7 @@ Only two tests exist (added after this review), and no CI runs them.
   - Across patients, a normal patient processed after another one showed mirror-image false events.
 - **Fix:** build the reference profile from the stored control counts only, by re-binning them to the sample's bin width in numpy. Never pass a dict that must stay clean to `iterate_bam_file`.
 - **Not enough on its own:** a `copy.deepcopy` per call is only a stopgap. It stops patients polluting each other, but each call still adds the current BAM to the copy, so the reference still contains that BAM's reads.
+- **Status:** fixed in our fork (`b682da0`, `6ab6928`, `a06c4a2`, `2681f8b`). The new `analysis/cnv_reference.py` re-bins the stored control counts to the sample's bin width with the library's own formula, in 64-bit; the direct runner and `cnv_subprocess.py` use it in place of their second `iterate_bam_file` pass, and the cached control is a read-only mapping that the library refuses as `copy_numbers`. While fixing it we found that `cnv_from_bam` 0.4.4 sums bin chunks as 16-bit numbers with no overflow check: on the public control (12.7 M reads), a sample with up to about 24,000 reads gets bins whose control sums pass 65,535; at 4,000 and 20,000 reads the control's profile came out off by up to 4 and 17 copies. The 64-bit re-binning ends that too. One deliberate difference from the library: its median chunks the genome end to end in hash-map order, so a chunk can straddle two contigs; ours stays within each contig (measured: at most 0.024 copies apart). A contig that only the sample has is no longer in `CNV3.npy`. Still open in the original ROBIN.
 
 **CNV-2 · high · Plausible**: Per-sample CNV counts are cached per Ray worker and never invalidated.
 - **Where:** `cnv_analysis.py:1137-1178, 1446-1484, 1245, 1620`, `workflow_ray.py:392-394, 2037-2068`
@@ -272,6 +277,7 @@ Only two tests exist (added after this review), and no CI runs them.
 **CNV-3 · medium · Confirmed**: Multi-BAM CNV adds the batch's last BAM twice.
 - **Where:** `cnv_analysis.py:1515-1597, 1620`
 - **What's wrong:** The loop has already accumulated every BAM, and the "final aggregated" call then adds the last one again. The result is saved, so the double count is permanent.
+- **Status:** fixed in our fork (`391e159`): the loop's last result is the final one. Not fixed, and true before too: in subprocess mode (off by default, `USE_CNV_SUBPROCESS = False`), each loop call reloads the sample's counts from disk, which the loop never rewrites, so a batch keeps only its last BAM. Still open in the original ROBIN.
 
 **CNV-4 · medium · Confirmed**: The sex labels don't match the thresholds.
 - **Where:** `cnv_analysis.py:677-689`, `classification_config.py:164`, `cnv_classification.py:195`, `gui/components/cnv.py:751-760`, `reporting/sections/cnv.py:365-373`
@@ -784,7 +790,7 @@ Make each step below its own change, with its own regression test. The scripts i
    - GUI-2: use `on_delete`
    - VAR-3: force-rebuild the tabix index
    - VAR-7: keep all panel regions
-4. **CNV-1:** build the control profile without patient reads (see CNV-1; a deepcopy alone is not enough).
+4. **CNV-1:** build the control profile without patient reads (see CNV-1; a deepcopy alone is not enough). *(done in our fork, with CNV-3)*
 5. **The methylation maths, as one change with a test against `modkit pileup --combine-strands`:**
    - METH-1 and METH-2: aggregate always, and recompute % from counts
    - METH-5: semi-join, and dedupe the panel
@@ -811,4 +817,4 @@ Make each step below its own change, with its own regression test. The scripts i
 9. **Security hardening:** SEC-2 to SEC-7.
 10. **Pin and record versions** (PKG-1), **add CI with a test suite** (PKG-2), then start on the architecture items. Delete dead code first (ARCH-4), because it is cheap and stops fixes from landing in the wrong copy.
 
-Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9), the version pins, step 2 (VAR-9, VAR-8, VAR-10) and step 3's quick wins (GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3, VAR-7) are done too; see "This fork and the original ROBIN". Of step 3, only JOB-6 is partial: the timeout constant and its configurability are done, the merge-skip and the batch-BAM deletion that follow from the timeout firing are not, and they overlap JOB-7. The follow-ups batch 3's own review asked for soon are done as well, and so are the five findings of the 2026-10-31 review of the fix series.
+Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9), the version pins, step 2 (VAR-9, VAR-8, VAR-10) and step 3's quick wins (GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3, VAR-7) are done too; see "This fork and the original ROBIN". Of step 3, only JOB-6 is partial: the timeout constant and its configurability are done, the merge-skip and the batch-BAM deletion that follow from the timeout firing are not, and they overlap JOB-7. The follow-ups batch 3's own review asked for soon are done as well, and so are the five findings of the 2026-10-31 review of the fix series. Step 4 (CNV-1) is done, with CNV-3, which sits in the same loop.

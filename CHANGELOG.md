@@ -42,8 +42,11 @@ and this project (almost) adheres to [Semantic Versioning](https://semver.org/sp
 - **`robin add-panel` names the problem when no gene names are given:** a BED whose gene column holds only commas failed with `'chrom'`; it now says "No gene names found in column 4".
 - **The per-gene variant check sees its first site:** `analyze_genes` (no callers in ROBIN itself) started its pileup one base late, so a gene's first site was never checked.
 - **`{file}` inside `$(...)` stays one word:** in a command template like `"$(dirname "{file}")/out.bai"`, a watched path with a space was split, and the command quietly used a wrong path. The placeholder is now quoted for the context it sits in.
+- **The CNV control no longer absorbs patients' reads (CNV-1):** each CNV run handed the cached control (`HG01280_control_new.pkl`) to `cnv_from_bam`, which added the BAM's reads into it. In a long-running worker the control grew with every BAM of every sample, so real gains and losses faded over a run, and a normal sample after an abnormal one showed mirror-image false events. The control's profile is now built from its own counts alone. That also fixes an older wrap: the library sums bins in 16 bits, so early in a run (up to about 24,000 sample reads) the control's profile came out off by several copies.
+- **A multi-BAM CNV batch counts each BAM once (CNV-3):** the batch's last BAM was added to the sample's counts a second time, and the saved counts kept it for the rest of the run.
 
 ### Changed
+- **CNV results for the same data change (CNV-1):** `CNV2.npy` is now the control alone, so `CNV3.npy`, the sex estimate and the chromosome statistics change with it, most early in a run and later in a long run. A contig that only the sample's BAM has (not in the control) is left out of `CNV3.npy`; it used to be compared with its own reads. CNV runs are also faster: the control is no longer re-read alongside each BAM.
 - **Lightweight variant results:**
   - New gene status "Insufficient Evidence": a site with 1–2 alternate reads, an indel or multi-base change (which a pileup can't call), or reads showing neither allele.
   - Each checked site has `supported` and `needs_review`. The per-gene counts and the totals count supported sites only.
