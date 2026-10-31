@@ -18,6 +18,8 @@ from contextlib import contextmanager
 import tempfile
 import json
 
+from robin.utils.atomic_files import atomic_open
+
 # Suppress pkg_resources deprecation warnings from sorted_nearest
 warnings.filterwarnings(
     "ignore", message="pkg_resources is deprecated", category=UserWarning
@@ -86,6 +88,66 @@ def _merge_failure_diagnostics(pl_df=None, gr=None, inter=None) -> str:
         except Exception:
             pass
     return "; ".join(parts)
+
+
+# Bump when the panel's meaning changes, so old caches in sample folders are ignored.
+# v2: 0-based BED as listed (no Start-1), negative starts and duplicates dropped.
+_PANEL_CACHE_VERSION = "v2"
+
+
+def _read_cpg_panel(filter_bed_file: str) -> pd.DataFrame:
+    """Read the CpG panel as 0-based, half-open BED: Chromosome, Start, End.
+
+    ``parquet_filter.txt`` (header "chr start end IlmnID") is already 0-based:
+    each CpG is [C, C+2), and its starts read "CG" in hg38 (METH-6). Rows with a
+    negative start (the file's first row is ``chr1 -1 0``) and exact duplicates
+    are dropped (METH-5).
+    """
+    if filter_bed_file.endswith(".txt"):
+        bed_df = pd.read_csv(filter_bed_file, sep=r"\s+", header=0, dtype=str)
+        rename = {}
+        for c in bed_df.columns:
+            if c.lower() == "chr":
+                rename[c] = "Chromosome"
+            elif c.lower() == "start":
+                rename[c] = "Start"
+            elif c.lower() == "end":
+                rename[c] = "End"
+        bed_df = bed_df.rename(columns=rename)
+    else:
+        bed_df = pd.read_csv(
+            filter_bed_file,
+            sep="\t",
+            header=None,
+            names=["Chromosome", "Start", "End", "cg_label"],
+            compression="gzip" if filter_bed_file.endswith(".gz") else None,
+            dtype={"Chromosome": str},
+        )
+    bed_df = bed_df[["Chromosome", "Start", "End"]].astype({"Start": int, "End": int})
+    bed_df = bed_df[bed_df["Start"] >= 0]
+    return bed_df.drop_duplicates().reset_index(drop=True)
+
+
+def load_cpg_panel(filter_bed_file: str, sample_output_dir: str) -> "pr.PyRanges":
+    """Return the panel as PyRanges, cached in the sample folder.
+
+    The cache name carries a format version and the panel file's size and
+    modification time, so a code fix or an edited panel is never hidden by an
+    old cache (METH-12). It is written whole or not at all.
+    """
+    stat = os.stat(filter_bed_file)
+    cache_path = os.path.join(
+        sample_output_dir,
+        f"{os.path.basename(filter_bed_file)}.{_PANEL_CACHE_VERSION}"
+        f".{stat.st_size}.{int(stat.st_mtime)}.pgr_cache",
+    )
+    if os.path.exists(cache_path):
+        with open(cache_path, "rb") as f:
+            return pickle.load(f)
+    filter_ranges = pr.PyRanges(_read_cpg_panel(filter_bed_file))
+    with atomic_open(cache_path, "wb") as f:
+        pickle.dump(filter_ranges, f)
+    return filter_ranges
 
 
 def merge_modkit_files(
@@ -167,51 +229,7 @@ def merge_modkit_files(
         )
 
         
-        # Cache or build PyRanges filter with improved caching
-        # Use distinct cache for .txt (1-based converted) vs .gz (0-based) to avoid stale data
-        cache_suffix = "_1based" if filter_bed_file.endswith(".txt") else ""
-        cache_path = os.path.join(
-            sample_output_dir,
-            f"{os.path.basename(filter_bed_file)}{cache_suffix}.pgr_cache",
-        )
-        if os.path.exists(cache_path):
-            with open(cache_path, "rb") as f:
-                filter_ranges = pickle.load(f)
-        else:
-            comp = "gzip" if filter_bed_file.endswith(".gz") else None
-            if filter_bed_file.endswith(".txt"):
-                # parquet_filter.txt format: header "chr start end IlmnID" (spaces/tabs)
-                # Illumina-derived files use 1-based coordinates; BED/PyRanges expect 0-based.
-                bed_df = pd.read_csv(
-                    filter_bed_file,
-                    sep=r"\s+",
-                    header=0,
-                    dtype=str,
-                )
-                # Map to expected column names (handle chr/start/end)
-                rename = {}
-                for c in bed_df.columns:
-                    if c.lower() == "chr":
-                        rename[c] = "Chromosome"
-                    elif c.lower() == "start":
-                        rename[c] = "Start"
-                    elif c.lower() == "end":
-                        rename[c] = "End"
-                bed_df = bed_df.rename(columns=rename)
-                bed_df["Start"] = bed_df["Start"].astype(int) - 1  # 1-based -> 0-based
-                bed_df["End"] = bed_df["End"].astype(int)  # 1-based end inclusive -> 0-based exclusive
-            else:
-                bed_df = pd.read_csv(
-                    filter_bed_file,
-                    sep="\t",
-                    header=None,
-                    names=["Chromosome", "Start", "End", "cg_label"],
-                    compression=comp,
-                    dtype={"Chromosome": str},
-                )
-            filter_ranges = pr.PyRanges(bed_df[["Chromosome", "Start", "End"]])
-            with open(cache_path, "wb") as f:
-                pickle.dump(filter_ranges, f)
+        filter_ranges = load_cpg_panel(filter_bed_file, sample_output_dir)
 
         # BEDMethyl 18-column names for modkit output (tab-separated)
         full_cols = [
@@ -476,10 +494,4 @@ def merge_modkit_files(
         logging.error(f"Error in merge_modkit_files: {str(e)}")
         raise
     finally:
-        # Cleanup temporary files if needed
-        if os.path.exists(cache_path) and not os.path.exists(filter_bed_file):
-            try:
-                os.remove(cache_path)
-            except Exception as e:
-                logging.error(f"Error removing cache file: {str(e)}")
         gc.collect()
