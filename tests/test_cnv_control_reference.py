@@ -144,6 +144,24 @@ def test_the_subprocess_runner_still_writes_the_control(tmp_path, control_file, 
     assert _changed_contigs(written, flat_control(CONTIGS, 3)) == []
 
 
+@pytest.mark.parametrize("as_arrays", [False, True], ids=["lists", "arrays"])
+def test_the_subprocess_script_reference_is_the_control_alone(tmp_path, as_arrays):
+    from robin.analysis import cnv_subprocess
+
+    reads = {"chr1": every_kb(CONTIGS["chr1"], 2), "chr2": every_kb(CONTIGS["chr2"], 1)}
+    bam = write_bam(str(tmp_path / "s.bam"), CONTIGS, reads)
+    control = flat_control(CONTIGS, 3)
+    # The shipped control holds lists; run_cnv_analysis_subprocess writes
+    # the cached control's arrays.
+    stored = dict(cnv_analysis._read_only_control(control)) if as_arrays else control
+    path = tmp_path / "control.pkl"
+    with open(path, "wb") as f:
+        pickle.dump(stored, f)
+    result = cnv_subprocess.run_cnv_analysis(str(bam), ref_cnv_dict_path=str(path), output_dir=str(tmp_path / "out"))
+    assert result["success"], result
+    assert result["r2_cnv"] == reference_cnv_profile(control, result["r_bin"])
+
+
 def test_a_contig_only_the_sample_has_is_skipped(tmp_path, cached_control):
     contigs = dict(CONTIGS, chrUn=100_000)
     bam = write_bam(str(tmp_path / "s.bam"), contigs, {c: every_kb(n) for c, n in contigs.items()})

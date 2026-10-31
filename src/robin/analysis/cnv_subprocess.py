@@ -14,6 +14,8 @@ import argparse
 # Import cnv_from_bam only in this subprocess
 import cnv_from_bam
 
+from robin.analysis.cnv_reference import reference_cnv_profile
+
 
 def run_cnv_analysis(
     bam_path,
@@ -107,17 +109,12 @@ def run_cnv_analysis(
         pass1_time = time.time() - pass1_start
         print(f"Pass 1 completed in {pass1_time:.2f}s (bin_width: {result.bin_width}, variance: {result.variance:.6f})", file=sys.stderr)
 
-        # Second pass: process against reference using the same bin width
-        print(f"Starting Pass 2: Reference CNV extraction with {threads} threads", file=sys.stderr)
+        # Second pass: the control's profile at the sample's bin width, from
+        # the control's counts alone. iterate_bam_file would add this BAM's
+        # reads into the control and sum chunks in 16 bits (CNV-1).
+        print("Starting Pass 2: control profile at the sample's bin width", file=sys.stderr)
         pass2_start = time.time()
-        result2 = cnv_from_bam.iterate_bam_file(
-            bam_path,
-            _threads=threads,
-            mapq_filter=mapq_filter,
-            copy_numbers=ref_cnv_dict,
-            log_level=int(logging.ERROR),
-            bin_width=result.bin_width,  # Use the same bin width as the sample
-        )
+        r2_cnv = reference_cnv_profile(ref_cnv_dict, result.bin_width)
         pass2_time = time.time() - pass2_start
         print(f"Pass 2 completed in {pass2_time:.2f}s", file=sys.stderr)
         print(f"Total CNV extraction time: {pass1_time + pass2_time:.2f}s", file=sys.stderr)
@@ -129,7 +126,7 @@ def run_cnv_analysis(
             "r_bin": result.bin_width,
             "r_var": result.variance,
             "genome_length": result.genome_length,
-            "r2_cnv": result2.cnv,
+            "r2_cnv": r2_cnv,
             "updated_copy_numbers": copy_numbers,  # The mutated copy_numbers
             "timing": {
                 "pass1_time": pass1_time,
