@@ -134,7 +134,11 @@ def _load_bed_file(bed_path: str, require_bed6: bool = False) -> pd.DataFrame:
     """
     if not os.path.exists(bed_path):
         return pd.DataFrame()
-    
+    # An empty BED is a valid "no regions" (e.g. a CNV run with no
+    # breakpoints), not an error: pandas can't parse it, so skip pandas.
+    if os.path.getsize(bed_path) == 0:
+        return pd.DataFrame()
+
     try:
         # Read BED file - handle variable number of columns (BED format can have 3-12 columns)
         # First, read without column names to detect actual number of columns

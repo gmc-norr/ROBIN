@@ -907,16 +907,17 @@ def generate_bed_files(bed_dir, analysis_counter, breakpoints, cnv_data, bin_wid
                             f"{chrom}\t{region['start']}\t{region['end']}\t{region['type']}\n"
                         )
 
-        # Generate BED file for breakpoints
-        if breakpoints:
-            breakpoint_file = os.path.join(
-                bed_dir, f"breakpoints_{analysis_counter:03d}.bed"
-            )
-            with open(breakpoint_file, "w") as f:
-                for bp in breakpoints:
-                    f.write(
-                        f"{bp['chromosome']}\t{bp['start']}\t{bp['end']}\tbreakpoint\n"
-                    )
+        # Generate BED file for breakpoints. Written even when there are none:
+        # the master BED reads the newest breakpoints_NNN.bed, so skipping it
+        # left the previous run's breakpoints in place after a flat run.
+        breakpoint_file = os.path.join(
+            bed_dir, f"breakpoints_{analysis_counter:03d}.bed"
+        )
+        with open(breakpoint_file, "w") as f:
+            for bp in breakpoints or []:
+                f.write(
+                    f"{bp['chromosome']}\t{bp['start']}\t{bp['end']}\tbreakpoint\n"
+                )
 
         logger.debug(f"Generated BED files in {bed_dir}")
 
@@ -969,13 +970,13 @@ def save_cnv_files(
         }
         np.save(os.path.join(sample_dir, "CNV_dict.npy"), cnv_dict)
 
-        # Save breakpoint data as structured array
-        if breakpoints:
-            breakpoint_array = np.array(
-                [(bp["chromosome"], bp["start"], bp["end"]) for bp in breakpoints],
-                dtype=[("name", "U10"), ("start", "i8"), ("end", "i8")],
-            )
-            np.save(os.path.join(sample_dir, "cnv_data_array.npy"), breakpoint_array)
+        # Save breakpoint data as structured array. An empty one when there
+        # are none, so the GUI never shows the previous run's breakpoints.
+        breakpoint_array = np.array(
+            [(bp["chromosome"], bp["start"], bp["end"]) for bp in breakpoints or []],
+            dtype=[("name", "U10"), ("start", "i8"), ("end", "i8")],
+        )
+        np.save(os.path.join(sample_dir, "cnv_data_array.npy"), breakpoint_array)
 
         # Helper for atomic pickle writes to avoid readers seeing partial files
         def _atomic_pickle_dump(obj, target_path: str) -> None:
