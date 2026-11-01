@@ -89,3 +89,17 @@ The external review (Codex, `/home/parlar_ai/robin-batch3-run/review-requests/ba
 - Each test fails on `c090998` and passes after; the guard passes on both.
 - One mutant per fix is caught, and the no-op control survives.
 - The full suite passes.
+
+## The external review's fixes: result (2026-11-01, on `af84c12`): supported
+
+- **On `c090998`'s code:** R1, R2 (both cases) and R3 failed; the first-commit guard passed.
+  - R1, read right after the failed commit: 0.573× against the row sum.
+  - R2: the union file was kept over a changed panel.
+  - R3: `files_processed` was 1.
+- **After the fix:** all pass.
+- **Two test cases added after the lock**, so that each fix has a test that catches it:
+  - R1 also reads the number right after the failed commit (the reader check).
+  - R2 also runs with both BAMs in one batch (the within-batch check).
+- **Mutation check:** 5 of 5 caught; the no-op control survived (81 passed).
+- **Full suite:** 661 passed.
+- **Records only, as locked:** the commit is not a transaction, and an unreadable staged coverage file drops its BAM and still reports success. Both are pre-existing, for step 8.
