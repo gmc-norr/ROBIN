@@ -185,3 +185,7 @@ The user asked (2026-11-01) to fix the existing bugs too: the three the final re
 - **Accepted from `2052fe3`:** a folder whose candidate CSV has rows, with no processed pickle and no `sv_count.txt`, now says "could not be read" (it said "not run"): rows show the step ran.
 
 **Pass, all of:** each test fails on the commit before these fixes and passes after (controls pass on both); one mutant per fix is caught and the no-op control survives; the full suite passes.
+
+## One more follow-up — locked before code (2026-11-01)
+
+Found in the fixes' own report (`7a14955`, concern 1): when a candidate type's pickle still holds an earlier good build's candidates and a later build failed (its `.failed` record is there), the report and the GUI panel show those candidates as if they were the latest. By the agreed rule the failure must show. Locked: the candidates stay shown, with one line saying the latest fusion build for that type failed and these results are from an earlier run, in the report's summary and in the panel. Test: the real writer, a good build with candidates, then a failing build; the report says it, and it goes away after the next good build. Also removed: the now-unused imports in `reporting/sections/fusion.py`. Pass: the test fails on `7a14955` and passes after; one mutant caught; full suite passes.
