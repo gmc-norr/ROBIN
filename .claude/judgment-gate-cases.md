@@ -46,3 +46,15 @@ whenever a claim is withdrawn or a finding turns out to be an artifact. Concrete
 - **Gate:** D.2 applied to the checker itself — add a no-op control mutant that must survive,
   count only "N failed" (exit 1) as caught, and re-run every mutant on the commit the claim is
   about.
+
+## 7. Controls described from reading, not from running (batch 7, 2026-11-01)
+- **Claimed:** in the locked plan (`31894f0`), controls C2, C4 and C5 "must pass on 92c7c00 and
+  after". C2 said a fail-only BAM's filed error is `expected_failure`, "as for an exception today".
+- **Rested on:** reading the code. Run on 92c7c00: C2's result is `success` for the classifiers
+  and `failed` for bed_conversion (on `standard` also counted failed, though only with a synthetic
+  handler: the real one never files there); C4's `##ROBIN_ClinVar=annotated` line and C5's empty
+  pickle for a new run don't exist yet. Parts of three controls were new behaviour. Task 1's commit
+  saw C2 fail and called it "on purpose", but no ruling squared that with the plan; the Result's
+  old-code run found it.
+- **Gate:** C, with D.3 — run every control on the old code before locking it. A control that
+  can't pass there is a fault row.

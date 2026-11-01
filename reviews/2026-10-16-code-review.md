@@ -11,7 +11,8 @@
 **Updated:** 2026-10-31. Five findings from a review of the fix series (`reviews/2026-10-31-fix-series-review.md`) are fixed in our fork: stale CNV breakpoints after a flat run, an older LGA results file hiding a newer one, an LGA status timer that never stopped, SNV sites with no usable bases read as "None Detected", and `{file}` quoting inside `$(...)`. ClinVar sites no read covers now need review too, and that batch's own review led to two more fixes (a failed CNV detection, a "(legacy location)" caption). Six more bugs found along the way are fixed too; see the fork table.\
 **Updated:** 2026-10-31. Step 4 is fixed in our fork: CNV-1 (the control profile comes from the control's own counts, which also ends a 16-bit wrap found while fixing it), with CNV-3 (a batch's last BAM counted twice) in the same code.\
 **Updated:** 2026-11-01. Step 5, the methylation maths, is fixed in our fork except METH-7 (left for later): METH-1 to METH-6, METH-13 and METH-14, checked against `modkit pileup --combine-strands` on synthetic reads, and part of METH-12.\
-**Updated:** 2026-11-01. Step 6, target input and coverage, is fixed in our fork: TGT-1 to TGT-5, checked against samtools run once on all of a sample's reads (split into 1, 2 and 4 BAMs, in five ways of running, two workers at once among them). Per-base panel depth (D4) is noted as later work under "Suggested order of work". Its final review's fixes keep IGV's copy of `target.bam` in step with it, and stop a finalize from holding up the coverage step.
+**Updated:** 2026-11-01. Step 6, target input and coverage, is fixed in our fork: TGT-1 to TGT-5, checked against samtools run once on all of a sample's reads (split into 1, 2 and 4 BAMs, in five ways of running, two workers at once among them). Per-base panel depth (D4) is noted as later work under "Suggested order of work". Its final review's fixes keep IGV's copy of `target.bam` in step with it, and stop a finalize from holding up the coverage step.\
+**Updated:** 2026-11-01. Step 7, making failures visible, is fixed in our fork: ERR-1 (all five layers), METH-8, VAR-4 and REP-6, and the reporting half of METH-9. Each failure was injected on purpose and checked where a user looks: the failed count, `failed_jobs.csv`, the GUI's errors and the PDF. Runs that looked clean can now show failed jobs, and a setup without R shows an MGMT failure on every run.
 
 ## This fork and the original ROBIN
 
@@ -71,6 +72,13 @@ This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [g
 | The panel always reaches target.bam's regions | TGT-2 | `063398d`, `d6c87ff` | Panel reads are kept even when the master BED was written without the panel |
 | Read counts count primary records | TGT-5 | `7773e2f` | Mapped reads, bases and yield drop for split reads; the 50,000-read gate counts reads |
 | A test against samtools pins step 6 | Step 6 | `7b31e53`, `dd802d4`, `ee2fdd8` | Nothing |
+| A job's own errors decide whether it failed | ERR-1 (layers 2, 5) | `9bfe410`, `c52d86c` | Runs that looked clean can show failed jobs: MGMT, CNV, target, fusion and the classifiers fail when they file an error, on both schedulers and with `--no-use-ray`. A failed `target` no longer starts `igv_bam` |
+| Failures and worker warnings reach the GUI | ERR-1 (layers 3, 4) | `ee7e3dd` | The workflow monitor's error counts and "Recent errors" show failures; "BAM Alignment Warning" and "Skipped (too many reads)" appear when their job ends |
+| A file that fails in the methylation merge is reported | ERR-1 (layer 1), part of METH-9 | `34ceadd` | `failed_jobs.csv` gains rows of kind `file_failed`; the batch's other files still go on |
+| Classifiers report their failures | METH-8 | `0241a47` | A setup without R shows an MGMT failure on every run; NanoDX saves no row without scores and writes no `errordf.csv` |
+| The ClinVar step records whether it ran | VAR-4 | `1fe4925` | The report says when ClinVar annotation was unavailable or not recorded, instead of "No pathogenic variants were identified." |
+| The fusion report tells not run, unreadable and none found apart | REP-6 | `c60f817`, `6aad4ba`, `11573aa` | Three different messages where there was one; the methods text gives the filters the code applies; empty fusion pickles are written when nothing passes |
+| A fault-injection test pins step 7 | Step 7 | `55eee97`, `410ce1b` | Nothing |
 
 Every change has a regression test in `tests/`. The details are in `CHANGELOG.md` under `[Unreleased]`. Add a row here each time a fix lands.
 
@@ -231,11 +239,13 @@ Only two tests exist (added after this review), and no CI runs them.
   - **NanoDX:** appends an empty row with `number_probes=0`, and writes patient data to `errordf.csv` in the worker's current directory.
   - **MGMT:** an R failure only logs a warning, and the step returns True.
 - **Effect:** the GUI keeps showing the previous result as if it were the latest.
+- **Status:** fixed in our fork (`0241a47`). Sturgeon's background step no longer catches its error, so the Sturgeon job files it. NanoDX and PanNanoDX raise on a missing classifier or a prediction error: no row without scores, and no `errordf.csv`. MGMT's R step returns False on every R failure (a non-zero exit, an `Rscript` that can't start, a missing script), and the MGMT job files it, as it now does for an import error or a BAM sort failure; the MGMT BED file is still written. Each is a failed job, in the failed count, `failed_jobs.csv` and the GUI's errors (ERR-1). Not done: the classification panel still shows the last good result without marking it as old. Still open in the original ROBIN.
 
 **METH-9 · low/medium · Confirmed (mechanism)**: One BAM failing in a batch is skipped and its data deleted.
 - **Where:** `temp_utilities.py:268-270`, `bed_conversion.py:252-262, 323-329`
 - **What's wrong:** Per-file errors in the merge are logged and the loop goes on. All the per-BAM parquets are then deleted, including the failed one, and the job reports success.
 - **Context:** this is the path behind the original "Error processing file … ['Chromosome', 'Start']" message. That case is fixed on `main` (commit `d02add2`), and it lost no data. Commit `5be9e04` makes this log line include a traceback and safe diagnostics.
+- **Status:** partly fixed in our fork (`34ceadd`): a file that fails is reported, with a `failed_jobs.csv` row of kind `file_failed` and a line in the GUI's errors, and the batch's other files still go on. Its data is still deleted with the other per-BAM files. Still open in the original ROBIN.
 
 **METH-10 · low · Confirmed**: The MGMT site table can show 0.43% as 43%.
 - **Where:** `mgmt_analysis.py:336-347`; the GUI copy is at `gui/components/mgmt.py:226-235`
@@ -347,6 +357,7 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
   - If the ClinVar DB is missing or SnpSift fails, plain snpEff output is copied to `snpsift_output.vcf`, and the report reads that as "annotated, none found".
   - The file is also truncated before each re-annotation.
 - **Fix:** write atomically, store an annotation-status marker, and have the report say "ClinVar annotation unavailable".
+- **Status:** fixed in our fork (`1fe4925`). The ClinVar step writes `##ROBIN_ClinVar=annotated` or `##ROBIN_ClinVar=unavailable;reason=…` after `##fileformat=` in `snpsift_output.vcf` and `snpsift_indel_output.vcf` (database missing, SnpSift not found, a non-zero exit, no output). Each file is written under a temporary name and swapped in, so a reader sees the previous file whole while SnpSift runs. The report names each file that was not annotated, with the reason, instead of "No pathogenic variants were identified."; a file from before this change reads "not recorded". The SNP card shows the status too. ROBIN writes its own line rather than reading SnpSift's header, because real SnpSift could not be run here; the tests use a stand-in. A sample recorded unavailable is not annotated again by itself once ClinVar is available: force its SNP analysis to regenerate. Still open in the original ROBIN.
 
 **VAR-5 · medium · Confirmed**: Failed ClairS-TO regions are skipped silently.
 - **Where:** `target_analysis.py:3549-3704`
@@ -522,6 +533,7 @@ This is why "Error processing file" showed up in the backend log but never in th
   4. `send_gui_update` calls from inside Ray workers find no GUI in that process and are dropped. This includes BAM alignment warnings such as "unaligned BAM" or "<1% mapped".
   5. The TypeProcessor path (preset `high`) has no error detection at all.
 - **Fix:** treat any `add_error` during a job as a failure, return per-file failures from the merge, forward failures from the driver to the GUI, and route worker notifications through the Coordinator.
+- **Status:** fixed in our fork. Layers 2 and 5: any error a job files while it runs fails that job, whatever name it is filed under, on both schedulers and in the non-Ray runner; an error an earlier job left in the same context doesn't, and a fail-only BAM submission's error stays expected (`9bfe410`, `c52d86c`). A failed job no longer starts the jobs after it (only `target` has one, `igv_bam`). Layers 3 and 4: the Coordinator keeps the recent failures and the messages workers sent with their jobs, and the GUI process sends them on as `ERROR_UPDATE` and as their own update types; "Recent errors" shows the newest five (`ee7e3dd`). A worker's message arrives when its job ends. Layer 1: the merge and the parallel BAM step return their failed files, each one a `failed_jobs.csv` row of kind `file_failed` and a line in the GUI's errors (`34ceadd`; METH-9). CNV's batch error is filed too. Each failure was injected on purpose through a real local Ray Coordinator on both schedulers (`55eee97`). Still open in the original ROBIN.
 
 **ERR-2 · medium · Confirmed**: Import failures are swallowed and reported with the wrong cause.
 - **Where:** `analysis/__init__.py:15-97`, `cli.py:55-81`, `workflow_ray.py:124-200`, `nanodx_analysis.py:24-38`, `temp_utilities.py:30-34`
@@ -616,6 +628,7 @@ This is why "Error processing file" showed up in the backend log but never in th
 **REP-6 · medium · Confirmed**: Missing fusion data is reported as "No fusion networks identified".
 - **Where:** `reporting/sections/fusion.py:133-197, 425-441, 640-645`
 - **What's wrong:** "Not run", "unreadable" and "none found" all print the same negative result. The methods text also states different thresholds from the code (>50 vs >49, >200 bp vs >249 bp).
+- **Status:** fixed in our fork (`c60f817`, `6aad4ba`, `11573aa`). The report says "Fusion analysis has not been run for this sample.", "The fusion results could not be read." or "No fusion candidates were identified.", the last only when the step ran and nothing passed its filters. When nothing passes, the step writes empty processed pickles, so an earlier run's candidates can't show as the latest; a folder from before this change is read from its `sv_count.txt` and candidate CSVs. A failed build fails the fusion job, still writes the step's other outputs, and is rebuilt on a later run. The methods text is built from the code's settings: mapping quality of at least 50, a span of at least 250 bp, at least 3 reads per gene pair, and 4 reads at the same breakpoint for a fusion to be reported. Still open in the original ROBIN.
 
 **REP-7 · medium · Confirmed**: CNV plot y-limits hide focal amplifications.
 - **Where:** `reporting/plotting.py:264-267, 297, 356-357, 420`
@@ -831,7 +844,7 @@ Make each step below its own change, with its own regression test. The scripts i
    - TGT-4: one locked read-update-write step
    - TGT-3: depth from aligned bases. Test that the same reads split into different BAMs give the same number.
    - TGT-5: count primary records only
-7. **Make failures visible:**
+7. **Make failures visible:** *(done in our fork)*
    - ERR-1: failures counted, and forwarded to the GUI
    - METH-8: classifiers raise instead of logging
    - VAR-4, REP-6: "not available" instead of a negative result
@@ -844,4 +857,4 @@ Make each step below its own change, with its own regression test. The scripts i
 10. **Pin and record versions** (PKG-1), **add CI with a test suite** (PKG-2), then start on the architecture items. Delete dead code first (ARCH-4), because it is cheap and stops fixes from landing in the wrong copy.
 11. **Later, a feature rather than a fix:** per-base depth for the panel (a D4 file from `mosdepth`), to report the share of each gene's bases at ≥20× and to find low-coverage holes in panel genes. Today "above 30×/20×/10×" counts whole targets by their average depth.
 
-Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9), the version pins, step 2 (VAR-9, VAR-8, VAR-10) and step 3's quick wins (GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3, VAR-7) are done too; see "This fork and the original ROBIN". Of step 3, only JOB-6 is partial: the timeout constant and its configurability are done, the merge-skip and the batch-BAM deletion that follow from the timeout firing are not, and they overlap JOB-7. The follow-ups batch 3's own review asked for soon are done as well, and so are the five findings of the 2026-10-31 review of the fix series. Step 4 (CNV-1) is done, with CNV-3, which sits in the same loop. Step 5 (the methylation maths) is done except METH-7, with a test against modkit. Step 6 (target input and coverage, TGT-1 to TGT-5) is done, with a test against samtools.
+Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9), the version pins, step 2 (VAR-9, VAR-8, VAR-10) and step 3's quick wins (GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3, VAR-7) are done too; see "This fork and the original ROBIN". Of step 3, only JOB-6 is partial: the timeout constant and its configurability are done, the merge-skip and the batch-BAM deletion that follow from the timeout firing are not, and they overlap JOB-7. The follow-ups batch 3's own review asked for soon are done as well, and so are the five findings of the 2026-10-31 review of the fix series. Step 4 (CNV-1) is done, with CNV-3, which sits in the same loop. Step 5 (the methylation maths) is done except METH-7, with a test against modkit. Step 6 (target input and coverage, TGT-1 to TGT-5) is done, with a test against samtools. Step 7 (making failures visible: ERR-1, METH-8, VAR-4, REP-6) is done, with each failure injected on purpose through a real Coordinator; of METH-9 only the reporting is done, and the classification panel doesn't yet mark its last result as old.

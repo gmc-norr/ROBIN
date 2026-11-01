@@ -6,7 +6,7 @@
 
 **Architecture:** the handler wrapper decides each job's outcome from the errors filed during that job, whatever name they were filed under; both schedulers (`standard`/`p2i` pools and the `high` preset's processors) and the non-Ray runner read that one outcome. Failures and worker-side GUI messages travel back with the job, the Coordinator keeps the recent ones, and the GUI process sends them on. Classifiers report their errors instead of logging them. The ClinVar step writes its own status line into the VCF it produces; the report and GUI read it. The fusion report tells "not run", "unreadable" and "none found" apart.
 
-**Outcome:** (filled in after the result)
+**Outcome:** supported, with one locked check not met: parts of controls C2, C4 and C5 fail on `92c7c00` (see Result). Built in `55eee97` (Task 1), `9bfe410` and `c52d86c` (Task 2), `ee7e3dd` (Task 3), `34ceadd` (Task 4), `0241a47` (Task 5), `1fe4925` (Task 6), `c60f817` and `6aad4ba` (Task 7), `11573aa` (a test added after the first mutation run); result `410ce1b`; suite 286 → 562. Differences from the plan: the Result's last paragraph.
 
 **Tech Stack:** Python 3.12, Ray 2.59.0 (local, in tests), pandas, ReportLab, NiceGUI 3.18 (GUI code: no harness).
 
