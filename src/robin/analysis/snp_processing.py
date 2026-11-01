@@ -7,6 +7,8 @@ import logging
 import numpy as np
 import pandas as pd
 
+from robin.analysis.clinvar_status import clinvar_status
+
 
 logger = logging.getLogger(__name__)
 
@@ -261,9 +263,12 @@ def build_snp_display_data(vcf_path: Path) -> Optional[Dict[str, Any]]:
                 snp_key = f"{chrom}:{pos}"
                 snp_regions_map[snp_key] = {"chrom": str(chrom), "pos": pos}
 
+    clinvar_state, clinvar_reason = clinvar_status(vcf_path)
     summary = {
         "total_variants": len(rows_all),
         "pathogenic_variants": len(rows_pathogenic),
+        "clinvar": clinvar_state,
+        "clinvar_reason": clinvar_reason,
     }
 
     return {

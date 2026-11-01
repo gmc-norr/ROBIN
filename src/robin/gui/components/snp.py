@@ -119,6 +119,14 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
 
     total_variants = summary.get("total_variants", len(rows_all))
     pathogenic_count = summary.get("pathogenic_variants", len(rows_pathogenic))
+    clinvar_state = summary.get("clinvar", "not_recorded")
+    if clinvar_state == "unavailable":
+        clinvar_reason = summary.get("clinvar_reason", "")
+        clinvar_label = "ClinVar: unavailable" + (
+            f" ({clinvar_reason})" if clinvar_reason else ""
+        )
+    else:
+        clinvar_label = "ClinVar: not recorded"
 
     js_snp_regions_json = json.dumps(snp_regions_map)
 
@@ -241,6 +249,8 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
             ui.label(f"Total variants: {total_variants}").classes(
                 "classification-insight-meta"
             )
+            if clinvar_state != "annotated":
+                ui.label(clinvar_label).classes("classification-insight-meta")
             if pathogenic_count > 0:
                 ui.label(f"Pathogenic variants: {pathogenic_count}").classes(
                     "classification-insight-level classification-insight-level--low w-auto"

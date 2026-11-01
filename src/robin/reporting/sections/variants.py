@@ -7,6 +7,7 @@ This module handles the Pathogenic Variant analysis section of the report.
 import os
 import logging
 import re
+from xml.sax.saxutils import escape
 import pandas as pd
 from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, Spacer, Table, TableStyle, PageBreak
@@ -14,6 +15,11 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.colors import HexColor
 from ..sections.base import ReportSection
 from robin import resources
+from robin.analysis.clinvar_status import (
+    ANNOTATED,
+    clinvar_status,
+    describe_not_annotated,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +234,8 @@ class VariantsSection(ReportSection):
         """Process the variant files."""
         logger.debug("Starting variant file processing")
         self.variant_detection_run = False
+        # kind -> (status, reason) for each annotated VCF that exists
+        self.clinvar_states = {}
         try:
             # Paths to the annotated VCF files
             snp_vcf = os.path.join(self.report.output, "clair3", "snpsift_output.vcf")
@@ -241,6 +249,7 @@ class VariantsSection(ReportSection):
             # Process SNPs
             if os.path.exists(snp_vcf):
                 self.variant_detection_run = True
+                self.clinvar_states["SNP"] = clinvar_status(snp_vcf)
                 logger.debug("Processing SNP VCF file: %s", snp_vcf)
                 self.variant_analyzer.process_vcf(snp_vcf, "SNP", self.variant_result)
             else:
@@ -249,6 +258,7 @@ class VariantsSection(ReportSection):
             # Process indels
             if os.path.exists(indel_vcf):
                 self.variant_detection_run = True
+                self.clinvar_states["INDEL"] = clinvar_status(indel_vcf)
                 logger.debug("Processing indel VCF file: %s", indel_vcf)
                 self.variant_analyzer.process_vcf(
                     indel_vcf, "INDEL", self.variant_result
@@ -266,6 +276,14 @@ class VariantsSection(ReportSection):
         except Exception as e:
             logger.error("Error processing variant files: %s", str(e))
             logger.debug("Exception details:", exc_info=True)
+
+    def _clinvar_notes(self):
+        """Sentences for each present variant file that was not ClinVar-annotated."""
+        return [
+            describe_not_annotated(kind, status, escape(reason))
+            for kind, (status, reason) in self.clinvar_states.items()
+            if status != ANNOTATED
+        ]
 
     def _format_disease_name(self, disease):
         """Format disease name for better readability."""
@@ -303,13 +321,42 @@ class VariantsSection(ReportSection):
 
         # Add summary section
         self.elements.append(Paragraph("Summary", self.styles.styles["Heading2"]))
-        if self.variant_detection_run:
+        clinvar_notes = self._clinvar_notes()
+        if self.variant_detection_run and not clinvar_notes:
             summary_text = (
                 f"Found {len(self.variant_result.snp_data)} candidate pathogenic SNPs and "
                 f"{len(self.variant_result.indel_data)} candidate pathogenic indels affecting "
                 f"{len(self.variant_result.affected_genes)} genes.<br/>"
                 f"Genes with candidate pathogenic variants: {', '.join(sorted(self.variant_result.affected_genes))}"
             )
+        elif self.variant_detection_run:
+            # Some file was not ClinVar-annotated: never claim a count of 0 for it.
+            # A count is stated only for a file that was annotated or that still
+            # lists pathogenic rows.
+            counted = []
+            for kind, noun, rows in (
+                ("SNP", "SNPs", self.variant_result.snp_data),
+                ("INDEL", "indels", self.variant_result.indel_data),
+            ):
+                state = self.clinvar_states.get(kind)
+                if state is None:
+                    continue
+                if state[0] == ANNOTATED or rows:
+                    counted.append(f"{len(rows)} candidate pathogenic {noun}")
+            parts = []
+            if counted:
+                parts.append(
+                    "Found "
+                    + " and ".join(counted)
+                    + f" affecting {len(self.variant_result.affected_genes)} genes."
+                )
+                if self.variant_result.affected_genes:
+                    parts.append(
+                        "Genes with candidate pathogenic variants: "
+                        + ", ".join(sorted(self.variant_result.affected_genes))
+                    )
+            parts.extend(clinvar_notes)
+            summary_text = "<br/>".join(parts)
         else:
             summary_text = "Variant detection has not been run for this sample."
         self.elements.append(Paragraph(summary_text, self.styles.styles["Normal"]))
@@ -326,7 +373,7 @@ class VariantsSection(ReportSection):
         if not self.variant_detection_run or (
             not self.variant_result.snp_data and not self.variant_result.indel_data
         ):
-            if self.variant_detection_run:
+            if self.variant_detection_run and not clinvar_notes:
                 self.elements.append(
                     Paragraph(
                         "No pathogenic variants were identified.",

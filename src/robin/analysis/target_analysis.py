@@ -148,6 +148,128 @@ def _resolve_clinvar_db_for_snpsift(logger: logging.Logger) -> Optional[str]:
         return None
 
 
+def _write_with_clinvar_header(src: str, dst: str, header_line: str) -> None:
+    """Copy VCF ``src`` to ``dst`` with the ClinVar status line after ``##fileformat=``."""
+    from robin.analysis.clinvar_status import CLINVAR_HEADER_KEY
+
+    placed = False
+    with open(src, "r") as fin, open(dst, "w") as fout:
+        for line in fin:
+            if line.startswith(CLINVAR_HEADER_KEY):
+                continue  # never carry a stale status line over
+            if not placed and not line.startswith("##fileformat="):
+                # No ##fileformat= line first: the status line goes on top.
+                fout.write(header_line + "\n")
+                placed = True
+            fout.write(line)
+            if not placed and line.startswith("##fileformat="):
+                fout.write(header_line + "\n")
+                placed = True
+        if not placed:
+            fout.write(header_line + "\n")
+
+
+def annotate_with_clinvar(
+    snpeff_vcf: str,
+    final_vcf: str,
+    clinvar_db_path: Optional[str],
+    logger: logging.Logger,
+    *,
+    verbose: bool = False,
+    env: Optional[Dict[str, str]] = None,
+    label: str = "SNP",
+) -> str:
+    """Make ``final_vcf`` from ``snpeff_vcf`` plus ClinVar, and record whether that worked.
+
+    ``final_vcf`` always gets a ``##ROBIN_ClinVar=`` header line. If SnpSift ran
+    and gave output it is ``annotated``; if the database is missing, SnpSift is
+    not found, exits non-zero or gives nothing, the snpEff records are written
+    unannotated and the line reads ``unavailable;reason=...``. The final file is
+    only ever replaced by renaming a finished temp file from the same folder, so
+    a reader never sees a half-written file or the previous one truncated.
+
+    Returns ``"annotated"`` or ``"unavailable"``.
+    """
+    from robin.analysis.clinvar_status import (
+        ANNOTATED,
+        UNAVAILABLE,
+        clean_reason,
+        clinvar_header_line,
+    )
+
+    folder = os.path.dirname(os.path.abspath(final_vcf))
+    reason = ""
+    raw_path = None
+    out_path = None
+    try:
+        fd, raw_path = tempfile.mkstemp(prefix=".clinvar_raw_", suffix=".vcf", dir=folder)
+        os.close(fd)
+        fd, out_path = tempfile.mkstemp(prefix=".clinvar_out_", suffix=".vcf", dir=folder)
+        os.close(fd)
+
+        if not clinvar_db_path:
+            reason = "ClinVar database not found"
+        else:
+            cmd = ["SnpSift", "annotate"]
+            if verbose:
+                cmd.append("-v")
+            cmd.extend([clinvar_db_path, snpeff_vcf])
+            logger.info(f"Running SnpSift {label} command: {' '.join(cmd)}")
+            try:
+                with open(raw_path, "w") as fout:
+                    result = subprocess.run(
+                        cmd,
+                        stdout=fout,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        env=env,
+                    )
+            except FileNotFoundError:
+                reason = "SnpSift not found"
+                logger.error("SnpSift command not found in PATH")
+            except Exception as exc:
+                reason = f"SnpSift could not be run: {type(exc).__name__}: {exc}"
+                logger.warning(f"SnpSift {label} annotation failed with exception: {exc}")
+            else:
+                if verbose and result.stderr:
+                    logger.info(f"SnpSift {label} stderr output:\n{result.stderr}")
+                if result.returncode != 0:
+                    detail = (result.stderr or "").strip().splitlines()
+                    reason = f"SnpSift exited with code {result.returncode}"
+                    if detail:
+                        reason += f": {detail[-1]}"
+                    logger.warning(f"SnpSift ({label}) failed: {reason}")
+                elif os.path.getsize(raw_path) == 0:
+                    reason = "SnpSift produced no output"
+                    logger.warning(f"SnpSift ({label}) produced no output")
+
+        if reason:
+            status = UNAVAILABLE
+            source = snpeff_vcf
+            header = clinvar_header_line(UNAVAILABLE, clean_reason(reason))
+            logger.warning(
+                f"ClinVar annotation unavailable for {label}: {reason}; "
+                "writing the snpEff records marked as not ClinVar-annotated"
+            )
+        else:
+            status = ANNOTATED
+            source = raw_path
+            header = clinvar_header_line(ANNOTATED)
+            logger.info(f"SnpSift {label} completed successfully")
+
+        _write_with_clinvar_header(source, out_path, header)
+        os.replace(out_path, final_vcf)
+        out_path = None
+        return status
+    finally:
+        for leftover in (raw_path, out_path):
+            if leftover and os.path.exists(leftover):
+                try:
+                    os.unlink(leftover)
+                except OSError:
+                    pass
+
+
 class FileLock:
     """
     Simple file-based lock for coordinating access across processes/threads.
@@ -3783,110 +3905,16 @@ def run_snp_analysis(
                 logger.error(f"snpEff output file does not exist: {snpeff_out}")
 
             clinvar_db_path = _resolve_clinvar_db_for_snpsift(logger)
-            try:
-                if clinvar_db_path:
-                    clinvar_size = os.path.getsize(clinvar_db_path)
-                    logger.info(
-                        f"ClinVar DB found, size: {clinvar_size} bytes"
-                    )
-
-                    # Check if SnpSift is available
-                    try:
-                        snpsift_version = subprocess.run(
-                            ["SnpSift"], capture_output=True, text=True
-                        )
-                        version_output = "\n".join(
-                            part.strip()
-                            for part in (
-                                snpsift_version.stdout,
-                                snpsift_version.stderr,
-                            )
-                            if part
-                        )
-                        version_line = ""
-                        for line in version_output.splitlines():
-                            if "SnpSift version" in line:
-                                version_line = line.strip()
-                                break
-                        if version_line:
-                            logger.info(f"SnpSift version: {version_line}")
-                        elif snpsift_version.returncode == 0:
-                            logger.info("SnpSift command executed successfully")
-                        else:
-                            logger.warning(
-                                "Could not determine SnpSift version from command output"
-                            )
-                    except FileNotFoundError:
-                        logger.error("SnpSift command not found in PATH")
-
-                    snpsift_cmd = ["SnpSift", "annotate"]
-                    if annotation_verbose:
-                        snpsift_cmd.append("-v")
-                    snpsift_cmd.extend([clinvar_db_path, snpeff_out])
-                    logger.info(f"Running SnpSift command: {' '.join(snpsift_cmd)}")
-
-                    snpsift_env = annotation_env.copy()
-
-                    with open(snpsift_out, "w") as fout:
-                        logger.info("Starting SnpSift execution...")
-                        result = subprocess.run(
-                            snpsift_cmd,
-                            stdout=fout,
-                            stderr=subprocess.PIPE,
-                            text=True,
-                            env=snpsift_env,
-                        )
-                        logger.info(
-                            f"SnpSift execution completed with return code: {result.returncode}"
-                        )
-                        if annotation_verbose and result.stderr:
-                            logger.info(f"SnpSift stderr output:\n{result.stderr}")
-
-                    if result.returncode != 0:
-                        logger.warning(
-                            f"SnpSift failed with return code: {result.returncode}"
-                        )
-                        logger.warning(f"SnpSift stderr output: {result.stderr}")
-                        logger.info("Using snpEff output for final SNP annotation")
-                        shutil.copy2(snpeff_out, snpsift_out)
-                        logger.info("Copied snpEff output as final SNP annotation")
-                    else:
-                        logger.info("SnpSift completed successfully!")
-                        # Check the output file
-                        snpsift_out = f"{clair_dir}/snpsift_output.vcf"
-                        if os.path.exists(snpsift_out):
-                            output_size = os.path.getsize(snpsift_out)
-                            logger.info(
-                                f"SnpSift output file created, size: {output_size} bytes"
-                            )
-
-                            # Check first few lines of output to verify annotation
-                            try:
-                                with open(snpsift_out, "r") as f:
-                                    first_lines = [next(f) for _ in range(5)]
-                                logger.info("First 5 lines of SnpSift output:")
-                                for i, line in enumerate(first_lines):
-                                    logger.info(f"  Line {i+1}: {line.strip()}")
-                            except Exception as e:
-                                logger.warning(f"Could not read SnpSift output: {e}")
-                        else:
-                            logger.error("SnpSift output file was not created!")
-                else:
-                    logger.warning(
-                        "ClinVar bgzip/tabix database unavailable, using snpEff output"
-                    )
-                    shutil.copy2(snpeff_out, snpsift_out)
-                    logger.info(
-                        "Copied snpEff output as final SNP annotation (no ClinVar)"
-                    )
-
-            except Exception as e:
-                logger.warning(f"SnpSift annotation failed with exception: {e}")
-                logger.info("Using snpEff output for final SNP annotation")
-                shutil.copy2(snpeff_out, snpsift_out)
-                logger.info(
-                    "Copied snpEff output as final SNP annotation due to exception"
-                )
+            snv_clinvar_status = annotate_with_clinvar(
+                snpeff_out,
+                snpsift_out,
+                clinvar_db_path,
+                logger,
+                verbose=annotation_verbose,
+                env=annotation_env.copy(),
+                label="SNP",
+            )
+            logger.info(f"ClinVar status for SNPs: {snv_clinvar_status}")
 
             # INDEL annotation
             logger.info("Starting snpEff annotation for INDELs...")
@@ -3984,89 +4012,16 @@ def run_snp_analysis(
                     f"snpEff INDEL output file does not exist: {snpeff_indel_out}"
                 )
 
-            try:
-                if clinvar_db_path:
-                    logger.info(
-                        f"Using ClinVar file for INDEL annotation: {clinvar_db_path}"
-                    )
-
-                    snpsift_indel_cmd = ["SnpSift", "annotate"]
-                    if annotation_verbose:
-                        snpsift_indel_cmd.append("-v")
-                    snpsift_indel_cmd.extend([clinvar_db_path, snpeff_indel_out])
-                    logger.info(
-                        f"Running SnpSift INDEL command: {' '.join(snpsift_indel_cmd)}"
-                    )
-
-                    snpsift_indel_env = annotation_env.copy()
-
-                    with open(snpsift_indel_out, "w") as fout:
-                        logger.info("Starting SnpSift INDEL execution...")
-                        result = subprocess.run(
-                            snpsift_indel_cmd,
-                            stdout=fout,
-                            stderr=subprocess.PIPE,
-                            text=True,
-                            env=snpsift_indel_env,
-                        )
-                        logger.info(
-                            f"SnpSift INDEL execution completed with return code: {result.returncode}"
-                        )
-                        if annotation_verbose and result.stderr:
-                            logger.info(f"SnpSift INDEL stderr output:\n{result.stderr}")
-
-                    if result.returncode != 0:
-                        logger.warning(
-                            f"SnpSift (INDEL) failed with return code: {result.returncode}"
-                        )
-                        logger.warning(
-                            f"SnpSift (INDEL) stderr output: {result.stderr}"
-                        )
-                        logger.info(
-                            "Using snpEff INDEL output for final INDEL annotation"
-                        )
-                        shutil.copy2(snpeff_indel_out, snpsift_indel_out)
-                        logger.info(
-                            "Copied snpEff INDEL output as final INDEL annotation"
-                        )
-                    else:
-                        logger.info("SnpSift INDEL completed successfully!")
-                        # Check the output file
-                        if os.path.exists(snpsift_indel_out):
-                            output_size = os.path.getsize(snpsift_indel_out)
-                            logger.info(
-                                f"SnpSift INDEL output file created, size: {output_size} bytes"
-                            )
-
-                            # Check first few lines of output to verify annotation
-                            try:
-                                with open(snpsift_indel_out, "r") as f:
-                                    first_lines = [next(f) for _ in range(5)]
-                                logger.info("First 5 lines of SnpSift INDEL output:")
-                                for i, line in enumerate(first_lines):
-                                    logger.info(f"  Line {i+1}: {line.strip()}")
-                            except Exception as e:
-                                logger.warning(
-                                    f"Could not read SnpSift INDEL output: {e}"
-                                )
-                        else:
-                            logger.error("SnpSift INDEL output file was not created!")
-                else:
-                    logger.warning(
-                        "ClinVar file not found for INDELs, using snpEff INDEL output"
-                    )
-                    shutil.copy2(snpeff_indel_out, snpsift_indel_out)
-                    logger.info(
-                        "Copied snpEff INDEL output as final INDEL annotation (no ClinVar)"
-                    )
-
-            except Exception as e:
-                logger.warning(f"SnpSift INDEL annotation failed with exception: {e}")
-                logger.info("Using snpEff INDEL output for final INDEL annotation")
-                shutil.copy2(snpeff_indel_out, snpsift_indel_out)
-                logger.info(
-                    "Copied snpEff INDEL output as final INDEL annotation due to exception"
-                )
+            indel_clinvar_status = annotate_with_clinvar(
+                snpeff_indel_out,
+                snpsift_indel_out,
+                clinvar_db_path,
+                logger,
+                verbose=annotation_verbose,
+                env=annotation_env.copy(),
+                label="INDEL",
+            )
+            logger.info(f"ClinVar status for INDELs: {indel_clinvar_status}")
 
             logger.info("Annotation pipeline completed successfully")
 
