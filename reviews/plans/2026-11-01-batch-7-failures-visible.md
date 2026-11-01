@@ -189,3 +189,28 @@ The user asked (2026-11-01) to fix the existing bugs too: the three the final re
 ## One more follow-up — locked before code (2026-11-01)
 
 Found in the fixes' own report (`7a14955`, concern 1): when a candidate type's pickle still holds an earlier good build's candidates and a later build failed (its `.failed` record is there), the report and the GUI panel show those candidates as if they were the latest. By the agreed rule the failure must show. Locked: the candidates stay shown, with one line saying the latest fusion build for that type failed and these results are from an earlier run, in the report's summary and in the panel. Test: the real writer, a good build with candidates, then a failing build; the report says it, and it goes away after the next good build. Also removed: the now-unused imports in `reporting/sections/fusion.py`. Pass: the test fails on `7a14955` and passes after; one mutant caught; full suite passes.
+
+## The second review's findings — locked before code (2026-11-01)
+
+A scoped re-review of the three fix rounds (`11eb191..97b34ee`) found 1 Critical, 1 Important and 7 Minor. C1 and I-1 were re-measured with the reviewer's own probes on `97b34ee` before this lock, with the same output. Locked before any code:
+
+- **C1:** a build that brings no new valid read leaves the pickle as it was (`_rebuild_missing` rebuilds only a missing pickle), and then clears the type's `.failed` record. So after a build whose preprocessing failed with new reads already in the CSV, the next quiet build hides the failure: the stale pickle reads as current with no note, and a target-panel fusion is listed as "Additional … genome-wide". Fix: `_rebuild_missing` also rebuilds from the candidate CSV when the type's `.failed` record is there, not only when the pickle is missing. Tests, through the real writer, for each type:
+  1. A good build; then a build with new valid reads whose preprocessing raises for that type; then a build with no new valid read and working preprocessing. That type's pickle's good-pair tags equal its CSV's tags, the record is gone, and no note shows.
+  2. The same, with preprocessing still raising in the third build. That build fails, the record stays and the note shows.
+  - Control: a build with no new valid read and no record does not call the preprocessing (the pickle is left as it was).
+- **I-1:** when events left the 200-event log before a poll, `ERROR_UPDATE` is sent too, since a lost event may have been a failure. The counts come from the Coordinator's stats, which are complete; the GUI only sets its labels from them. Test: one poll over a real Coordinator event log, a failure first and then more than 200 worker messages: an `ERROR_UPDATE` carrying the failure's count is sent. Control: a poll with no lost event and no failure sends no `ERROR_UPDATE`.
+- **m-1:** when the target panel's latest build failed and its earlier result has no validated network, the summary says "The latest target-panel fusion build failed; an earlier run identified no fusion networks within the target panel." in place of "No fusion networks identified within the target panel." followed by the note. Test: a target-panel pickle with 3-read candidates and its `.failed` record gives the new sentence, and neither "No fusion networks identified within the target panel." nor the target panel's "these results are from an earlier run". Control: the same pickle without the record still says "No fusion networks identified within the target panel." The genome-wide note keeps its wording (an existing test pins it).
+- **Records only:**
+  - m-2: the body says "No fusion candidates were identified." when candidates exist but none is validated (pre-existing wording).
+  - m-3: the body's leading "The fusion results could not be read." stays when one type was read. An existing test pins it, and it errs toward caution.
+  - m-4: in `--no-use-ray`, a dotfile BAM is processed but not counted by the fail-only rule.
+  - m-5: the record is existence-only. If it can't be removed, the note stays and every build rebuilds from the CSV.
+  - m-6: the GUI panel can misstate a type for one refresh when the pickle changes between its two reads.
+  - m-7: the "earlier messages" count includes failure events.
+  - A fusion job that fails before its builds (staging, parquet merge) leaves no record, so an earlier pickle shows as current (like M4).
+
+**Pass, all of:**
+- Each test fails on `97b34ee` and passes after; controls pass on both.
+- One mutant per fix is caught, and the no-op control survives.
+- The mutation check of rounds 1–3, running on `97b34ee` at lock time, catches every mutant.
+- The full suite passes.
