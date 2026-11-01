@@ -484,6 +484,184 @@ def test_i1_control_target_panel_ran_and_found_nothing_is_none_found(tmp_path):
     assert TARGET_UNREADABLE not in summary and UNREADABLE not in summary
 
 
+# ------------------------------------------------------------------ I1 follow-ups (a), (b)
+def test_i1a_a_target_panel_filter_step_that_raises_reads_as_could_not_be_read(tmp_path, monkeypatch):
+    # (a) The target-panel build fails before its candidate CSV is written: only sv_count.txt
+    # (and the genome-wide outputs) are left. Through the real writer.
+    monkeypatch.setattr(fusion_work, "_ensure_gene_regions_loaded", lambda panel: None)
+    real_iter = fusion_work._iter_fusion_candidates_parquet_batches
+
+    def target_filter_raises(candidate_type, *args, **kwargs):
+        if candidate_type == "target_candidates":
+            raise RuntimeError("synthetic target-panel filter crash")
+        return real_iter(candidate_type, *args, **kwargs)
+
+    monkeypatch.setattr(fusion_work, "_iter_fusion_candidates_parquet_batches", target_filter_raises)
+    _stage(tmp_path, _rows(4))
+    assert _accumulate(tmp_path)["status"] == "error"
+    d = tmp_path / SAMPLE
+    assert (d / "sv_count.txt").exists()
+    assert not (d / "fusion_candidates_master.csv").exists()
+    assert not (d / "fusion_candidates_master_processed.pkl").exists()
+    _target_unreadable_genome_wide_shown(d)
+
+    # The next good build removes the record of the failure.
+    monkeypatch.setattr(fusion_work, "_iter_fusion_candidates_parquet_batches", real_iter)
+    _stage(tmp_path, _rows(1, "GENEC", "GENED", prefix="x"), n=2)
+    assert _accumulate(tmp_path)["status"] == "success"
+    _, summary = _report_text(d)
+    assert "Found 1 fusion networks within the target panel" in summary
+    assert TARGET_UNREADABLE not in summary
+
+
+def test_i1a_a_good_build_that_finds_nothing_after_a_failed_one_reads_as_none_found(
+    tmp_path, monkeypatch
+):
+    # The record of a failed build must go with the next good build, or a run that worked and
+    # found nothing would still read as "could not be read".
+    monkeypatch.setattr(fusion_work, "_ensure_gene_regions_loaded", lambda panel: None)
+    real_iter = fusion_work._iter_fusion_candidates_parquet_batches
+
+    def target_filter_raises(candidate_type, *args, **kwargs):
+        if candidate_type == "target_candidates":
+            raise RuntimeError("synthetic target-panel filter crash")
+        return real_iter(candidate_type, *args, **kwargs)
+
+    monkeypatch.setattr(fusion_work, "_iter_fusion_candidates_parquet_batches", target_filter_raises)
+    _stage(tmp_path, _rows(2))  # below the read support: nothing passes
+    assert _accumulate(tmp_path)["status"] == "error"
+    d = tmp_path / SAMPLE
+    body, _ = _report_text(d)
+    assert UNREADABLE in body
+
+    monkeypatch.setattr(fusion_work, "_iter_fusion_candidates_parquet_batches", real_iter)
+    _stage(tmp_path, _rows(1, "GENEC", "GENED", prefix="x"), n=2)
+    assert _accumulate(tmp_path)["status"] == "success"
+    body, summary = _report_text(d)
+    assert NONE_FOUND in body and NONE_FOUND_SUMMARY in summary
+    assert UNREADABLE not in body and "could not be read" not in summary
+
+
+def test_i1b_body_says_which_results_could_not_be_read(tmp_path):
+    # (b) The target panel's results can't be read; the genome-wide ones hold candidates
+    # (3 reads) but none at a validated breakpoint (4 reads), so no table is drawn.
+    d = _sample_dir(tmp_path)
+    _write_pickles(d, _rows(3), names=("all",))
+    assert not _load(d / "fusion_candidates_all_processed.pkl")["annotated_data"].empty
+    (d / "fusion_candidates_master_processed.pkl").write_bytes(b"garbage")
+    body, summary = _report_text(d)
+    assert "Detailed Analysis" not in body
+    assert NONE_FOUND not in body
+    assert "Target panel: the results could not be read." in body
+    assert "Genome-wide: no fusion candidates were identified." in body
+    assert TARGET_UNREADABLE in summary
+
+
+# ------------------------------------------------------------------ M8: the GUI panel's state
+def _type_state(d, kind):
+    from robin.fusion_status import candidate_type_state
+
+    return candidate_type_state(str(d), kind)
+
+
+def test_m8_shared_state_per_type(tmp_path):
+    from robin import fusion_status as fs
+
+    d = _sample_dir(tmp_path)
+    assert (_type_state(d, "master"), _type_state(d, "all")) == (fs.STATE_NOT_RUN, fs.STATE_NOT_RUN)
+    _write_pickles(d, _rows(4), names=("all",))  # (also writes sv_count.txt)
+    assert (_type_state(d, "master"), _type_state(d, "all")) == (fs.STATE_NONE, fs.STATE_FOUND)
+    (d / "fusion_candidates_master_processed.pkl").write_bytes(b"garbage")
+    assert _type_state(d, "master") == fs.STATE_UNREADABLE
+    fusion_work.write_empty_fusion_pickle(str(d / "fusion_candidates_master_processed.pkl"))
+    assert _type_state(d, "master") == fs.STATE_NONE
+    # a failed build's record makes an empty (earlier) pickle unreadable, not "none"
+    marker = fs.failed_build_marker(str(d / "fusion_candidates_master_processed.pkl"))
+    Path(marker).write_text("RuntimeError: x\n")
+    assert _type_state(d, "master") == fs.STATE_UNREADABLE
+
+
+def test_m8_shared_state_unreadable_shapes(tmp_path):
+    from robin import fusion_status as fs
+
+    d = _sample_dir(tmp_path)
+    # a pickle that is not the processed structure
+    (d / "fusion_candidates_all_processed.pkl").write_bytes(pickle.dumps({"annotated_data": "x"}))
+    assert _type_state(d, "all") == fs.STATE_UNREADABLE
+    # a candidate CSV that can't be parsed, no pickle
+    (d / "fusion_candidates_master.csv").write_text('a,b\n"1,2\n')
+    assert _type_state(d, "master") == fs.STATE_UNREADABLE
+
+
+def test_m8_gui_has_candidates():
+    from robin.gui.components.fusion import _has_candidates
+
+    assert _has_candidates(None) is False
+    assert _has_candidates({"annotated_data": pd.DataFrame()}) is False
+    assert _has_candidates({"annotated_data": _rows(1)}) is True
+
+
+def test_m8_shared_messages_for_the_panel():
+    from robin import fusion_status as fs
+
+    assert fs.status_message("master", fs.STATE_NOT_RUN) == (
+        "Target panel fusion analysis has not been run yet")
+    assert fs.status_message("all", fs.STATE_NOT_RUN) == (
+        "Genome-wide fusion analysis has not been run yet")
+    assert fs.status_message("master", fs.STATE_UNREADABLE) == (
+        "The target panel fusion results could not be read")
+    assert fs.status_message("all", fs.STATE_UNREADABLE) == (
+        "The genome-wide fusion results could not be read")
+    for kind in ("master", "all"):
+        for state in (fs.STATE_NONE, fs.STATE_FOUND):
+            assert fs.status_message(kind, state) == "No fusion candidates were identified"
+
+
+def _gui_fusion_tree():
+    import ast
+
+    import robin
+
+    return ast.parse((Path(robin.__file__).parent / "gui" / "components" / "fusion.py").read_text())
+
+
+def _called_names(node):
+    import ast
+
+    names = set()
+    for c in ast.walk(node):
+        if isinstance(c, ast.Call):
+            f = c.func
+            names.add(f.id if isinstance(f, ast.Name) else getattr(f, "attr", None))
+    return names
+
+
+def test_m8_gui_panel_uses_the_shared_state():
+    import ast
+
+    tree = _gui_fusion_tree()
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    # the loader decides each type's state with the shared helper, for both types
+    loader = _called_names(fns["_load_fusion_data"])
+    assert "candidate_type_state" in loader
+    load_src = ast.unparse(fns["_load_fusion_data"])
+    assert '"master"' in load_src or "'master'" in load_src
+    assert '"all"' in load_src or "'all'" in load_src
+    # the panel shows the shared message for both sections
+    ui_fn = fns["_update_fusion_ui"]
+    msg_calls = [
+        ast.unparse(c) for c in ast.walk(ui_fn)
+        if isinstance(c, ast.Call) and getattr(c.func, "id", getattr(c.func, "attr", "")) == "status_message"
+    ]
+    assert any("'master'" in m or '"master"' in m for m in msg_calls), msg_calls
+    assert any("'all'" in m or '"all"' in m for m in msg_calls), msg_calls
+    # and no longer says "no data" whatever the reason
+    strings = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    for old in ("No fusion data available", "No fusion candidates found yet",
+                "(Fusion data file not found or could not be loaded)"):
+        assert old not in strings, old
+
+
 def test_a_step_inside_the_real_preprocessing_that_raises_fails_the_job(tmp_path, monkeypatch):
     # Pins preprocess_fusion_data_standalone's own re-raise: the heavy step it calls raises,
     # the function itself is real.

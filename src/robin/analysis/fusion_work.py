@@ -45,6 +45,7 @@ _HAS_NCLS = True
 
 # Local imports
 from robin.analysis.master_bed_generator import FileLock
+from robin.fusion_status import failed_build_marker
 from robin.classification_config import (
     get_fusion_threshold,
     get_fusion_rule,
@@ -2870,7 +2871,9 @@ def _generate_output_files(
             raise
 
     # Both builds run; a failure in either is kept and raised at the end of this function,
-    # after sv_count.txt and the BED files are written.
+    # after sv_count.txt and the BED files are written. Each build's outcome is recorded next
+    # to its pickle (<pickle>.failed, removed by the next good build), so a build that failed
+    # before writing anything does not read as "none found".
     build_errors: List[Exception] = []
     for _args in (
         ("target_candidates", "fusion_candidates_master.csv",
@@ -2882,6 +2885,9 @@ def _generate_output_files(
             _build_filtered_candidates(*_args)
         except Exception as e:
             build_errors.append(e)
+            _record_build_outcome(os.path.join(work_dir, sample_id, _args[2]), e)
+        else:
+            _record_build_outcome(os.path.join(work_dir, sample_id, _args[2]), None)
 
     # Master BED candidate handling temporarily disabled for performance testing
     master_bed_candidates = None
@@ -6374,6 +6380,23 @@ def preprocess_fusion_data_standalone(
         import traceback
         logger.debug(f"Exception details: {traceback.format_exc()}")
         raise
+
+
+def _record_build_outcome(pickle_path: str, error: Optional[BaseException]) -> None:
+    """Record next to ``pickle_path`` that its last build failed, or clear that record.
+
+    The report and the GUI read the record (robin.fusion_status) as "could not be read".
+    """
+    marker = failed_build_marker(pickle_path)
+    try:
+        if error is None:
+            if os.path.exists(marker):
+                os.remove(marker)
+        else:
+            with open(marker, "w") as f:
+                f.write(" ".join(f"{type(error).__name__}: {error}".split())[:300] + "\n")
+    except OSError as e:
+        logger.warning("Could not update the fusion build record %s: %s", marker, e)
 
 
 def write_empty_fusion_pickle(output_file: str) -> None:

@@ -39,6 +39,23 @@ try:
 except ImportError:  # pragma: no cover
     ui = None
 
+# Each candidate type's state, by the same rules as the PDF report (M8).
+from robin.fusion_status import (  # noqa: E402
+    NONE_FOUND_MESSAGE,
+    STATE_FOUND,
+    STATE_NONE,
+    candidate_type_state,
+    status_message,
+)
+
+
+def _has_candidates(data: Optional[Dict[str, Any]]) -> bool:
+    """True when a loaded processed pickle holds candidates (its good pairs)."""
+    if not isinstance(data, dict):
+        return False
+    annotated = data.get("annotated_data")
+    return isinstance(annotated, pd.DataFrame) and not annotated.empty
+
 
 def _is_dark_mode() -> bool:
     """Match Quasar ``body--dark`` via app storage (see theme.frame)."""
@@ -471,8 +488,9 @@ def _load_processed_pickle(file_path: Path) -> Optional[Dict[str, Any]]:
 def _make_fusion_table(container: Any, df: pd.DataFrame) -> Any:
     """Create or update a NiceGUI table for fusion candidates and return it."""
     if df is None or df.empty:
+        # (only called for results that were read: the step ran)
         with container:
-            ui.label("No fusion candidates found yet").classes("text-gray-600")
+            ui.label(NONE_FOUND_MESSAGE).classes("text-gray-600")
         return None
 
     with container:
@@ -1538,8 +1556,9 @@ def _get_validated_fusion_pairs(annotated_data: pd.DataFrame, goodpairs: pd.Seri
 def _make_fusion_summary_table(container: Any, annotated_data: pd.DataFrame, goodpairs: pd.Series) -> Any:
     """Create a summary table showing fusion pairs with chromosomes, positions, and read counts."""
     if annotated_data is None or annotated_data.empty:
+        # (only called for results that were read: the step ran)
         with container:
-            ui.label("No fusion data available").classes("text-gray-600")
+            ui.label(NONE_FOUND_MESSAGE).classes("text-gray-600")
         return None
 
     with container:
@@ -2785,7 +2804,14 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
 
             t = _load_processed_pickle(target_file)
             g = _load_processed_pickle(genome_file)
-            
+            # Each type's state, by the report's rules: found / none / unreadable / not run.
+            t_state = candidate_type_state(
+                sample_dir, "master", pickle_read=(t is not None, _has_candidates(t))
+            )
+            g_state = candidate_type_state(
+                sample_dir, "all", pickle_read=(g is not None, _has_candidates(g))
+            )
+
             # Master BED CSV loading has been deprecated - the table is no longer displayed in the GUI
             # The Parquet file (master_bed_candidates.parquet) is still used for BED generation
             master_bed_df = None
@@ -2903,12 +2929,14 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 "target": {
                     "data": t,
                     "mtime": target_mtime,
-                    "data_hash": target_data_hash
+                    "data_hash": target_data_hash,
+                    "state": t_state,
                 },
                 "genome": {
                     "data": g,
                     "mtime": genome_mtime,
-                    "data_hash": genome_data_hash
+                    "data_hash": genome_data_hash,
+                    "state": g_state,
                 },
                 "master_bed": {
                     "data": master_bed_df,
@@ -2940,20 +2968,24 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             target_mtime = target_data.get("mtime")
             target_data_hash = target_data.get("data_hash")
             
-            # Handle case when target data is None (no data loaded)
-            if t is None:
-                # Update if mtime changed or if this is initial load (both mtimes are None)
+            target_state = target_data.get("state")
+
+            # Nothing to show: not run, or the results could not be read (M8)
+            if t is None or target_state not in (STATE_FOUND, STATE_NONE):
+                # Update if mtime or state changed, or if this is initial load (both mtimes are None)
                 mtime_changed = target_mtime != state["target"].get("mtime")
+                state_changed = target_state != state["target"].get("fusion_state")
                 is_initial_load = (
-                    target_mtime is None and 
+                    target_mtime is None and
                     state["target"].get("mtime") is None and
                     state["target"].get("data") is None
                 )
-                
-                if mtime_changed or is_initial_load:
+
+                if mtime_changed or state_changed or is_initial_load:
                     state["target"]["data"] = None
                     state["target"]["mtime"] = target_mtime
                     state["target"]["data_hash"] = target_data_hash
+                    state["target"]["fusion_state"] = target_state
                     
                     # Update summary label
                     try:
@@ -2972,22 +3004,19 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     except Exception:
                         pass
                     
-                    # Show status messages
+                    # Say why: not run yet, or could not be read
                     with state["target"]["summary_table_container"].classes("w-full"):
-                        ui.label("No fusion data available").classes("text-gray-600")
-                    with state["target"]["groups_table_container"].classes("w-full"):
-                        ui.label("No validated fusion groups found").classes("text-gray-600")
-                    with state["target"]["table_container"].classes("w-full"):
-                        ui.label("No fusion candidates found yet").classes("text-gray-600")
-                    with state["target"]["status_container"].classes("w-full"):
-                        ui.label("Target panel fusion analysis not available").classes("text-gray-600 text-sm")
-                        ui.label("(Fusion data file not found or could not be loaded)").classes("text-gray-500 text-xs")
-            
+                        ui.label(status_message("master", target_state)).classes("text-gray-600")
+
             # Always update summary and table when file changes
-            elif t is not None and target_mtime != state["target"].get("mtime"):
+            elif t is not None and (
+                target_mtime != state["target"].get("mtime")
+                or target_state != state["target"].get("fusion_state")
+            ):
                 state["target"]["data"] = t
                 state["target"]["mtime"] = target_mtime
                 state["target"]["data_hash"] = target_data_hash
+                state["target"]["fusion_state"] = target_state
                 
                 # summary
                 try:
@@ -3063,7 +3092,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 else:
                     # Show status message when target panel fusion data is not available
                     with state["target"]["status_container"].classes("w-full"):
-                        ui.label("Target panel fusion analysis not available").classes("text-gray-600 text-sm")
+                        ui.label(NONE_FOUND_MESSAGE).classes("text-gray-600 text-sm")
                         ui.label("(No validated fusion pairs found in target panel)").classes("text-gray-500 text-xs")
                 
                 # Restore selected gene pair if it exists (for both cases above)
@@ -3107,7 +3136,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 else:
                     # Show status message when target panel fusion data is not available
                     with state["target"]["status_container"].classes("w-full"):
-                        ui.label("Target panel fusion analysis not available").classes("text-gray-600 text-sm")
+                        ui.label(NONE_FOUND_MESSAGE).classes("text-gray-600 text-sm")
                         ui.label("(No validated fusion pairs found in target panel)").classes("text-gray-500 text-xs")
                 
                 # Restore selected gene pair if it exists (for both cases above)
@@ -3123,11 +3152,42 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             genome_data_hash = genome_data.get("data_hash")
             logging.info(f"[Fusion] Genome-wide update check: g={g is not None}, mtime_changed={genome_mtime != state['genome'].get('mtime')}")
             
+            genome_state = genome_data.get("state")
+
+            # Nothing to show: not run, or the results could not be read (M8)
+            if g is None or genome_state not in (STATE_FOUND, STATE_NONE):
+                if (
+                    "fusion_state" not in state["genome"]  # first load
+                    or genome_mtime != state["genome"].get("mtime")
+                    or genome_state != state["genome"].get("fusion_state")
+                ):
+                    state["genome"]["data"] = None
+                    state["genome"]["mtime"] = genome_mtime
+                    state["genome"]["data_hash"] = genome_data_hash
+                    state["genome"]["fusion_state"] = genome_state
+                    try:
+                        if "summary" in state and state["summary"].get("genome_lbl"):
+                            state["summary"]["genome_lbl"].text = "Genome-wide: -- pairs, -- groups"
+                    except Exception:
+                        pass
+                    try:
+                        for key in ("summary_table_container", "groups_table_container",
+                                    "table_container", "plot_container", "status_container"):
+                            state["genome"][key].clear()
+                    except Exception:
+                        pass
+                    with state["genome"]["summary_table_container"].classes("w-full"):
+                        ui.label(status_message("all", genome_state)).classes("text-gray-600")
+
             # Always update summary and table when file changes
-            if g is not None and genome_mtime != state["genome"].get("mtime"):
+            elif g is not None and (
+                genome_mtime != state["genome"].get("mtime")
+                or genome_state != state["genome"].get("fusion_state")
+            ):
                 state["genome"]["data"] = g
                 state["genome"]["mtime"] = genome_mtime
                 state["genome"]["data_hash"] = genome_data_hash
+                state["genome"]["fusion_state"] = genome_state
                 
                 # summary
                 try:
@@ -3201,8 +3261,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 else:
                     # Show status message when genome-wide data is not available
                     with state["genome"]["status_container"].classes("w-full"):
-                        ui.label("Genome-wide fusion analysis not available").classes("text-gray-600 text-sm")
-                        ui.label("(Requires supplementary reads in BAM file)").classes("text-gray-500 text-xs")
+                        ui.label(NONE_FOUND_MESSAGE).classes("text-gray-600 text-sm")
+                        ui.label("(No validated fusion pairs found genome-wide)").classes("text-gray-500 text-xs")
                 
                 # Restore selected gene pair if it exists (for both cases above)
                 if state["genome"]["selected_gene_pair"] and state["genome"]["dropdown"]:
@@ -3245,8 +3305,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 else:
                     # Show status message when genome-wide data is not available
                     with state["genome"]["status_container"].classes("w-full"):
-                        ui.label("Genome-wide fusion analysis not available").classes("text-gray-600 text-sm")
-                        ui.label("(Requires supplementary reads in BAM file)").classes("text-gray-500 text-xs")
+                        ui.label(NONE_FOUND_MESSAGE).classes("text-gray-600 text-sm")
+                        ui.label("(No validated fusion pairs found genome-wide)").classes("text-gray-500 text-xs")
                 
                 # Restore selected gene pair if it exists (for both cases above)
                 if state["genome"]["selected_gene_pair"] and state["genome"]["dropdown"]:
@@ -3360,10 +3420,11 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                 else Path("/dev/null")
             )
             if "summary" in state:
-                t_pairs0 = _count_unique_fusion_pairs(t0) if isinstance(t0, dict) else 0
-                t_groups0 = _count_unique_fusion_groups(t0) if isinstance(t0, dict) else 0
-                g_pairs0 = _count_unique_fusion_pairs(g0) if isinstance(g0, dict) else 0
-                g_groups0 = _count_unique_fusion_groups(g0) if isinstance(g0, dict) else 0
+                # "--" (not 0) when a pickle is missing or unreadable: nothing is known yet
+                t_pairs0 = _count_unique_fusion_pairs(t0) if isinstance(t0, dict) else "--"
+                t_groups0 = _count_unique_fusion_groups(t0) if isinstance(t0, dict) else "--"
+                g_pairs0 = _count_unique_fusion_pairs(g0) if isinstance(g0, dict) else "--"
+                g_groups0 = _count_unique_fusion_groups(g0) if isinstance(g0, dict) else "--"
                 try:
                     state["summary"][
                         "target_lbl"

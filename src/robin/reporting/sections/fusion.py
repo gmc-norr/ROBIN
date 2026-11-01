@@ -16,6 +16,13 @@ import networkx as nx
 from reportlab.lib.styles import ParagraphStyle
 
 from robin.classification_config import get_fusion_threshold
+from robin.fusion_status import (  # noqa: F401  (the states are re-exported)
+    STATE_FOUND,
+    STATE_NONE,
+    STATE_NOT_RUN,
+    STATE_UNREADABLE,
+    fusion_states,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +40,13 @@ GENOME_WIDE_UNREADABLE_SUMMARY_TEXT = "The genome-wide fusion results could not 
 # the GUI's _validate_fusion_breakpoints): reads that support the same breakpoint.
 BREAKPOINT_MIN_READS = 4
 
-STATE_NOT_RUN = "not_run"
-STATE_UNREADABLE = "unreadable"
-STATE_NONE = "none"
-STATE_FOUND = "found"
+# Body text for a type when no fusion table is drawn (I1 follow-up b): "Target panel: ...".
+_BODY_TYPE_STATUS = {
+    STATE_UNREADABLE: "the results could not be read",
+    STATE_NOT_RUN: "fusion analysis has not been run",
+    STATE_NONE: "no fusion candidates were identified",
+    STATE_FOUND: "no fusion candidates were identified",  # (none at a validated breakpoint)
+}
 
 
 def fusion_methods_sentence():
@@ -167,101 +177,15 @@ class FusionSection(ReportSection):
         connected_components = list(nx.connected_components(G))
         return [list(component) for component in connected_components]
 
-    def _read_processed_pickle(self, path):
-        """Return (candidates, readable) for one processed pickle.
-
-        candidates is the good-pair frame (empty when the pickle holds none). A pickle that
-        cannot be read, or holds something else than the processed structure, is not readable.
-        """
-        try:
-            with open(path, "rb") as f:
-                processed_data = pickle.load(f)
-            annotated_data = processed_data.get("annotated_data", pd.DataFrame())
-            goodpairs = processed_data.get("goodpairs", pd.Series(dtype=bool))
-            if not isinstance(annotated_data, pd.DataFrame):
-                raise TypeError("annotated_data is not a DataFrame")
-            # Only keep the good pairs (same as GUI does)
-            if not annotated_data.empty and not goodpairs.empty:
-                candidates = annotated_data[goodpairs]
-            else:
-                candidates = annotated_data
-            logger.debug(
-                f"Loaded fusion candidates from {path} "
-                f"({len(candidates)} good pairs from {len(annotated_data)} total candidates)"
-            )
-            return candidates, True
-        except Exception as e:
-            logger.warning(f"Could not read fusion pickle {path}: {e}")
-            return pd.DataFrame(), False
-
-    def _missing_pickle_state(self, csv_name):
-        """State of one candidate type whose processed pickle is missing.
-
-        The type's filtered candidate CSV holds the reads that passed; ``sv_count.txt`` is
-        written when the step finishes. CSV rows but no pickle: the results exist but were
-        not processed (a folder from before the writer always made one, or this type's build
-        failed). No rows: with ``sv_count.txt`` the step ran and nothing passed; without it,
-        never run.
-        """
-        path = os.path.join(self.report.output, csv_name)
-        if os.path.exists(path):
-            try:
-                if not pd.read_csv(path).empty:
-                    return STATE_UNREADABLE
-            except pd.errors.EmptyDataError:
-                pass
-            except Exception as e:
-                logger.warning(f"Could not read fusion candidates {path}: {e}")
-                return STATE_UNREADABLE
-        if os.path.exists(os.path.join(self.report.output, "sv_count.txt")):
-            return STATE_NONE
-        return STATE_NOT_RUN
-
     def _load_fusion_data(self):
         """Load the processed pickles and decide a state per candidate type and for the sample.
 
-        Per type (``master_state``: target panel; ``all_state``: genome-wide): found when its
-        pickle is readable and holds candidates; none when readable and empty; unreadable when
-        it can't be read; a missing pickle is decided by that type's own evidence
-        (``_missing_pickle_state``). ``state``, the sample's: found if either type is, else
-        unreadable if either is, else none if either is, else not run.
+        The rules are robin.fusion_status's, shared with the GUI's fusion panel: per type
+        (``master_state``: target panel; ``all_state``: genome-wide) found, none, unreadable
+        or not run; ``state``, the sample's: found if either type is, else unreadable if
+        either is, else none if either is, else not run.
         """
-        fusion_data = {
-            "master_candidates": None,
-            "all_candidates": None,
-            "master_path": os.path.join(
-                self.report.output, "fusion_candidates_master_processed.pkl"
-            ),
-            "all_path": os.path.join(self.report.output, "fusion_candidates_all_processed.pkl"),
-            "master_state": STATE_NOT_RUN,
-            "all_state": STATE_NOT_RUN,
-            "state": STATE_NOT_RUN,
-            "unreadable": [],
-        }
-
-        for kind, csv_name in (
-            ("master", "fusion_candidates_master.csv"),
-            ("all", "fusion_candidates_all.csv"),
-        ):
-            path = fusion_data[f"{kind}_path"]
-            if not os.path.exists(path):
-                state = self._missing_pickle_state(csv_name)
-            else:
-                candidates, ok = self._read_processed_pickle(path)
-                if ok:
-                    fusion_data[f"{kind}_candidates"] = candidates
-                    state = STATE_NONE if candidates.empty else STATE_FOUND
-                else:
-                    fusion_data["unreadable"].append(path)
-                    state = STATE_UNREADABLE
-            fusion_data[f"{kind}_state"] = state
-
-        states = {fusion_data["master_state"], fusion_data["all_state"]}
-        for state in (STATE_FOUND, STATE_UNREADABLE, STATE_NONE, STATE_NOT_RUN):
-            if state in states:
-                fusion_data["state"] = state
-                break
-        return fusion_data
+        return fusion_states(self.report.output)
 
     def _format_fusion_table(self, data, title):
         """Create a formatted table for fusion data using validated fusion pairs."""
@@ -731,10 +655,18 @@ class FusionSection(ReportSection):
             except Exception:
                 pass
         else:
-            body_text = {
-                STATE_NOT_RUN: NOT_RUN_TEXT,
-                STATE_UNREADABLE: UNREADABLE_TEXT,
-            }.get(fusion_data["state"], NONE_FOUND_TEXT)
+            type_states = (fusion_data["master_state"], fusion_data["all_state"])
+            if fusion_data["state"] == STATE_NOT_RUN:
+                body_text = NOT_RUN_TEXT
+            elif all(s in (STATE_FOUND, STATE_NONE) for s in type_states):
+                # every type's results were read
+                body_text = NONE_FOUND_TEXT
+            else:
+                # say which results could not be read (or were not run)
+                parts = [UNREADABLE_TEXT] if fusion_data["state"] == STATE_UNREADABLE else []
+                for label, s in zip(("Target panel", "Genome-wide"), type_states):
+                    parts.append(f"{label}: {_BODY_TYPE_STATUS[s]}.")
+                body_text = " ".join(parts)
             self.elements.append(
                 Paragraph(
                     body_text,

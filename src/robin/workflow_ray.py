@@ -63,6 +63,13 @@ from robin.job_outcome import (
     record_outcome,
     recorded_failure,
 )
+from robin.bam_submission import (
+    FailOnlyWatchSession,
+    detect_fail_only_bam_submission as _detect_fail_only_bam_submission,
+    is_bam_path as _is_bam_path,
+    matches_any_pattern as _matches_any_pattern,
+    matches_no_ignores as _matches_no_ignores,
+)
 
 try:
     from rich.progress import (
@@ -763,6 +770,39 @@ def _carry_gui_messages(context: WorkflowContext) -> None:
         pass
 
 
+def _handler_kwargs(
+    py_handler: Callable[..., Any], job: Job, job_type: str, work_dir: Optional[str]
+) -> Dict[str, Any]:
+    """The keyword arguments a real handler is called with, from the job's metadata.
+
+    The same choice as before JOB-3: ``work_dir`` for the types that need one, ``reference``
+    and ``target_panel`` where the handler takes them. Empty when the handler's signature
+    can't be read or the job has no ``target_panel`` (the handler is then called with the job
+    alone, as before).
+    """
+    try:
+        params = inspect.signature(py_handler).parameters
+    except (TypeError, ValueError):
+        return {}
+    reference = job.context.metadata.get("reference")
+    target_panel = job.context.metadata.get("target_panel")
+    if not target_panel:
+        return {}
+    accepts_reference = "reference" in params
+    accepts_target_panel = "target_panel" in params
+    panel_types = ("fusion", "target", "cnv")
+    kwargs: Dict[str, Any] = {}
+    if "work_dir" in params and work_dir and job_type in NEEDS_WORK_DIR:
+        kwargs["work_dir"] = work_dir
+    if accepts_reference and reference and accepts_target_panel and job_type in panel_types:
+        kwargs.update(reference=reference, target_panel=target_panel)
+    elif accepts_reference and reference and job_type in ("mgmt", "target"):
+        kwargs["reference"] = reference
+    elif accepts_target_panel and job_type in panel_types:
+        kwargs["target_panel"] = target_panel
+    return kwargs
+
+
 def _wrap_real_handler(
     py_handler: Optional[Callable[[Job], None]], job_type: str
 ) -> Callable[[Job], WorkflowContext]:
@@ -836,43 +876,16 @@ def _wrap_real_handler(
                         os.makedirs(os.path.join(work_dir, sid), exist_ok=True)
                 except Exception:
                     pass
-            try:
-                sig = inspect.signature(py_handler)
-                # Check if handler accepts reference parameter
-                accepts_reference = "reference" in sig.parameters
-                accepts_target_panel = "target_panel" in sig.parameters
-
-                # Get reference from job metadata if available
-                reference = job.context.metadata.get("reference")
-                target_panel = job.context.metadata.get("target_panel")
-                if not target_panel:
-                    raise ValueError(f"No target_panel found in job metadata for {job_type} handler")
-
-                # Call handler with appropriate parameters
-                if (
-                    "work_dir" in sig.parameters
-                    and work_dir
-                    and (job_type in NEEDS_WORK_DIR)
-                ):
-                    if accepts_reference and reference and accepts_target_panel and job_type in ["fusion", "target", "cnv"]:
-                        py_handler(job, work_dir=work_dir, reference=reference, target_panel=target_panel)
-                    elif accepts_reference and reference and job_type in ["mgmt", "target"]:
-                        py_handler(job, work_dir=work_dir, reference=reference)
-                    elif accepts_target_panel and job_type in ["fusion", "target", "cnv"]:
-                        py_handler(job, work_dir=work_dir, target_panel=target_panel)
-                    else:
-                        py_handler(job, work_dir=work_dir)
-                elif accepts_reference and reference and accepts_target_panel and job_type in ["fusion", "target", "cnv"]:
-                    py_handler(job, reference=reference, target_panel=target_panel)
-                elif accepts_reference and reference and job_type in ["mgmt", "target"]:
-                    py_handler(job, reference=reference)
-                elif accepts_target_panel and job_type in ["fusion", "target", "cnv"]:
-                    py_handler(job, target_panel=target_panel)
-                else:
-                    py_handler(job)
-            except Exception:
-                # Fallback to legacy call
-                py_handler(job)
+            # Call the handler once (JOB-3). The keyword arguments are chosen and bound first;
+            # only when they can't be bound is it called with the job alone. The handler's own
+            # exception is never caught here to call it again.
+            kwargs = _handler_kwargs(py_handler, job, job_type, work_dir)
+            if kwargs:
+                try:
+                    inspect.signature(py_handler).bind(job, **kwargs)
+                except (TypeError, ValueError):
+                    kwargs = {}
+            py_handler(job, **kwargs)
             # The errors filed since the job started decide the outcome, whatever their name.
             outcome = job_outcome(job_type, job.context, errors_before)
             if outcome["status"] == "expected_failure":
@@ -3870,80 +3883,8 @@ def default_file_classifier(filepath: str, plan: List[str], target_panel: str) -
     return [Job(job_id, jt, q, plan, 0, ctx)]
 
 
-def _matches_any_pattern(p: Path, patterns: Optional[List[str]]) -> bool:
-    if not patterns:
-        return True
-    try:
-        return any(p.match(pat) for pat in patterns)
-    except Exception:
-        return True
-
-
-def _matches_no_ignores(p: Path, ignore_patterns: Optional[List[str]]) -> bool:
-    # Always ignore hidden dotfiles/directories by default.
-    # This keeps `robin workflow` from getting noisy when watch directories contain
-    # files like `.DS_Store` or editor artifacts.
-    if p.name.startswith("."):
-        return False
-    if not ignore_patterns:
-        return True
-    try:
-        return not any(p.match(pat) for pat in ignore_patterns)
-    except Exception:
-        return True
-
-
-def _is_bam_path(p: Path) -> bool:
-    try:
-        return p.suffix.lower() == ".bam"
-    except Exception:
-        return False
-
-
-def _detect_fail_only_bam_submission(
-    paths: List[str],
-    patterns: Optional[List[str]],
-    ignore_patterns: Optional[List[str]],
-    recursive: bool,
-) -> bool:
-    """
-    True iff this submission contains BAMs and *all* BAM filenames contain 'fail'
-    and none contain 'pass'. Used to suppress expected downstream failures on
-    fail-only read sets.
-    """
-    bam_total = 0
-    bam_fail = 0
-    bam_pass = 0
-    for p in paths:
-        pth = Path(p)
-        if pth.is_file():
-            files = [pth]
-        elif pth.is_dir():
-            try:
-                files = list(pth.rglob("*") if recursive else pth.glob("*"))
-            except Exception:
-                files = []
-        else:
-            files = []
-        for f in files:
-            try:
-                if not f.is_file():
-                    continue
-                if not _matches_any_pattern(f, patterns) or not _matches_no_ignores(
-                    f, ignore_patterns
-                ):
-                    continue
-                if not _is_bam_path(f):
-                    continue
-                bam_total += 1
-                k = _bam_filename_kind(str(f))
-                if k == "fail":
-                    bam_fail += 1
-                elif k == "pass":
-                    bam_pass += 1
-            except Exception:
-                continue
-    return bool(bam_total and bam_pass == 0 and bam_fail == bam_total)
+# _matches_any_pattern, _matches_no_ignores, _is_bam_path and _detect_fail_only_bam_submission
+# live in robin.bam_submission (shared with the non-Ray runner) and are imported above.
 
 
 async def submit_existing_paths(
@@ -4349,8 +4290,8 @@ class RayFileWatcher(FileSystemEventHandler):
         self._batch_size: int = 128
         # Track whether this watch session has seen any "pass" BAMs.
         # If a pass BAM is present, we want fail-BAM errors to remain visible.
-        self._watch_seen_bam: bool = False
-        self._watch_seen_pass_bam: bool = False
+        # (The rule is shared with the non-Ray runner: robin.bam_submission.)
+        self._fail_only_watch = FailOnlyWatchSession()
 
     def _should_process(self, fp: str) -> bool:
         p = Path(fp)
@@ -4387,27 +4328,16 @@ class RayFileWatcher(FileSystemEventHandler):
             return
         self.processed.add(fp)
         # Maintain watch-level pass/fail BAM state
-        try:
-            if _is_bam_path(Path(fp)):
-                self._watch_seen_bam = True
-                k = _bam_filename_kind(fp)
-                if k == "pass":
-                    self._watch_seen_pass_bam = True
-        except Exception:
-            pass
+        fail_only = self._fail_only_watch.is_fail_only(fp)
         jobs = default_file_classifier(fp, self.plan, self.target_panel)
         if self.work_dir:
             for j in jobs:
                 j.context.add_metadata("work_dir", self.work_dir)
         # Tag fail-only BAM submissions for this watch session.
         # If we've seen a pass BAM, do not suppress errors.
-        try:
-            if _is_bam_path(Path(fp)) and self._watch_seen_bam and (not self._watch_seen_pass_bam):
-                if _bam_filename_kind(fp) == "fail":
-                    for j in jobs:
-                        j.context.add_metadata("fail_only_bam_submission", True)
-        except Exception:
-            pass
+        if fail_only:
+            for j in jobs:
+                j.context.add_metadata("fail_only_bam_submission", True)
         # enqueue and flush under rate limiter
         self._pending_jobs.extend(jobs)
         self._flush_if_needed()

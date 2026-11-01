@@ -29,6 +29,11 @@ except Exception:
     _RICH_AVAILABLE = False
 from robin.logging_config import get_job_logger
 from robin.job_outcome import JobReportedFailure, job_outcome
+from robin.bam_submission import (
+    FailOnlyWatchSession,
+    detect_fail_only_bam_submission,
+    is_bam_path,
+)
 from robin.analysis.target_analysis import (
     igv_bam_handler,
     snp_analysis_handler,
@@ -1521,6 +1526,9 @@ class FileWatcher(FileSystemEventHandler):
         self.target_panel = target_panel
         self.observer = Observer()
         self.processed_files = set()
+        # Fail-only BAM submissions, by the Ray runner's rules (robin.bam_submission): for
+        # watched files, a "fail" BAM before any "pass" BAM in this session.
+        self._fail_only_watch = FailOnlyWatchSession()
 
     def _should_process_file(self, filepath: str) -> bool:
         """Check if a file should be processed based on patterns."""
@@ -1538,12 +1546,18 @@ class FileWatcher(FileSystemEventHandler):
 
         return False
 
-    def handle_file(self, filepath: str) -> None:
-        """Process a new file through the workflow."""
+    def handle_file(self, filepath: str, fail_only: Optional[bool] = None) -> None:
+        """Process a new file through the workflow.
+
+        ``fail_only``: whether the file belongs to a fail-only BAM submission, when the caller
+        has decided it (existing files); None for a watched file (the watch-session rule).
+        """
         if filepath in self.processed_files:
             return
 
         self.processed_files.add(filepath)
+        if fail_only is None:
+            fail_only = self._fail_only_watch.is_fail_only(filepath)
 
         # Use logger for file watcher events
         import logging
@@ -1559,6 +1573,10 @@ class FileWatcher(FileSystemEventHandler):
                 jobs = self.preprocessor_func(filepath, target_panel=self.target_panel)
             else:
                 jobs = self.preprocessor_func(filepath)
+            # A fail-only BAM's expected downstream failures are not counted as failed.
+            if fail_only and is_bam_path(Path(filepath)):
+                for j in jobs:
+                    j.context.add_metadata("fail_only_bam_submission", True)
             self.manager.enqueue_jobs(jobs)
             logger.debug(f"Queued {len(jobs)} jobs for {filepath}")
         except Exception as e:
@@ -1636,6 +1654,11 @@ class FileWatcher(FileSystemEventHandler):
         # Remove duplicates and sort
         existing_files = sorted(set(existing_files))
 
+        # Existing files: fail-only when their BAMs are all "fail" and none "pass".
+        fail_only = detect_fail_only_bam_submission(
+            [str(f) for f in existing_files], patterns=None, ignore_patterns=None, recursive=False
+        )
+
         if existing_files:
             logger.info(f"Found {len(existing_files)} existing file(s) to process:")
             for file_path in existing_files:
@@ -1652,7 +1675,7 @@ class FileWatcher(FileSystemEventHandler):
                     if self.show_progress:
                         pbar.set_postfix_str(f"Processing: {file_path.name}")
                     logger.debug(f"Processing existing file: {file_path}")
-                    self.handle_file(str(file_path))
+                    self.handle_file(str(file_path), fail_only=fail_only)
                     pbar.update(1)
         else:
             logger.info("No existing files found matching the patterns.")
