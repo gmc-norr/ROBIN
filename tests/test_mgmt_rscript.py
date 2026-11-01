@@ -83,7 +83,7 @@ def test_missing_rscript_logs_warning_and_continues(tmp_path, monkeypatch, mgmt_
     sample_dir.mkdir()
 
     with caplog.at_level(logging.WARNING, logger="robin.mgmt"):
-        assert run_matkit(str(tmp_path), "in.bam", str(mgmt_inputs), str(sample_dir), 1) is True
+        assert run_matkit(str(tmp_path), "in.bam", str(mgmt_inputs), str(sample_dir), 1) is False
     assert "R script failed" in caplog.text
     # The BED file is still kept when R is missing.
     assert (sample_dir / "1_mgmt.bed").exists()
@@ -99,6 +99,6 @@ def test_rscript_that_cannot_run_logs_warning_and_continues(tmp_path, monkeypatc
     sample_dir.mkdir()
 
     with caplog.at_level(logging.WARNING, logger="robin.mgmt"):
-        assert run_matkit(str(tmp_path), "in.bam", str(mgmt_inputs), str(sample_dir), 1) is True
+        assert run_matkit(str(tmp_path), "in.bam", str(mgmt_inputs), str(sample_dir), 1) is False
     assert "R script failed" in caplog.text
     assert (sample_dir / "1_mgmt.bed").exists()

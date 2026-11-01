@@ -582,10 +582,9 @@ def sturgeon_bam_background_work(parquet_path, output_path, probes_file, current
                 # Clean up the indexed copy
                 del mydf_indexed
 
-    except Exception as e:
-        print(f"Error in process_bam (sturgeon): {e}")
-        logger.error(f"Error in process_bam (sturgeon): {e}")
     finally:
+        # A failure is not caught here: it reaches the caller (process_parquet_file or the batch
+        # loop), which records it so the handler can file it. Only the cleanup runs here.
         # Comprehensive cleanup of all large DataFrames and variables
         if merged_modkit_df is not None:
             del merged_modkit_df

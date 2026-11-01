@@ -792,7 +792,11 @@ def convert_to_mixed_delim(input_file: str, output_file: str) -> bool:
 def run_matkit(
     temp_dir: str, mgmt_bamfile: str, hv_path: str, sample_dir: str, file_number: int
 ) -> bool:
-    """Processes BAM file with matkit and runs R script for MGMT prediction."""
+    """Processes BAM file with matkit and runs R script for MGMT prediction.
+
+    Returns False when anything failed, including the R step (non-zero exit, Rscript cannot
+    start, script missing); the BED file is kept either way.
+    """
     temp_files = []  # Track temporary files for cleanup
 
     logger = logging.getLogger("robin.mgmt")
@@ -832,6 +836,7 @@ def run_matkit(
             shutil.copy2(output_mgmt_bed, final_bed_file)
 
             # Run R script for MGMT prediction
+            r_ok = True
             r_script_path = os.path.join(hv_path, "bin", "mgmt_pred_v0.3.R")
             if os.path.exists(r_script_path):
                 # An argument list, not a shell string: sample paths are data, never code.
@@ -850,6 +855,7 @@ def run_matkit(
                     # Rscript missing or not runnable. Continue anyway as we
                     # still have the BED file.
                     logger.warning(f"R script failed: could not start Rscript: {e}")
+                    r_ok = False
                 else:
                     if result.returncode == 0:
                         # Rename the output CSV file to use incremental naming
@@ -862,9 +868,15 @@ def run_matkit(
                     else:
                         logger.warning(f"R script failed: {result.stderr}")
                         # Continue anyway as we still have the BED file
+                        r_ok = False
             else:
                 logger.warning(f"R script not found at {r_script_path}")
+                r_ok = False
 
+            if not r_ok:
+                # The BED file is kept, but the prediction did not happen: report it.
+                logger.warning("Matkit processing finished without the R prediction")
+                return False
             logger.info("Matkit processing completed")
             return True
 
@@ -1097,9 +1109,13 @@ def process_bam_file(
                 logger.info("Matkit analysis complete")
             else:
                 logger.warning("Matkit analysis failed or robin package not available")
+                mgmt_result.error_message = (
+                    f"MGMT analysis failed for {sample_id}: the matkit / R prediction step failed"
+                )
 
         except Exception as e:
             logger.error(f"Matkit analysis error: {e}")
+            mgmt_result.error_message = f"MGMT analysis failed for {sample_id}: {e}"
 
         # Clean up temporary files after all analysis is complete
         temp_files_to_clean = [temp_bamfile.name]
@@ -1409,9 +1425,13 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, reference=
                 logger.info("Matkit analysis complete")
             else:
                 logger.warning("Matkit analysis failed or robin package not available")
+                analysis_result["error_message"] = (
+                    f"MGMT analysis failed for {sample_id}: the matkit / R prediction step failed"
+                )
 
         except Exception as e:
             logger.error(f"Matkit analysis error: {e}")
+            analysis_result["error_message"] = f"MGMT analysis failed for {sample_id}: {e}"
 
         # Collect results and metadata
         analysis_result["tools_available"] = {

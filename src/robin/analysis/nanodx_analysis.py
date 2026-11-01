@@ -159,6 +159,8 @@ def _direct_classification(
     """
     Direct classification function as fallback when subprocess fails.
 
+    Raises if the classifier is unavailable or the prediction fails.
+
     Args:
         modelfile (str): Path to the neural network model file.
         test_df (pd.DataFrame): DataFrame containing the test data.
@@ -170,18 +172,17 @@ def _direct_classification(
     logger.debug(f"Running direct classification with model file: {modelfile}")
 
     if NN_classifier is None:
-        logger.error("NN_classifier not available")
-        return np.array([]), np.array([]), 0
+        # No classification happened: say so, rather than hand back empty scores.
+        raise RuntimeError("NN_classifier not available")
 
     NN = NN_classifier(modelfile)
     try:
         predictions, class_labels, n_features = NN.predict(test_df)
         logger.debug("Direct classification executed successfully.")
     except Exception:
+        # The caller records the failure; no results and no dump of the sample's calls.
         logger.error("An error occurred during direct classification", exc_info=True)
-        test_df.to_csv("errordf.csv", sep=",", index=False, encoding="utf-8")
-        # Return empty results on error
-        return np.array([]), np.array([]), 0
+        raise
     finally:
         NN = None
         del NN
