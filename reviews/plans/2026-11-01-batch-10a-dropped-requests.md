@@ -103,3 +103,19 @@ A waiting classifier job is replaced too, but that can't be seen: every request 
 - 10e: the items recorded in batches 8 and 9.
 - **New finding: on the `high` preset the Coordinator stops answering while a job runs** (measured above). Submissions, and the GUI's status calls, wait until the job ends. `high` is opt-in (the default is `standard`). The cause is not found yet: `_drain_loop` waits only 0.1 s, and `TypeProcessor.process` is async. For a later batch.
 - **Manual classifier runs** (`submit_sample_job` with a classifier type) get the per-sample rule but not the one-at-a-time rule. Such a job has no bed_conversion result and fails in the handler ("No parquet paths found"), so nothing in ROBIN sends one.
+
+## Result (2026-11-02): supported
+
+Every pass rule holds.
+
+- **Before** (`0545e2f`'s `src` with the committed tests of `f77bc5d`, `b10/before_10a.sh`): 8 failed, each by assertion on the fault, and 5 passed (the guards), in 13 min 26 s. The failures were J1 `{'A', 'B'} == {'A', 'B', 'C'}`, J2 `A`, S1 ×4 `1 == 2` and S2 ×2 `1 == 2`. The guards that passed were G1 and G2 ×4. These are the same results as before the lock.
+- **After** (`f77bc5d`): `test_job_requests.py`, `test_job_failures.py`, `test_file_failures.py` and `test_classifier_failures.py`: 245 passed.
+- **Mutants:** M1–M6 were each caught (exit 1); the no-op control survived (13 passed).
+- **Full suite:** 753 passed (740 before, plus the 13 new), in 9 min 31 s.
+- **Pins:** `git diff 0545e2f -- robin.yml pyproject.toml` is empty.
+
+**Then, the external review** (`/home/parlar_ai/robin-batch3-run/review-requests/batch10a-report-codex.md`) found two problems these tests didn't cover:
+- the waiting request is started from inside `_on_finish` in a way that can wait for good when the backlog is full;
+- with the sample batcher on, a waiting SNP request runs with the oldest batched request's settings, and can give a third run.
+
+It also found one place that can't be reached in a normal run (no change). They are handled in `reviews/plans/2026-11-02-batch-10a-review-fixes.md`.
