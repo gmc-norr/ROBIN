@@ -149,3 +149,34 @@ Only exit 1 ("N failed") counts as caught (case 6).
   - Its variant-check repros (IR-01, IR-02, IR-09) already fail on `cf4f84e`, because they reproduce bugs that are now fixed.
   - IR-01 fails there by `NameError: datetime`. Not touched.
 - **Whether SnpSift matches ClinVar records by REF/ALT as well as position** (it decides which record's labels a sample row gets). Not checked here.
+
+## Result: supported (code `502fd72`)
+
+Every pass condition holds. The commands and outputs follow.
+
+- **New tests on the base:** `tests/test_clinvar_significance.py` at `502fd72`, run on `cf4f84e`'s `src` (`git archive cf4f84e src`): `53 failed, 19 passed`. The failures are 32 `ModuleNotFoundError` and 21 by assertion, as locked.
+- **New tests after:** `t9.sh tests/test_clinvar_significance.py`: `72 passed`.
+- **Mutants** (`b9/scripts/mutate9.py`; only exit 1 counts):
+  - M1–M12 are each `CAUGHT`, each with 1 failed under `-x`.
+  - The no-op control `SURVIVED` (163 passed).
+  - The mutated files: M1, M6, M10 the variant check; M2–M5 the helper; M7, M9 `snp_processing.py`; M8, M12 the report; M11 the GUI.
+- **Full suite:** `733 passed` (661 on `cf4f84e` + 72).
+- **Pins:** `git diff cf4f84e -- robin.yml pyproject.toml` is empty.
+- **No existing test changed.**
+
+**Real ClinVar file, re-measured on `502fd72`** (`measure_clinvar.py` with the worktree's `src`):
+- All three checks flag **367,875** records. That is 367,174 kept + 701 added, as Gate B's `rules.py` predicted.
+- Of the 182,153 records with "conflicting" in CLNSIG or ONC, 141 still count (by an oncogenic or Tier I/II label), and 182,012 don't.
+- The three checks now give the same count. Before, the variant check's count was 827 higher than the other two.
+
+**IDH1 probe on `502fd72`** (`probe_var1.py`):
+- All 3 records are kept. G>A has 20 alternate reads and reads high_frequency, so the gene is present_with_good_coverage.
+- Measured side effect: G>C and G>T read `reference_mismatch` (needs review) there, because every read carries A, which is neither allele.
+  - In a sample whose reads show G as well, they read `no_support`.
+  - The gene's status follows the supported site, so it is unchanged. It is recorded, not changed: a sibling allele's evidence is still judged on its own two alleles.
+
+Gate D:
+1. **Could the pipeline make this up?** The rule is checked on ClinVar's own labels (copied verbatim) and on the whole real file, not only on hand-made labels.
+2. **Do the controls tell working from broken?** Yes. The no-op control survived, and every mutant of a fix part was caught.
+3. **Measured or inferred?** Measured, except that SnpSift copies ONC/SCI into `snpsift_output.vcf` (its documented default; not run here).
+4. **Fresh output:** above.
