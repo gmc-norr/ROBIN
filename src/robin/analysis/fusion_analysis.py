@@ -808,7 +808,11 @@ def fusion_handler(job, work_dir=None, target_panel=None):
                         accumulation_result = accumulate_fusion_candidates(
                             work_dir, sample_id, target_panel, force=False, batch_size=staging_batch_size, reference=reference
                         )
-                        if accumulation_result.get("status") == "below_threshold":
+                        if accumulation_result.get("status") == "error":
+                            error_msg = f"Accumulation failed: {accumulation_result.get('error', 'Unknown error')}"
+                            logger.error(error_msg)
+                            job.context.add_error("fusion_analysis", error_msg)
+                        elif accumulation_result.get("status") == "below_threshold":
                             logger.debug("Accumulation skipped - below threshold")
                         else:
                             logger.info(f"Fusion accumulation result: {accumulation_result}")

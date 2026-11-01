@@ -2588,6 +2588,13 @@ def _generate_output_files(
         output_pickle_name: str,
     ) -> None:
         state_path = os.path.join(work_dir, sample_id, f"{candidate_type}_filter_state.pkl")
+        pickle_path = os.path.join(work_dir, sample_id, output_pickle_name)
+
+        def _write_empty() -> None:
+            # The step ran and no read passed the filters. Say so: a reader that takes
+            # the newest file would otherwise show an earlier run's candidates, or nothing.
+            write_empty_fusion_pickle(pickle_path)
+
         processed_read_ids: Set[str] = set()
         read_to_genes: Dict[str, Set[str]] = {}
         tag_counts: Dict[str, int] = defaultdict(int)
@@ -2647,6 +2654,7 @@ def _generate_output_files(
                     gene_counts = candidate_df.groupby("read_id", observed=True)["col4"].nunique()
                     fusion_read_ids = gene_counts[gene_counts > 1].index
                     if len(fusion_read_ids) == 0:
+                        _write_empty()
                         return
 
                     result = candidate_df[candidate_df["read_id"].isin(fusion_read_ids)].copy()
@@ -2661,14 +2669,14 @@ def _generate_output_files(
                     result = result[result["tag"].isin(valid_gene_pairs)]
 
                     if result.empty:
+                        _write_empty()
                         return
 
                     output_csv_path = os.path.join(work_dir, sample_id, output_csv_name)
                     result.to_csv(output_csv_path, index=False)
-                    preprocess_fusion_data_standalone(
-                        result,
-                        os.path.join(work_dir, sample_id, output_pickle_name),
-                    )
+                    preprocess_fusion_data_standalone(result, pickle_path)
+                    return
+            _write_empty()
             return
         previous_valid_tags = set(valid_tags)
         # First pass: update read_id -> gene set for new reads only
@@ -2702,11 +2710,13 @@ def _generate_output_files(
                 processed_read_ids.add(read_id)
 
         if not read_to_genes:
+            _write_empty()
             return
         min_support = get_fusion_threshold("read_support")
         valid_tags = {tag for tag, count in tag_counts.items() if count >= min_support}
         newly_valid_tags = valid_tags - previous_valid_tags
         if not valid_tags:
+            _write_empty()
             try:
                 state = {
                     "processed_read_ids": list(processed_read_ids),
@@ -2729,6 +2739,7 @@ def _generate_output_files(
         for tag in valid_tags:
             valid_read_ids.update(tag_to_read_ids.get(tag, set()))
         if not valid_read_ids:
+            _write_empty()
             try:
                 state = {
                     "processed_read_ids": list(processed_read_ids),
@@ -2802,6 +2813,8 @@ def _generate_output_files(
             filtered_batches.append(subset)
 
         if not filtered_batches:
+            if not written_read_ids:
+                _write_empty()
             return
 
         written_read_ids.update(read_ids_to_write)
@@ -2825,23 +2838,28 @@ def _generate_output_files(
         try:
             filtered_df = pd.read_csv(output_csv_path)
             if not filtered_df.empty:
-                preprocess_fusion_data_standalone(
-                    filtered_df,
-                    os.path.join(work_dir, sample_id, output_pickle_name),
-                )
+                preprocess_fusion_data_standalone(filtered_df, pickle_path)
         except Exception as e:
-            logger.warning("Could not preprocess %s from %s: %s", candidate_type, output_csv_path, e)
+            logger.error(
+                "Could not preprocess %s from %s: %s", candidate_type, output_csv_path, e
+            )
+            raise
 
-    _build_filtered_candidates(
-        "target_candidates",
-        "fusion_candidates_master.csv",
-        "fusion_candidates_master_processed.pkl",
-    )
-    _build_filtered_candidates(
-        "genome_wide_candidates",
-        "fusion_candidates_all.csv",
-        "fusion_candidates_all_processed.pkl",
-    )
+    # Both builds run; a failure in either is raised once they have, so the caller (and the
+    # fusion handler behind it) hears of it and sv_count.txt does not claim the step finished.
+    build_errors: List[Exception] = []
+    for _args in (
+        ("target_candidates", "fusion_candidates_master.csv",
+         "fusion_candidates_master_processed.pkl"),
+        ("genome_wide_candidates", "fusion_candidates_all.csv",
+         "fusion_candidates_all_processed.pkl"),
+    ):
+        try:
+            _build_filtered_candidates(*_args)
+        except Exception as e:
+            build_errors.append(e)
+    if build_errors:
+        raise build_errors[0]
 
     # Master BED candidate handling temporarily disabled for performance testing
     master_bed_candidates = None
@@ -6328,6 +6346,35 @@ def preprocess_fusion_data_standalone(
         logger.error(f"Error pre-processing fusion data: {str(e)}")
         import traceback
         logger.debug(f"Exception details: {traceback.format_exc()}")
+        raise
+
+
+def write_empty_fusion_pickle(output_file: str) -> None:
+    """Write the processed-fusion structure with no candidates, atomically.
+
+    Used when the fusion step ran and no read passed the filters: the file says "ran, found
+    nothing", and replaces any earlier run's candidates. Also refreshes the summary files.
+    """
+    processed_data = {
+        "annotated_data": pd.DataFrame(),
+        "goodpairs": pd.Series(dtype=bool),
+        "gene_pairs": [],
+        "gene_groups": [],
+        "candidate_count": 0,
+    }
+    temp_file = output_file + ".tmp"
+    try:
+        with open(temp_file, "wb") as f:
+            pickle.dump(processed_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(temp_file, output_file)
+    except Exception:
+        if os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except OSError:
+                pass
+        raise
+    _generate_fusion_summary_files(output_file, processed_data)
 
 
 # =============================================================================

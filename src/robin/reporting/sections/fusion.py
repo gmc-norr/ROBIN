@@ -15,7 +15,42 @@ import pandas as pd
 import networkx as nx
 from reportlab.lib.styles import ParagraphStyle
 
+from robin.classification_config import get_fusion_threshold
+
 logger = logging.getLogger(__name__)
+
+# What the report says for each state of a sample's fusion output.
+NOT_RUN_TEXT = "Fusion analysis has not been run for this sample."
+UNREADABLE_TEXT = "The fusion results could not be read."
+NONE_FOUND_TEXT = "No fusion candidates were identified."
+NONE_FOUND_SUMMARY_TEXT = "No fusion networks identified within the target panel."
+
+# The breakpoint validation the report applies on top of the read filters (the same default as
+# the GUI's _validate_fusion_breakpoints): reads that support the same breakpoint.
+BREAKPOINT_MIN_READS = 4
+
+STATE_NOT_RUN = "not_run"
+STATE_UNREADABLE = "unreadable"
+STATE_NONE = "none"
+STATE_FOUND = "found"
+
+
+def fusion_methods_sentence():
+    """The report's note on how fusion candidates are filtered, built from the config.
+
+    The read filters keep ``mapping_quality > min`` and ``mapping_span > min`` (hence the +1)
+    and gene pairs with ``>= read_support`` reads, see fusion_work.
+    """
+    min_mapq = get_fusion_threshold("mapping_quality") + 1
+    min_span = get_fusion_threshold("mapping_span") + 1
+    min_reads = get_fusion_threshold("read_support")
+    return (
+        "Fusion candidates are identified from reads with supplementary alignments and kept "
+        f"when both alignments have a mapping quality of at least {min_mapq} and a mapping span "
+        f"of at least {min_span} bp, and the gene pair has at least {min_reads} supporting "
+        f"reads. Only fusions with {BREAKPOINT_MIN_READS} or more reads at the same validated "
+        "breakpoint are reported."
+    )
 
 
 class FusionSection(ReportSection):
@@ -128,8 +163,64 @@ class FusionSection(ReportSection):
         connected_components = list(nx.connected_components(G))
         return [list(component) for component in connected_components]
 
+    def _read_processed_pickle(self, path):
+        """Return (candidates, readable) for one processed pickle.
+
+        candidates is the good-pair frame (empty when the pickle holds none). A pickle that
+        cannot be read, or holds something else than the processed structure, is not readable.
+        """
+        try:
+            with open(path, "rb") as f:
+                processed_data = pickle.load(f)
+            annotated_data = processed_data.get("annotated_data", pd.DataFrame())
+            goodpairs = processed_data.get("goodpairs", pd.Series(dtype=bool))
+            if not isinstance(annotated_data, pd.DataFrame):
+                raise TypeError("annotated_data is not a DataFrame")
+            # Only keep the good pairs (same as GUI does)
+            if not annotated_data.empty and not goodpairs.empty:
+                candidates = annotated_data[goodpairs]
+            else:
+                candidates = annotated_data
+            logger.debug(
+                f"Loaded fusion candidates from {path} "
+                f"({len(candidates)} good pairs from {len(annotated_data)} total candidates)"
+            )
+            return candidates, True
+        except Exception as e:
+            logger.warning(f"Could not read fusion pickle {path}: {e}")
+            return pd.DataFrame(), False
+
+    def _old_folder_state(self):
+        """State of a folder with no processed pickle (written before the writer always made one).
+
+        ``sv_count.txt`` is written when the step finishes; the filtered candidate CSVs hold
+        the reads that passed. No ``sv_count.txt``: never run. Run, no CSV rows: nothing
+        passed. Run, CSV rows but no pickle: the results exist but were not processed.
+        """
+        if not os.path.exists(os.path.join(self.report.output, "sv_count.txt")):
+            return STATE_NOT_RUN
+        for name in ("fusion_candidates_master.csv", "fusion_candidates_all.csv"):
+            path = os.path.join(self.report.output, name)
+            if not os.path.exists(path):
+                continue
+            try:
+                if not pd.read_csv(path).empty:
+                    return STATE_UNREADABLE
+            except pd.errors.EmptyDataError:
+                continue
+            except Exception as e:
+                logger.warning(f"Could not read fusion candidates {path}: {e}")
+                return STATE_UNREADABLE
+        return STATE_NONE
+
     def _load_fusion_data(self):
-        """Load fusion data from the processed pickle files."""
+        """Load fusion data from the processed pickle files and decide the sample's state.
+
+        state: found when a readable pickle holds candidates; unreadable when a processed
+        pickle can't be read and no readable one holds candidates; none when the readable
+        pickles hold none; with no processed pickle at all, the old-folder evidence
+        (sv_count.txt and the candidate CSVs) decides, and no evidence means not run.
+        """
         fusion_data = {
             "master_candidates": None,
             "all_candidates": None,
@@ -137,59 +228,30 @@ class FusionSection(ReportSection):
                 self.report.output, "fusion_candidates_master_processed.pkl"
             ),
             "all_path": os.path.join(self.report.output, "fusion_candidates_all_processed.pkl"),
+            "state": STATE_NOT_RUN,
+            "unreadable": [],
         }
 
-        try:
-            # Load master fusion candidates from processed pickle
-            if os.path.exists(fusion_data["master_path"]):
-                with open(fusion_data["master_path"], "rb") as f:
-                    try:
-                        processed_data = pickle.load(f)
-                        # Filter to only good pairs to reduce memory usage and processing time
-                        annotated_data = processed_data.get("annotated_data", pd.DataFrame())
-                        goodpairs = processed_data.get("goodpairs", pd.Series())
-                        
-                        if not annotated_data.empty and not goodpairs.empty:
-                            # Only keep the good pairs (same as GUI does)
-                            fusion_data["master_candidates"] = annotated_data[goodpairs]
-                        else:
-                            fusion_data["master_candidates"] = annotated_data
-                        
-                        logger.debug(
-                            f"Loaded master fusion candidates from {fusion_data['master_path']} "
-                            f"({len(fusion_data['master_candidates'])} good pairs from {len(annotated_data)} total candidates)"
-                        )
-                    except (pickle.UnpicklingError, EOFError) as e:
-                        logger.warning(f"Error loading master fusion pickle: {e}")
-                        fusion_data["master_candidates"] = pd.DataFrame()
+        readable = []
+        for key, path_key in (("master_candidates", "master_path"), ("all_candidates", "all_path")):
+            path = fusion_data[path_key]
+            if not os.path.exists(path):
+                continue
+            candidates, ok = self._read_processed_pickle(path)
+            if ok:
+                fusion_data[key] = candidates
+                readable.append(candidates)
+            else:
+                fusion_data["unreadable"].append(path)
 
-            # Load all fusion candidates from processed pickle
-            if os.path.exists(fusion_data["all_path"]):
-                with open(fusion_data["all_path"], "rb") as f:
-                    try:
-                        processed_data = pickle.load(f)
-                        # Filter to only good pairs to reduce memory usage and processing time
-                        annotated_data = processed_data.get("annotated_data", pd.DataFrame())
-                        goodpairs = processed_data.get("goodpairs", pd.Series())
-                        
-                        if not annotated_data.empty and not goodpairs.empty:
-                            # Only keep the good pairs (same as GUI does)
-                            fusion_data["all_candidates"] = annotated_data[goodpairs]
-                        else:
-                            fusion_data["all_candidates"] = annotated_data
-                        
-                        logger.debug(
-                            f"Loaded all fusion candidates from {fusion_data['all_path']} "
-                            f"({len(fusion_data['all_candidates'])} good pairs from {len(annotated_data)} total candidates)"
-                        )
-                    except (pickle.UnpicklingError, EOFError) as e:
-                        logger.warning(f"Error loading all fusion pickle: {e}")
-                        fusion_data["all_candidates"] = pd.DataFrame()
-
-        except Exception as e:
-            logger.error(f"Error loading fusion data: {str(e)}")
-            logger.debug("Exception details:", exc_info=True)
-
+        if any(not df.empty for df in readable):
+            fusion_data["state"] = STATE_FOUND
+        elif fusion_data["unreadable"]:
+            fusion_data["state"] = STATE_UNREADABLE
+        elif readable:
+            fusion_data["state"] = STATE_NONE
+        else:
+            fusion_data["state"] = self._old_folder_state()
         return fusion_data
 
     def _format_fusion_table(self, data, title):
@@ -450,10 +512,12 @@ class FusionSection(ReportSection):
             )
             for network in master_networks:
                 summary_text.append(f"• {' - '.join(network)}")
+        elif fusion_data["state"] == STATE_NOT_RUN:
+            summary_text.append(NOT_RUN_TEXT)
+        elif fusion_data["state"] == STATE_UNREADABLE:
+            summary_text.append(UNREADABLE_TEXT)
         else:
-            summary_text.append(
-                "No fusion networks identified within the target panel."
-            )
+            summary_text.append(NONE_FOUND_SUMMARY_TEXT)
 
         if all_networks and len(all_networks) > len(master_networks):
             summary_text.append(
@@ -505,7 +569,13 @@ class FusionSection(ReportSection):
             source_text = "Data sources:\n"
             source_text += f"- Target panel fusions: {fusion_data['master_path']}\n"
             source_text += f"- Genome-wide fusions: {fusion_data['all_path']}\n"
-            source_text += "\nNote: Fusion candidates are identified from reads with supplementary alignments and filtered based on mapping quality (>50) and alignment length (>200bp). Only fusions with 4 or more supporting reads and validated breakpoints are reported."
+            source_text += f"\nNote: {fusion_methods_sentence()}"
+            if fusion_data["unreadable"]:
+                source_text += (
+                    "\nThe fusion results in "
+                    + ", ".join(fusion_data["unreadable"])
+                    + " could not be read."
+                )
 
             self.elements.append(Paragraph(source_text, self.styles.styles["Normal"]))
 
@@ -637,9 +707,13 @@ class FusionSection(ReportSection):
             except Exception:
                 pass
         else:
+            body_text = {
+                STATE_NOT_RUN: NOT_RUN_TEXT,
+                STATE_UNREADABLE: UNREADABLE_TEXT,
+            }.get(fusion_data["state"], NONE_FOUND_TEXT)
             self.elements.append(
                 Paragraph(
-                    "No fusion candidates were identified.",
+                    body_text,
                     self.styles.styles["Normal"],
                 )
             )
