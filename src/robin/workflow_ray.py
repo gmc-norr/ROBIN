@@ -584,12 +584,18 @@ EVENT_LOG_MAX = 200
 EVENT_ERROR_CHARS = 300
 _PREPROCESSING_TYPES = {"preprocessing", "bed_conversion"}
 _CLASSIFICATION_FAILURE_TYPES = {"sturgeon", "nanodx", "pannanodx", "random_forest"}
+_FAILURE_KINDS = ("failure", "file_failed")  # event kinds that raise an ERROR_UPDATE
 
 
-def failures_by_category(failed_by_type: Dict[str, int]) -> Dict[str, int]:
-    """Failure counts for the GUI's three error counters."""
+def failures_by_category(
+    failed_by_type: Dict[str, int], file_failed_by_type: Optional[Dict[str, int]] = None
+) -> Dict[str, int]:
+    """Failure counts for the GUI's three error counters (failed jobs plus failed files)."""
     out = {"preprocessing": 0, "classification": 0, "analysis": 0}
-    for jt, n in (failed_by_type or {}).items():
+    counts = dict(failed_by_type or {})
+    for jt, n in (file_failed_by_type or {}).items():
+        counts[jt] = counts.get(jt, 0) + n
+    for jt, n in counts.items():
         if jt in _PREPROCESSING_TYPES:
             out["preprocessing"] += n
         elif jt in _CLASSIFICATION_FAILURE_TYPES:
@@ -615,14 +621,23 @@ def publish_failures(stats: Dict[str, Any], state: Dict[str, Any], send: Callabl
     for e in sorted(events, key=lambda e: e["seq"]):
         if e.get("kind") == "gui_message":
             send(_GUIUpdateType(e["update_type"]), e.get("data") or {}, e.get("priority", 0))
-        elif e.get("kind") == "failure":
+        elif e.get("kind") in _FAILURE_KINDS:
             new_failure = True
     state["last_seq"] = max(e["seq"] for e in events)
     if new_failure:
         cats = stats.get("failures_by_category") or {}
-        failures = [e for e in all_events if e.get("kind") == "failure"]
+        failures = [e for e in all_events if e.get("kind") in _FAILURE_KINDS]
         recent = [
-            {k: e.get(k) for k in ("time", "sample_id", "job_type", "error")}
+            {
+                "time": e.get("time"),
+                "sample_id": e.get("sample_id"),
+                "job_type": e.get("job_type"),
+                "error": (
+                    f"{os.path.basename(e.get('file') or '')}: {e.get('error')}"
+                    if e["kind"] == "file_failed"
+                    else e.get("error")
+                ),
+            }
             for e in sorted(failures, key=lambda e: e["seq"], reverse=True)
         ]
         send(
@@ -1073,6 +1088,8 @@ class Coordinator:
         self.failed_count: int = 0
         self.completed_by_type: Dict[str, int] = {}
         self.failed_by_type: Dict[str, int] = {}
+        # Files that failed inside a job that went on (not jobs: failed_count is unchanged)
+        self.file_failed_by_type: Dict[str, int] = {}
         self.submitted_by_type: Dict[str, int] = {}
         self.total_enqueued = 0
         self.total_skipped = 0
@@ -2460,6 +2477,48 @@ class Coordinator:
                 failure_kind=failure_kind or "",
             )
 
+    def _record_file_failures(self, job: Job, ctx: WorkflowContext) -> None:
+        """One failed_jobs row and one ``file_failed`` event per file the job reported as failed.
+
+        These are files that failed while the job went on: the job's outcome and counts are not
+        touched. The list is popped so a context reused by the next job reports it once.
+        """
+        found: List[Any] = []
+        for c in (ctx, job.context):
+            try:
+                got = c.metadata.pop("file_failures", None) or []
+            except Exception:
+                got = []
+            if not found:
+                found = got
+        try:
+            sid = job.context.get_sample_id()
+        except Exception:
+            sid = "unknown"
+        for f in found:
+            try:
+                path = str(f.get("file", "") or "")
+                text = str(f.get("error", "") or "")
+            except Exception:
+                path, text = "", str(f)
+            self.file_failed_by_type[job.job_type] = self.file_failed_by_type.get(job.job_type, 0) + 1
+            self._failed_jobs_log.append({
+                "sample_id": sid,
+                "filepath": path,
+                "job_type": job.job_type,
+                "error": text[:1500],
+                "is_oom": False,
+                "failure_kind": "file_failed",
+            })
+            self._add_event(
+                "file_failed",
+                sample_id=sid,
+                job_type=job.job_type,
+                file=path,
+                error=text[:EVENT_ERROR_CHARS],
+                step=(f.get("step", "") if isinstance(f, dict) else ""),
+            )
+
     async def _on_finish(
         self,
         job: Job,
@@ -2513,6 +2572,10 @@ class Coordinator:
 
         try:
             self._record_events(job, ok, ctx, err, failure_kind, is_skipped)
+        except Exception:
+            pass
+        try:
+            self._record_file_failures(job, ctx)
         except Exception:
             pass
 
@@ -3393,7 +3456,8 @@ class Coordinator:
             "failed_jobs_list": list(self._failed_jobs_log)[-500:],
             "oom_count": sum(1 for e in self._failed_jobs_log if e.get("is_oom")),
             "recent_events": list(self._events),
-            "failures_by_category": failures_by_category(self.failed_by_type),
+            "file_failed_by_type": dict(self.file_failed_by_type),
+            "failures_by_category": failures_by_category(self.failed_by_type, self.file_failed_by_type),
         }
         if result["active_count"] == 0 and runtime_active_count_by_queue:
             result["active_count"] = int(sum(runtime_active_count_by_queue.values()))

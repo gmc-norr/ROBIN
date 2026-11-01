@@ -17,7 +17,7 @@ import tempfile
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 # Import robin utilities and resources
 try:
@@ -85,6 +85,9 @@ class BedConversionAnalysis:
 
         # Initialize counter for incremental file naming
         self.file_counter = 1
+
+        # Per-BAM parquet -> the BAM it came from, so a merge failure names the BAM
+        self._source_bam: Dict[str, str] = {}
 
         # Use logger for initialization
         self.logger = _LOGGER
@@ -167,10 +170,14 @@ class BedConversionAnalysis:
             )
 
             # Process the BAM file - this follows the exact same pattern as the working code
-            data = self._process_bams([bam_path], sample_dir)
+            data, _ = self._process_bams([bam_path], sample_dir)
 
             # Update state with new data - this creates the parquet file using the same approach
-            state = self._update_state(parquet_path, data, sample_id, file_number)
+            state, merge_failures = self._update_state(parquet_path, data, sample_id, file_number)
+            if merge_failures:
+                bed_result.results["file_failures"] = [
+                    {**f, "step": "merge"} for f in merge_failures
+                ]
 
             bed_result.parquet_path = state
             bed_result.processing_steps.append("parquet_conversion_complete")
@@ -187,10 +194,17 @@ class BedConversionAnalysis:
             bed_result.processing_steps.append("conversion_failed")
             return bed_result
 
-    def _process_bams(self, bams: List[str], work_dir: str) -> List[str]:
-        """Process BAM files using matkit and return list of processed file paths"""
+    def _process_bams(
+        self, bams: List[str], work_dir: str
+    ) -> Tuple[List[str], List[Dict[str, str]]]:
+        """Process BAM files using matkit.
+
+        Returns ``(processed file paths, failed BAMs)``; a failed BAM is ``{"file": bam, "error": text}``.
+        Only the parallel path tolerates a failed BAM; the sequential path raises.
+        """
         logger = self.logger
         processed_files: List[str] = []
+        failed_bams: List[Dict[str, str]] = []
         run_matkit_callable = run_matkit  # local binding
         threads = max(1, int(self.threads or 1))
 
@@ -234,6 +248,7 @@ class BedConversionAnalysis:
                     pq.write_table(empty, temp_file.name)
 
                 logger.debug(f"Successfully processed: {temp_file.name}")
+                self._source_bam[temp_file.name] = bam
                 return temp_file.name
 
             except Exception as e:
@@ -247,7 +262,7 @@ class BedConversionAnalysis:
                 raise
 
         if threads == 1 or len(bams) <= 1:
-            return [process_single_bam(bam) for bam in bams]
+            return [process_single_bam(bam) for bam in bams], []
 
         # Parallel path: tolerate per-file failures so one bad BAM does not fail the batch
         try:
@@ -259,15 +274,19 @@ class BedConversionAnalysis:
                     except Exception as e:
                         bam_path = futures[future]
                         logger.warning(f"Failed to process BAM {os.path.basename(bam_path)}: {e}")
-            return processed_files
+                        failed_bams.append({"file": bam_path, "error": f"{type(e).__name__}: {e}"})
+            return processed_files, failed_bams
         except Exception:
             cleanup_temp_files(processed_files)
             raise
 
     def _update_state(
         self, state: str, data: List[str], sample_id: str, file_number: int
-    ) -> str:
-        """Update the state with new data from BAM processing - creates parquet file directly"""
+    ) -> Tuple[str, List[Dict[str, str]]]:
+        """Update the state with new data from BAM processing - creates parquet file directly.
+
+        Returns ``(state, failed files)``: the files the merge could not read, each named by its BAM.
+        """
         logger = _LOGGER
 
         if merge_modkit_files is None:
@@ -289,7 +308,7 @@ class BedConversionAnalysis:
 
         # Use merge_modkit_files exactly like the working code
         # This function is designed to create binary parquet files, not text files
-        merge_modkit_files(
+        merge_failures = merge_modkit_files(
             data,
             state,  # Output parquet file path
             state,  # State parquet file path (same as output)
@@ -299,6 +318,14 @@ class BedConversionAnalysis:
             mnpflex_config,
             1,  # Number of BAM files that contributed
         )
+
+        file_failures = [
+            {
+                "file": self._source_bam.get(f["file"], f["file"]),
+                "error": f["error"],
+            }
+            for f in (merge_failures or [])
+        ]
 
         # When no reads passed the QS filter, all per-BAM parquets are empty and merge
         # returns without writing; treat as non-fatal and carry on so next batches can run.
@@ -313,7 +340,7 @@ class BedConversionAnalysis:
                     logger.debug(f"Deleted temporary file: {file_path}")
                 except OSError as e:
                     logger.warning(f"Failed to delete temporary file {file_path}: {e}")
-            return state
+            return state, file_failures
 
         parquet_size = os.path.getsize(state)
         logger.debug(
@@ -328,7 +355,7 @@ class BedConversionAnalysis:
             except OSError as e:
                 logger.warning(f"Failed to delete temporary file {file_path}: {e}")
 
-        return state
+        return state, file_failures
 
 def process_multiple_files(
     bam_paths, metadata_list, work_dir, logger, threads=4, expected_fail_only: bool = False
@@ -363,6 +390,7 @@ def process_multiple_files(
     logger.info(f"Processing {len(bam_paths)} BAM files for sample {sample_id}")
     logger.info(f"Using {threads} threads for processing")
     
+    file_failures: List[Dict[str, str]] = []  # files that failed while their batch went on
     analysis_result = {
         "sample_id": sample_id,
         "bam_paths": bam_paths,
@@ -372,6 +400,7 @@ def process_multiple_files(
         "files_processed": 0,
         "total_files": len(bam_paths),
         "parquet_path": None,
+        "file_failures": file_failures,
     }
 
     try:
@@ -403,7 +432,8 @@ def process_multiple_files(
             return analysis_result
 
         logger.info(f"Processing {len(valid_bam_paths)} BAM files (up to {bed_analyzer.threads} in parallel)")
-        all_processed_data = bed_analyzer._process_bams(valid_bam_paths, sample_dir)
+        all_processed_data, bam_failures = bed_analyzer._process_bams(valid_bam_paths, sample_dir)
+        file_failures.extend({**f, "step": "bam"} for f in bam_failures)
         processed_files = len(all_processed_data)
 
         if processed_files == 0:
@@ -419,13 +449,14 @@ def process_multiple_files(
             logger.info(f"Creating parquet file from {len(all_processed_data)} processed files")
             try:
                 # Use merge_modkit_files to create the final parquet file
-                bed_analyzer._update_state(
+                _, merge_failures = bed_analyzer._update_state(
                     parquet_path, 
                     all_processed_data, 
                     sample_id, 
                     processed_files  # Use number of processed files as file_number
                 )
                 
+                file_failures.extend({**f, "step": "merge"} for f in merge_failures)
                 analysis_result["processing_steps"].append("parquet_created")
                 logger.info(f"Parquet file created successfully: {parquet_path}")
                 
@@ -522,6 +553,11 @@ def bed_conversion_handler(job, work_dir=None):
                 expected_fail_only=bool(suppress_expected),
             )
             
+            # Files that failed while their batch went on: reported, not job errors (a fail-only
+            # submission expects its failures, so records none).
+            if batch_result.get("file_failures") and not suppress_expected:
+                job.context.add_metadata("file_failures", list(batch_result["file_failures"]))
+
             # Store batch results in job context (maintain compatibility with existing structure)
             job.context.add_metadata("bed_conversion", {
                 "batch_result": batch_result,  # Single aggregated result
@@ -600,6 +636,8 @@ def bed_conversion_handler(job, work_dir=None):
             # Store results in job context
             job.context.add_metadata("bed_conversion", bed_result.results)
             job.context.add_metadata("bed_processing_steps", bed_result.processing_steps)
+            if bed_result.results.get("file_failures") and not suppress_expected:
+                job.context.add_metadata("file_failures", list(bed_result.results["file_failures"]))
 
             if bed_result.error_message:
                 if suppress_expected:

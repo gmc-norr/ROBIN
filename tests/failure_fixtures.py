@@ -67,7 +67,7 @@ POOL_OF = {
 # Types the wrapper treats as "expected failure" on a fail-only BAM submission.
 FAIL_ONLY_TYPES = tuple(sorted(wr.CLASSIFICATION_TYPES | {"bed_conversion"}))
 
-FAULTS = ("ok", "raise", "file_error", "skip", "warn")
+FAULTS = ("ok", "raise", "file_error", "skip", "warn", "file_failure")
 
 
 def _synthetic_handler(job):
@@ -80,6 +80,18 @@ def _synthetic_handler(job):
         job.context.add_error(name, f"synthetic {job.job_type} failure")
     elif fault == "skip":
         job.context.add_metadata("skip_downstream", True)
+    elif fault == "file_failure" and job.job_type == "bed_conversion":  # not the jobs it triggers
+        # What the real bed_conversion handler leaves when a file fails inside a batch that goes on.
+        job.context.add_metadata(
+            "file_failures",
+            [
+                {
+                    "file": f"/data/{job.context.get_sample_id()}_bad.bam",
+                    "error": "synthetic merge failure",
+                    "step": "merge",
+                }
+            ],
+        )
     elif fault == "warn":
         # What the real BAM preprocessor sends from inside a worker (no GUI in this process).
         from robin.analysis.bam_preprocessor import _send_alignment_warning_notification

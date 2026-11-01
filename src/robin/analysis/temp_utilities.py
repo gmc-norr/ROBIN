@@ -6,7 +6,7 @@ This module provides utilities for merging modkit files and creating parquet fil
 """
 
 import warnings
-from typing import List, Optional
+from typing import Dict, List, Optional
 import gc
 import os
 import logging
@@ -223,7 +223,7 @@ def merge_modkit_files(
     output_dir: str,
     mnpflex_config: Optional[dict],
     num_bam_files_seen: int,
-) -> None:
+) -> List[Dict[str, str]]:
     """
     Merge modkit files with optimized column set and improved caching.
 
@@ -244,7 +244,12 @@ def merge_modkit_files(
         output_dir (str): Base output directory
         mnpflex_config (Optional[dict]): Configuration for MNP-FLEX integration
         num_bam_files_seen (int): Number of BAM files being processed
+
+    Returns:
+        The files that could not be read or counted, as ``{"file": path, "error": text}``
+        (an empty list when every file went in). The good files are still merged.
     """
+    file_failures: List[Dict[str, str]] = []
     # Create sample-specific output directory
     sample_output_dir = os.path.join(output_dir, sample_id)
     os.makedirs(sample_output_dir, exist_ok=True)
@@ -364,11 +369,12 @@ def merge_modkit_files(
                     f"[{_merge_failure_diagnostics(pl_df, gr, inter)}]",
                     exc_info=True,
                 )
+                file_failures.append({"file": bed, "error": f"{type(e).__name__}: {e}"})
                 continue
 
         if not new_frames:
             logging.warning("No valid data to merge after filtering")
-            return
+            return file_failures
 
         new_counts = _sum_counts(pl.concat(new_frames))
 
@@ -435,6 +441,8 @@ def merge_modkit_files(
                 f"Updated methylation parquet: {table.height} CpGs from "
                 f"{cumulative_bam_file_count} cumulative BAM files (added {num_bam_files_seen})"
             )
+
+        return file_failures
 
     except Exception as e:
         logging.error(f"Error in merge_modkit_files: {str(e)}")
