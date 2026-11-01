@@ -1131,9 +1131,10 @@ class Coordinator:
         enable_batching: bool = True,
         job_timeout_seconds: int = 0,
     ):
-        # dedup maps
-        self.pending: Dict[Tuple[str, str], int] = {}
-        self.running: Dict[Tuple[str, str], int] = {}
+        # DEDUP_TYPES, per (sample, type): the id of the request running now, and the one
+        # request waiting for it (the newest). A request is never dropped (JOB-5).
+        self.dedup_running: Dict[Tuple[str, str], int] = {}
+        self.dedup_waiting: Dict[Tuple[str, str], Job] = {}
         # stats - use counters instead of lists to avoid unbounded growth
         self.completed_count: int = 0
         self.failed_count: int = 0
@@ -1157,9 +1158,11 @@ class Coordinator:
         # Per-sample one-shot scheduling for classifiers/slow
         self.scheduled_by_sample: Dict[str, Set[str]] = {}
 
-        # Global one-in-flight (plus at most one waiting) per classification type
+        # One classification job in flight per type, across samples. Waiting requests are
+        # kept one per sample (type -> {sample: job}), in arrival order, so samples take
+        # turns and none is dropped (JOB-1).
         self.classif_pending_by_type: Dict[str, int] = {}
-        self.classif_waiting_by_type: Dict[str, Optional[Job]] = {}
+        self.classif_waiting_by_type: Dict[str, Dict[str, Job]] = {}
 
         # create one TypeProcessor actor per job type
         self.processors: Dict[str, Any] = {}
@@ -1894,12 +1897,12 @@ class Coordinator:
             sample_id = job.context.get_sample_id()
             if job.job_type in DEDUP_TYPES:
                 key = (sample_id, job.job_type)
-                run = self.running.get(key, 0)
-                pend = self.pending.get(key, 0)
-                if run + pend >= 2 or pend >= 1:
-                    self.total_skipped += 1
+                if key in self.dedup_running:
+                    # One is running: this request waits for it, in place of an older
+                    # waiting one (the newest carries the newest settings) (JOB-5)
+                    self.dedup_waiting[key] = job
                     continue
-                self.pending[key] = pend + 1
+                self.dedup_running[key] = job.job_id
             # Per-sample per-type serialization; queue instead of overlapping
             if job.job_type in SERIALIZE_BY_TYPE_PER_SAMPLE:
                 sid = sample_id or "unknown"
@@ -2599,12 +2602,6 @@ class Coordinator:
                 filepath = active_info.get("filepath")
         except Exception:
             pass
-        # update dedup maps
-        if job.job_type in DEDUP_TYPES:
-            key = (job.context.get_sample_id(), job.job_type)
-            self.running[key] = max(0, self.running.get(key, 0) - 1)
-            if self.running[key] == 0:
-                self.running.pop(key, None)
 
         # update stats
         # Detect deliberate skip (large BAM)
@@ -2776,12 +2773,13 @@ class Coordinator:
                                 "start_time": time.time(),
                             }
                     else:
-                        # store single waiting job if none recorded yet
-                        if self.classif_waiting_by_type.get(t) is None:
-                            q = job_queue_of(t)
-                            self.classif_waiting_by_type[t] = Job(
-                                next(_job_id_counter), t, q, [f"{q}:{t}"], 0, ctx
-                            )
+                        # Wait for this type's running job, one waiting job per sample. New
+                        # data for a sample already waiting replaces its job and keeps its
+                        # place in line; nothing is dropped (JOB-1).
+                        q = job_queue_of(t)
+                        self.classif_waiting_by_type.setdefault(t, {})[sample_id] = Job(
+                            next(_job_id_counter), t, q, [f"{q}:{t}"], 0, ctx
+                        )
             else:
                 triggered_jobs: List[Job] = []
                 for t in TRIGGERS.get(job.job_type, []):
@@ -3053,15 +3051,29 @@ class Coordinator:
             pass
         except Exception:
             pass
+        # The request waiting for this one (same sample and type), if any, runs now (JOB-5).
+        # Only the request that took the slot releases it: a triggered classifier run of
+        # the same sample never does.
+        if job.job_type in DEDUP_TYPES:
+            key = (job.context.get_sample_id(), job.job_type)
+            if self.dedup_running.get(key) == job.job_id:
+                del self.dedup_running[key]
+                nxt_dedup = self.dedup_waiting.pop(key, None)
+                if nxt_dedup is not None:
+                    self.dedup_running[key] = nxt_dedup.job_id
+                    await self._dispatch_ready_job(nxt_dedup, key[0])
         if job.job_type in CLASSIFICATION_TYPES:
             # decrement pending for this type
             if self.classif_pending_by_type.get(job.job_type, 0) > 0:
                 self.classif_pending_by_type[job.job_type] -= 1
                 if self.classif_pending_by_type[job.job_type] == 0:
                     self.classif_pending_by_type.pop(job.job_type, None)
-            nxt = self.classif_waiting_by_type.get(job.job_type)
+            # The sample that has waited longest goes next (JOB-1)
+            waiting_samples = self.classif_waiting_by_type.get(job.job_type) or {}
+            nxt = (
+                waiting_samples.pop(next(iter(waiting_samples))) if waiting_samples else None
+            )
             if nxt is not None:
-                self.classif_waiting_by_type[job.job_type] = None
                 proc3 = self.processors.get(job.job_type)
                 if proc3 is not None:
                     if getattr(self, "using_pools", False):
@@ -3240,14 +3252,6 @@ class Coordinator:
         
         # Register the wrapped handler
         self.register_handler(job_type, wrapped_handler)
-
-    async def mark_running(self, job: Job):
-        if job.job_type in DEDUP_TYPES:
-            key = (job.context.get_sample_id(), job.job_type)
-            self.pending[key] = max(0, self.pending.get(key, 0) - 1)
-            if self.pending[key] == 0:
-                self.pending.pop(key, None)
-            self.running[key] = self.running.get(key, 0) + 1
 
     async def mark_handler_started(self, job_id: int) -> None:
         """Worker calls this when the real handler body begins (Ray task running)."""
@@ -3729,11 +3733,8 @@ class Pool:
         if self._shutdown_requested:
             return
         
-        # tell coordinator that we're starting this job (updates dedup maps)
-        # We cannot call back into Coordinator directly from here without a reference;
-        # pass coordinator handle via callback's bound actor method (Ray passes actor ref implicitly).
-        # Instead, we expose a small trampoline: the driver calls mark_running before enqueue.
-        # For simplicity, Coordinator calls mark_running() before Pool.enqueue().
+        # The Coordinator tracks running and waiting per-sample requests itself
+        # (dedup_running / dedup_waiting), so nothing is reported from here.
         tup = self.handlers.get(job.job_type)
         if tup is None:
             ctx = job.context

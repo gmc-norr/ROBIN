@@ -71,7 +71,12 @@ FAULTS = ("ok", "raise", "file_error", "skip", "warn", "file_failure")
 
 
 def _synthetic_handler(job):
-    """Runs inside a Ray worker. The fault comes from the job's metadata."""
+    """Runs inside a Ray worker. The fault comes from the job's metadata.
+
+    ``metadata["sleep"]`` (job type -> seconds) keeps a job busy, so a test can send requests
+    while it runs. It travels with the context to the jobs a job triggers.
+    """
+    time.sleep(float((job.context.metadata.get("sleep") or {}).get(job.job_type, 0)))
     fault = job.context.metadata.get("fault", "ok")
     name = ERROR_NAME[job.job_type]
     if fault == "raise":
@@ -107,17 +112,33 @@ def _make_remote(job_type: str):
     def outer(job):
         # Record what the wrapped handler left on the context (results and errors), whether it
         # returned or raised, so the test can see exactly what the real wrapper produced.
+        # Also when the job started and ended, and for which sample (the scheduling tests).
+        work_dir = job.context.metadata["work_dir"]
+        run = {"job_type": job_type, "sample": job.context.get_sample_id(), "start": time.time()}
+        started_dir = os.path.join(work_dir, "started")
+        os.makedirs(started_dir, exist_ok=True)
+        with open(os.path.join(started_dir, f"{job.job_id}.json"), "w") as fh:
+            json.dump(run, fh)
         try:
             return inner(job)
         finally:
-            out_dir = os.path.join(job.context.metadata["work_dir"], "outcomes")
+            out_dir = os.path.join(work_dir, "outcomes")
             os.makedirs(out_dir, exist_ok=True)
             with open(os.path.join(out_dir, f"{job.job_id}.json"), "w") as fh:
                 json.dump(
-                    {"results": job.context.results, "errors": job.context.errors}, fh, default=str
+                    {
+                        "results": job.context.results,
+                        "errors": job.context.errors,
+                        **run,
+                        "end": time.time(),
+                    },
+                    fh,
+                    default=str,
                 )
 
-    return ray.remote(outer)
+    # No CPU claim: with 4 test CPUs, part held by the Coordinator's actors, jobs of different
+    # types would otherwise queue for a CPU one at a time, which a real run doesn't do.
+    return ray.remote(num_cpus=0)(outer)
 
 
 @dataclass
@@ -143,13 +164,17 @@ class Harness:
 
     _ids = itertools.count(1_000_000)
 
-    def __init__(self, scheduler: str, work_dir: str):
+    def __init__(self, scheduler: str, work_dir: str, enable_batching: bool = False):
         assert scheduler in SCHEDULERS
         self.scheduler = scheduler
         self.work_dir = work_dir
+        self.batching = enable_batching
         os.makedirs(work_dir, exist_ok=True)
         self.coord = wr.Coordinator.options(name="robin_coordinator").remote(
-            target_panel="rCNS2", analysis_workers=1, preset=scheduler, enable_batching=False
+            target_panel="rCNS2",
+            analysis_workers=1,
+            preset=scheduler,
+            enable_batching=enable_batching,
         )
         ray.get(self.coord.setup.remote())
         ray.get(self.coord.set_work_dir.remote(work_dir))
@@ -256,6 +281,61 @@ class Harness:
             errors=rec["errors"],
             sample_id=sample,
         )
+
+    def submit(
+        self,
+        job_type: str,
+        sample: str,
+        downstream: tuple = (),
+        sleep: Optional[Dict[str, float]] = None,
+    ) -> int:
+        """Submit one job for ``sample`` and return at once (no waiting).
+
+        ``downstream``: job types its success may trigger (its original_workflow).
+        ``sleep``: job type -> seconds, for this job and the jobs it triggers.
+        """
+        job_id = next(Harness._ids)
+        steps = [f"{wr.job_queue_of(t)}:{t}" for t in (job_type, *downstream)]
+        ctx = wr.WorkflowContext(
+            filepath=os.path.join(self.work_dir, f"{sample}_pass_{job_id}.bam"),
+            metadata={
+                "bam_metadata": {"sample_id": sample},
+                "work_dir": self.work_dir,
+                "target_panel": "rCNS2",
+                "original_workflow": steps,
+                "sleep": dict(sleep or {}),
+            },
+        )
+        job = wr.Job(job_id, job_type, wr.job_queue_of(job_type), [steps[0]], 0, ctx)
+        ray.get(self.coord.submit_jobs.remote([job]))
+        return job_id
+
+    def _records(self, folder: str) -> List[Dict[str, Any]]:
+        path = os.path.join(self.work_dir, folder)
+        out = []
+        for name in sorted(os.listdir(path)) if os.path.isdir(path) else []:
+            try:
+                with open(os.path.join(path, name)) as fh:
+                    out.append({**json.load(fh), "job_id": int(name.split(".")[0])})
+            except (OSError, ValueError):  # being written
+                pass
+        return out
+
+    def started(self, job_type: str, sample: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Jobs of this type (and sample) that have started, oldest first."""
+        rows = [
+            r for r in self._records("started")
+            if r["job_type"] == job_type and (sample is None or r["sample"] == sample)
+        ]
+        return sorted(rows, key=lambda r: r["start"])
+
+    def ended(self, job_type: str, sample: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Jobs of this type (and sample) that have ended, by start time."""
+        rows = [
+            r for r in self._records("outcomes")
+            if r.get("job_type") == job_type and (sample is None or r.get("sample") == sample)
+        ]
+        return sorted(rows, key=lambda r: r["start"])
 
     def finished_count(self, job_type: str, timeout: float = 0.0) -> int:
         """Completed + failed jobs of this type so far; with ``timeout``, waits for the first."""
