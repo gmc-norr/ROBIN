@@ -349,7 +349,9 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
                 if has_supplementary_alignments:
                     reads_with_supplementary.add(query_name)
 
-                if not is_secondary:  # Only process primary alignments
+                # Primary records only: a split read's supplementary records are
+                # the same read again (counted in supplementary_reads above).
+                if not is_secondary and not is_supplementary:
                     if not is_unmapped:
                         mapped_reads += 1
                         mapped_bases += read_length
