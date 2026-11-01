@@ -237,3 +237,14 @@ All of M1–M12 are re-run on the new code too.
 - N1–N5 and M1–M12 are each caught, and the control survives.
 - The full suite passes.
 - The pins are unchanged.
+
+### Result: supported (code `b97a709`)
+
+- **Before:** T10–T12 failed on `cf4f84e` and on `502fd72` (7 each, by assertion; measured before the lock).
+- **After:** the variant-check tests (`test_clinvar_significance.py`, `test_lga_*`, `test_atomic_writes.py`): `147 passed`.
+- **Mutants** (`b9/scripts/mutate9b.py`; only exit 1 counts): N1–N5 and M1–M12 are each `CAUGHT`, and the no-op control `SURVIVED` (177 passed).
+- **Full suite:** `740 passed` (733 + 7).
+- **Pins:** `git diff cf4f84e -- robin.yml pyproject.toml` is empty.
+- **No existing test changed.**
+- **The real ClinVar file, loaded with the variant check's own loader** (`load_real.py`): 367,862 records are kept and 13 skipped, which is 367,875 in all, as the rule selects. No ALT `.` record is loaded, and BRCA1 17:43067696 keeps A, G and T. The log has one warning: "13 pathogenic ClinVar records have no alternate allele (ALT '.') and can't be checked with a pileup; skipped".
+- **Case file:** entry 9 added. The plan's Gate A.5 measured only the shape it feared in ALT (a comma), and missed `.`.
