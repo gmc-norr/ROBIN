@@ -51,7 +51,14 @@ def _slow(fn):
     return slow
 
 
-def run_robin(work, bams, way, mp):
+def _worker(work, bams, panel):
+    """One of two processes accumulating at the same time (a fresh interpreter: spawn)."""
+    TargetAnalysis._find_target_bed = lambda self, p: panel
+    ta_mod.get_read_counts_per_target = _slow(ta_mod.get_read_counts_per_target)
+    _stage_and_accumulate(work, bams)
+
+
+def run_robin(work, bams, way, panel):
     os.makedirs(work, exist_ok=True)
     if way == "in_order":
         _stage_and_accumulate(work, bams)
@@ -63,9 +70,8 @@ def run_robin(work, bams, way, mp):
             ta.process_file_with_staging(bam, {"sample_id": SAMPLE})
         ta.accumulate_staged_files(SAMPLE, force=True)
     elif way == "two_processes":
-        mp.setattr(ta_mod, "get_read_counts_per_target", _slow(ta_mod.get_read_counts_per_target))
-        ctx = multiprocessing.get_context("fork")
-        procs = [ctx.Process(target=_stage_and_accumulate, args=(work, half)) for half in (bams[0::2], bams[1::2])]
+        ctx = multiprocessing.get_context("spawn")
+        procs = [ctx.Process(target=_worker, args=(work, half, panel)) for half in (bams[0::2], bams[1::2])]
         for p in procs:
             p.start()
         for p in procs:
@@ -152,7 +158,7 @@ def _run(tmp_path_factory, k, way):
             mp.setattr(TargetAnalysis, "_find_target_bed", lambda self, p: panel)
             bams, merged = write_bams(str(d), k)
             ref = samtools_reference(merged, panel)
-            robin = run_robin(str(d / "work"), bams, way, mp)
+            robin = run_robin(str(d / "work"), bams, way, panel)
         _RUNS[(k, way)] = (robin, ref)
     return _RUNS[(k, way)]
 
