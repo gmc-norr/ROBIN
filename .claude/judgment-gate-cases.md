@@ -71,3 +71,15 @@ whenever a claim is withdrawn or a finding turns out to be an artifact. Concrete
 - **Gate:** D.1 and D.2 — when a check says "state X is cleared", test it against the source of
   truth (pickle vs CSV), and on the path where the state is actually stale, not one where it
   happens to be fine.
+
+## 9. "Every ClinVar record is checked", with one input shape measured (batch 9, 2026-11-01)
+- **Claimed:** in the locked plan (`4a7f106`, Gate A.5), the real ClinVar file's alleles were
+  measured: "multi-ALT records: 0, repeated keys: 0, so the new key is unique". The result
+  (`81cf075`) said each record is checked on its own allele.
+- **Rested on:** counting only the shape that was feared (a comma in ALT). Among the 367,875
+  selected records, 13 have ALT `.` (the reference base itself). The evidence code fails on them
+  and drops the whole gene's results. A lone one did this before batch 9 (PTEN, BRCA2), and
+  keeping every record at a position added BRCA1. Codex's review found it by scanning every
+  selected record's ALT.
+- **Gate:** A.5 — for each field the code reads, tally every value shape in the real input
+  (here, ALT by alphabet), not the one shape you expect to break.

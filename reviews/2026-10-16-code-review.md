@@ -89,6 +89,8 @@ This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [g
 | A fault-injection test pins step 7 | Step 7 | `55eee97`, `410ce1b`, `61ca768`, `b04d86e`, `293b58f` | Nothing |
 | A record is pathogenic when ClinVar's germline, oncogenicity or somatic label says so | VAR-2 | `502fd72` | "Conflicting" no longer counts (182,153 records); BRAF V600E and TERT C228T still do, now by their oncogenic and Tier I labels; the SNP table shows ONC and SCI; a row without a snpEff annotation stays in the table |
 | Every ClinVar record at a position is checked | VAR-1 | `502fd72` | IDH1 R132C, KRAS G12D and the other records that shared a position are checked; the variant check lists them all |
+| A ClinVar record with no alternate allele is skipped, not fatal to its gene | Found by the external review of VAR-1 | `b97a709` | PTEN, BRCA2 and BRCA1 results no longer vanish; the results count the 13 skipped records |
+| The variant check's HTML export counts found variants only | VAR-8 follow-up, found by the same review | `b97a709` | Its status and counts match the JSON results (nothing in ROBIN calls it) |
 
 Every change has a regression test in `tests/`. The details are in `CHANGELOG.md` under `[Unreleased]`. Add a row here each time a fix lands.
 
@@ -347,7 +349,7 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
 - **What's wrong:** The lookup is keyed by `(chrom, pos)`, so only the last ALT allele at a position is kept.
 - **Reproduced:** with IDH1 R132H (C>T) followed by C>A in the file, a patient who carries R132H shows "no_support". BRAF V600 and KRAS G12-type sites have the same problem.
 - **Fix:** key by `(chrom, pos, ref, alt)`.
-- **Status:** fixed in our fork (`502fd72`), as suggested. In ClinVar's GRCh38 file (2026-10-25), 67,276 of the records the variant check called pathogenic shared a position and were never checked. At IDH1 c.394 it kept R132S, so an R132C sample read "insufficient evidence". No `(chrom, pos, ref, alt)` key repeats in that file. Still open in the original ROBIN.
+- **Status:** fixed in our fork (`502fd72`), as suggested. In ClinVar's GRCh38 file (2026-10-25), 67,276 of the records the variant check called pathogenic shared a position and were never checked. At IDH1 c.394 it kept R132S, so an R132C sample read "insufficient evidence". No `(chrom, pos, ref, alt)` key repeats in that file. The external review of the fix found that 13 pathogenic records have no alternate allele (ALT `.`). The evidence code failed on them and dropped the whole gene's results: PTEN and BRCA2 before the fix, and BRCA1 too once the position key stopped hiding its `.` record. They are now skipped and counted (`b97a709`). Still open in the original ROBIN.
 
 **VAR-2 · high · Confirmed**: "Conflicting classifications of pathogenicity" counts as pathogenic.
 - **Where:** `snp_processing.py:14-23, 132-136`, `lightweight_gene_analysis.py:260-265`, `reporting/sections/variants.py:61-75`
