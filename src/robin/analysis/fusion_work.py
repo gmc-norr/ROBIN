@@ -2374,18 +2374,23 @@ def accumulate_fusion_candidates(
         # This avoids expensive groupby operations and CSV generation during intermediate accumulations
         # Output files are only needed at the end, not after every batch
         # However, master BED breakpoint extraction should still run incrementally to build up the BED file
+        output_error = None
         if force:
             logger.info("Final accumulation detected - generating output files (CSV, BED, etc.)")
             output_start = time.time()
-            _generate_output_files(
-                sample_id, 
-                fusion_metadata.analysis_results, 
-                fusion_metadata, 
-                work_dir, 
-                reference=reference,
-                generate_master_bed=True,  # Generate master BED on final accumulation
-                new_master_bed_files=new_master_bed_files,  # Pass new files for incremental processing
-            )
+            try:
+                _generate_output_files(
+                    sample_id,
+                    fusion_metadata.analysis_results,
+                    fusion_metadata,
+                    work_dir,
+                    reference=reference,
+                    generate_master_bed=True,  # Generate master BED on final accumulation
+                    new_master_bed_files=new_master_bed_files,  # Pass new files for incremental processing
+                )
+            except Exception as e:
+                # The step's other outputs were written; clean up the staging below, then report.
+                output_error = e
             logger.debug(
                 "Generated output files in %.3fs for %s",
                 time.time() - output_start,
@@ -2414,6 +2419,9 @@ def accumulate_fusion_candidates(
             failed,
         )
         
+        if output_error is not None:
+            raise output_error
+
         elapsed = time.time() - start_time
         logger.info(
             f"Fusion batch accumulation complete for {sample_id}: "
@@ -2590,6 +2598,19 @@ def _generate_output_files(
         state_path = os.path.join(work_dir, sample_id, f"{candidate_type}_filter_state.pkl")
         pickle_path = os.path.join(work_dir, sample_id, output_pickle_name)
 
+        def _rebuild_missing() -> None:
+            # An earlier build failed after its CSV was written: the pickle is missing while
+            # the CSV has rows. Rebuild it even when no new read passes this time.
+            csv_path = os.path.join(work_dir, sample_id, output_csv_name)
+            if os.path.exists(pickle_path) or not os.path.exists(csv_path):
+                return
+            try:
+                df = pd.read_csv(csv_path)
+            except pd.errors.EmptyDataError:
+                return
+            if not df.empty:
+                preprocess_fusion_data_standalone(df, pickle_path)
+
         def _write_empty() -> None:
             # The step ran and no read passed the filters. Say so: a reader that takes
             # the newest file would otherwise show an earlier run's candidates, or nothing.
@@ -2765,6 +2786,7 @@ def _generate_output_files(
             )
 
         if not read_ids_to_write:
+            _rebuild_missing()
             try:
                 state = {
                     "processed_read_ids": list(processed_read_ids),
@@ -2815,6 +2837,8 @@ def _generate_output_files(
         if not filtered_batches:
             if not written_read_ids:
                 _write_empty()
+            else:
+                _rebuild_missing()
             return
 
         written_read_ids.update(read_ids_to_write)
@@ -2845,8 +2869,8 @@ def _generate_output_files(
             )
             raise
 
-    # Both builds run; a failure in either is raised once they have, so the caller (and the
-    # fusion handler behind it) hears of it and sv_count.txt does not claim the step finished.
+    # Both builds run; a failure in either is kept and raised at the end of this function,
+    # after sv_count.txt and the BED files are written.
     build_errors: List[Exception] = []
     for _args in (
         ("target_candidates", "fusion_candidates_master.csv",
@@ -2858,8 +2882,6 @@ def _generate_output_files(
             _build_filtered_candidates(*_args)
         except Exception as e:
             build_errors.append(e)
-    if build_errors:
-        raise build_errors[0]
 
     # Master BED candidate handling temporarily disabled for performance testing
     master_bed_candidates = None
@@ -2930,6 +2952,11 @@ def _generate_output_files(
     }
     
     # Master BED CSV generation has been deprecated - Parquet file is used instead
+
+    # Everything above has run; now report the first failed build so the caller (and the
+    # fusion handler behind it) hears of it.
+    if build_errors:
+        raise build_errors[0]
     
     return output_paths
 

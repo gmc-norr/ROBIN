@@ -338,3 +338,46 @@ def test_r3_control_a_working_preprocessing_files_nothing(tmp_path, monkeypatch)
     assert filed == []
     assert outcome["status"] == "success"
     assert (tmp_path / "work" / SAMPLE / "fusion_candidates_master_processed.pkl").exists()
+
+
+# ------------------------------------------------------------------ a failed build (Ruling J)
+def _boom(df, output_file):
+    raise RuntimeError("synthetic preprocessing crash")
+
+
+def test_a_raising_preprocessing_still_finishes_the_steps_other_outputs(tmp_path, monkeypatch):
+    _, filed, outcome = _run_handler(tmp_path, monkeypatch, preprocess=_boom)
+    assert outcome["status"] == "failed" and filed
+    d = tmp_path / "work" / SAMPLE
+    assert (d / "sv_count.txt").exists()
+    assert list((d / "bed_files").glob("fusion_breakpoints_*.bed")), "breakpoint BED not written"
+    assert not list((d / "_fusion_staging").glob("*.parquet")), "staging not cleaned"
+    assert not (d / "fusion_candidates_master_processed.pkl").exists()
+    # The report does not call it "none found": results exist but were not processed.
+    body, _ = _report_text(d)
+    assert UNREADABLE in body
+
+
+def test_a_failed_build_is_rebuilt_on_the_next_run_without_double_counting(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    d = work / SAMPLE
+    monkeypatch.setattr(fusion_work, "_ensure_gene_regions_loaded", lambda panel: None)
+    _stage(work, _rows(4))
+    real = fusion_work.preprocess_fusion_data_standalone
+    monkeypatch.setattr(fusion_work, "preprocess_fusion_data_standalone", _boom)
+    assert _accumulate(work)["status"] == "error"
+    assert not (d / "fusion_candidates_master_processed.pkl").exists()
+    csv_rows = len(pd.read_csv(d / "fusion_candidates_master.csv"))
+    assert csv_rows == 8
+
+    # Second run: preprocessing works again; the only new rows are one read that does not pass.
+    monkeypatch.setattr(fusion_work, "preprocess_fusion_data_standalone", real)
+    _stage(work, _rows(1, "GENEC", "GENED", prefix="x"), n=2)
+    assert _accumulate(work)["status"] == "success"
+    for name in ("master", "all"):
+        data = _load(d / f"fusion_candidates_{name}_processed.pkl")
+        assert not data["annotated_data"].empty
+        assert data["annotated_data"]["read_id"].nunique() == 4
+    assert len(pd.read_csv(d / "fusion_candidates_master.csv")) == csv_rows
+    body, summary = _report_text(d)
+    assert "GENEA" in summary
