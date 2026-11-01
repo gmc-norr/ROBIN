@@ -180,3 +180,60 @@ Gate D:
 2. **Do the controls tell working from broken?** Yes. The no-op control survived, and every mutant of a fix part was caught.
 3. **Measured or inferred?** Measured, except that SnpSift copies ONC/SCI into `snpsift_output.vcf` (its documented default; not run here).
 4. **Fresh output:** above.
+
+## External review (Codex, `review-requests/batch9-report-codex.md`): fix list locked before code
+
+Two findings, both verified here with my own measurements. I did not run the reviewer's scripts.
+
+### Finding 1 (Important): a record with no alternate allele drops its whole region
+
+- **Measured on the real file** (`no_alt.py`): 13 of the 367,875 selected records have ALT `.`; every other selected ALT is plain bases.
+  - ClinVar's HGVS for them is `g.N=`: the record is the reference base itself.
+  - Examples: PTEN 10:87864144 (AML panel), BRCA2 13:32337606 (both panels), BRCA1 17:43067696.
+  - Three share a position with other selected records: UGT1A 2:233767046, BRCA1 17:43067696 (with C>A, C>G, C>T) and COL1A1 17:50201450.
+- **Why it drops the region:** such a record gets `alternate=None`. Both evidence paths call `len()` on it, with reads or without. `analyze_bed_regions` catches the error per region, logs it and drops the region, so the JSON has no entry for that gene.
+- **Measured with the new tests** (synthetic reads, the real labels):
+  - **On `cf4f84e`:** a lone PTEN-type G>. drops the PTEN region, covered or not. This predates batch 9. The BRCA1 quartet "works" there only because the position key hid C>. behind C>T, along with C>A and C>G.
+  - **On `502fd72`:** the BRCA1 region is dropped too. Batch 9 made this reachable for the three shared positions.
+- **Fix R1:** the loader skips a selected record whose ALT is not plain bases (A, C, G, T, N).
+  - It counts them, logs one warning with the count, and records the count in the results metadata as `clinvar_records_not_checkable`.
+  - **Ruling (mine):** skip, not "needs review". The record is the reference base itself, so no read can support or refute it. As "needs review", every PTEN and BRCA2 result with nothing found would read "insufficient evidence" for good, for a reason that has nothing to do with the sample.
+- **Recorded, not fixed:** any other error inside a region still drops the region with only a log line. This predates batch 9 and belongs with the "failures visible" follow-ups. After R1, no known record shape triggers it.
+
+### Finding 2 (Minor): the HTML export counts every checked record as found
+
+- `generate_report` / `_generate_html_report` count `len(variants)` and coverage, not the evidence.
+  - On `502fd72`, three IDH1 sibling records with reads all A read "PATHOGENIC SNPS PRESENT (3 with good coverage)".
+  - Reference-only reads read the same.
+- This predates batch 9 (VAR-8 fixed the JSON only); VAR-1 makes it larger. Nothing in ROBIN calls it (graft: 0 callers), but it is public, as `analyze_genes` was when batch 3c fixed it.
+- **Fix R2:** one module function, `gene_pathogenic_status(high, total, review)`, gives the gene status for both exports.
+  - The JSON summary calls it with the counts it makes today, so its output is unchanged.
+  - The HTML counts found variants with `is_supported`, and sites to review with `needs_review`, and shows the status the JSON shows. The list's heading says "ClinVar sites checked".
+
+### Tests (added to `tests/test_clinvar_significance.py`; run on `cf4f84e` and `502fd72` before this lock)
+
+| # | Test | `cf4f84e` | `502fd72` |
+|---|---|---|---|
+| T10 ×2 | `test_a_record_without_an_alternate_allele_does_not_drop_its_region` [site covered / uncovered]: the BRCA1 quartet in file order, plus a supported C>T at 121. BRCA1 is present, the three plain siblings and the neighbour are listed, C>. is not, the status is present_with_good_coverage, and the metadata count is 1. | failed (only C>T and the neighbour listed) | failed (`'BRCA1' in {}`) |
+| T11 ×2 | `test_a_lone_record_without_an_alternate_allele_does_not_drop_its_region` [covered / uncovered]: PTEN G>. (and the Benign G>C), plus a supported G>A at 121. PTEN is present, only the neighbour is listed, and the count is 1. | failed (`'PTEN' in {}`) | failed (`'PTEN' in {}`) |
+| T12 ×3 | `test_the_html_export_counts_what_the_json_counts` [all alt / reference only / two alt reads] on the IDH1 trio. The JSON status and found count are as expected, and the HTML shows the same status phrase and "Total Pathogenic Variants: n". | failed | failed |
+
+All 7 fail by assertion on both. No existing test changes. The existing variant-check tests guard the JSON summary refactor.
+
+### Mutants (round 2)
+
+- **N1:** the loader keeps records whose ALT is not plain bases.
+- **N2:** the metadata count is not written.
+- **N3:** the HTML counts every checked record as found.
+- **N4:** the HTML ignores sites to review.
+- **N5:** `gene_pathogenic_status` drops its "insufficient evidence" branch, which the JSON uses too.
+- **Control:** a no-op change.
+
+All of M1–M12 are re-run on the new code too.
+
+### Pass, all of
+
+- T10–T12 pass.
+- N1–N5 and M1–M12 are each caught, and the control survives.
+- The full suite passes.
+- The pins are unchanged.
