@@ -95,6 +95,24 @@ def needs_review(evidence: Optional[Dict[str, Any]]) -> bool:
     return (evidence or {}).get("evidence_level") in REVIEW_EVIDENCE
 
 
+def gene_pathogenic_status(high_coverage: int, found: int, review: int) -> str:
+    """A gene's status from its found sites (3+ alternate reads), how many of those have
+    10x or more, and its sites that need review. The JSON and the HTML exports both use it.
+    """
+    if high_coverage > 0:
+        return "present_with_good_coverage"
+    if found > 0:
+        return "present_but_low_coverage"
+    if review > 0:
+        return "insufficient_evidence"
+    return "none_detected"
+
+
+def _is_plain_allele(allele: str) -> bool:
+    """True for an allele of plain bases (A, C, G, T, N): one a pileup can look for."""
+    return bool(allele) and set(allele.upper()) <= set("ACGTN")
+
+
 @dataclass
 class GeneReport:
     """Container for gene-specific analysis results."""
@@ -147,6 +165,9 @@ class LightweightGeneAnalysis:
         # Initialize ClinVar data
         self.clinvar_variants = {}
         self.gene_variants = {}
+        # Pathogenic records with no plain-base ALT (ClinVar's "." = the reference
+        # base itself): a pileup can't check them, so they are skipped and counted
+        self.clinvar_records_not_checkable = 0
 
         # Load ClinVar data
         self._load_clinvar_data()
@@ -249,6 +270,11 @@ class LightweightGeneAnalysis:
 
                 # Check if pathogenic
                 if self._is_pathogenic(record):
+                    if not _is_plain_allele(alt):
+                        # e.g. ALT "." (HGVS "g.N="): no alternate allele to look for.
+                        # Kept, it raised in the evidence code and dropped its region.
+                        self.clinvar_records_not_checkable += 1
+                        continue
                     pathogenic_count += 1
                     variant_info = self._extract_variant_info(record)
 
@@ -276,6 +302,11 @@ class LightweightGeneAnalysis:
         print(
             f"    VCF parsing completed: {total_lines:,} total lines, {pathogenic_count} pathogenic variants found"
         )
+        if self.clinvar_records_not_checkable:
+            self.logger.warning(
+                f"{self.clinvar_records_not_checkable} pathogenic ClinVar records have no "
+                "alternate allele (ALT '.') and can't be checked with a pileup; skipped"
+            )
 
     def _is_pathogenic(self, record) -> bool:
         """Whether ClinVar calls this record pathogenic, in CLNSIG, ONC or SCI (VAR-2)."""
@@ -1338,9 +1369,16 @@ class LightweightGeneAnalysis:
 
         # Add detailed gene information
         for gene_name, variants in gene_variants.items():
-            # Calculate gene-level statistics
-            total_variants = len(variants)
-            high_coverage_variants = sum(1 for v in variants if v["coverage"] >= 10)
+            # Gene-level counts, as in the JSON: a checked site is found only when
+            # the reads support it (VAR-8)
+            found = [
+                v for v in variants if is_supported(v["variant"].get("evidence_analysis"))
+            ]
+            review_sites = sum(
+                1 for v in variants if needs_review(v["variant"].get("evidence_analysis"))
+            )
+            total_variants = len(found)
+            high_coverage_variants = sum(1 for v in found if v["coverage"] >= 10)
             low_coverage_variants = total_variants - high_coverage_variants
 
             # Get coverage statistics from the first report (they should be similar for the same gene)
@@ -1360,14 +1398,23 @@ class LightweightGeneAnalysis:
                 coverage_status = " GOOD COVERAGE"
                 detail_class = "gene-detail"
 
-            # Determine pathogenic SNP status
-            if high_coverage_variants > 0:
+            # Pathogenic SNP status: the one the JSON gives this gene
+            status = gene_pathogenic_status(
+                high_coverage_variants, total_variants, review_sites
+            )
+            if status == "present_with_good_coverage":
                 pathogenic_status = f"🚨 PATHOGENIC SNPS PRESENT ({high_coverage_variants} with good coverage)"
                 detail_class += " pathogenic-present"
-            else:
+            elif status == "present_but_low_coverage":
+                pathogenic_status = f"🚨 PATHOGENIC SNPS PRESENT ({total_variants} below 10x coverage)"
+                detail_class += " pathogenic-present"
+            elif status == "insufficient_evidence":
                 pathogenic_status = (
-                    " NO PATHOGENIC SNPS DETECTED (or all below coverage threshold)"
+                    f" INSUFFICIENT EVIDENCE ({review_sites} sites need review)"
                 )
+                detail_class += " low-coverage"
+            else:
+                pathogenic_status = " NO PATHOGENIC SNPS DETECTED"
                 detail_class += " pathogenic-absent"
 
             html += f"""
@@ -1386,7 +1433,7 @@ class LightweightGeneAnalysis:
             """
 
             if variants:
-                html += f"<p><strong>🚨 Pathogenic Variants Found ({total_variants}):</strong></p>"
+                html += f"<p><strong>ClinVar sites checked ({len(variants)}):</strong></p>"
 
                 # Group variants by coverage status
                 high_coverage_group = [v for v in variants if v["coverage"] >= 10]
@@ -1623,14 +1670,11 @@ class LightweightGeneAnalysis:
             summary["insufficient_evidence_sites"] = sum(
                 1 for v in checked if needs_review(v.get("evidence_analysis"))
             )
-            if summary["high_coverage_variants"] > 0:
-                summary["pathogenic_status"] = "present_with_good_coverage"
-            elif summary["total_variants"] > 0:
-                summary["pathogenic_status"] = "present_but_low_coverage"
-            elif summary["insufficient_evidence_sites"] > 0:
-                summary["pathogenic_status"] = "insufficient_evidence"
-            else:
-                summary["pathogenic_status"] = "none_detected"
+            summary["pathogenic_status"] = gene_pathogenic_status(
+                summary["high_coverage_variants"],
+                summary["total_variants"],
+                summary["insufficient_evidence_sites"],
+            )
 
         # Create the final JSON structure
         json_data = {
@@ -1663,6 +1707,8 @@ class LightweightGeneAnalysis:
                     for g in gene_variants.values()
                     if any(v["coverage_status"] == "high" for v in g["variants"])
                 ),
+                # ClinVar records skipped because they have no alternate allele
+                "clinvar_records_not_checkable": self.clinvar_records_not_checkable,
             },
             "genes": gene_variants,
         }

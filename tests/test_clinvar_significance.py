@@ -403,3 +403,89 @@ def test_control_a_plain_pathogenic_record_keeps_its_label(tmp_path):
     v = _by_allele(data, "TESTG")[(101, "G", "A")]
     assert v["supported"] is True
     assert v["clinical_significance"] == "Pathogenic"
+
+
+# ------------------------------------------------------------ external review, round 2
+
+# ClinVar 2026-10-25, chr17:43067696 in BRCA1, in the file's order: C>. (ID 125742, HGVS
+# "g.43067696="), then C>A, C>G, C>T. ALT "." means ClinVar gives no alternate allele: the record
+# is the reference base itself, which a pileup can't check. 13 selected records are like this.
+BRCA1_43067696 = [
+    (101, "C", ".", "CLNSIG=Pathogenic;GENEINFO=BRCA1:672"),
+    (101, "C", "A", "CLNSIG=Pathogenic;GENEINFO=BRCA1:672"),
+    (101, "C", "G", "CLNSIG=Pathogenic;GENEINFO=BRCA1:672"),
+    (101, "C", "T", "CLNSIG=Pathogenic;GENEINFO=BRCA1:672"),
+]
+BRCA1_NEIGHBOUR = (121, "C", "T", "CLNSIG=Pathogenic;GENEINFO=BRCA1:672")
+# chr10:87864144 in PTEN: G>. (ID 1705890) is alone among the selected records there (G>C is Benign).
+PTEN_87864144 = [
+    (101, "G", ".", "CLNSIG=Pathogenic;GENEINFO=PTEN:5728"),
+    (101, "G", "C", "CLNSIG=Benign;GENEINFO=PTEN:5728"),
+]
+PTEN_NEIGHBOUR = (121, "G", "A", "CLNSIG=Pathogenic;GENEINFO=PTEN:5728")
+
+
+def _neighbour_reads(background, alt_at_121, covered):
+    """Reads carrying ``alt_at_121`` at 121. ``covered``: the reads also cover 101."""
+    if covered:
+        return [(0, background * 120 + alt_at_121 + background * 29)] * 20
+    return [(110, background * 10 + alt_at_121 + background * 29)] * 20  # 111..150
+
+
+@pytest.mark.parametrize("covered", [True, False], ids=["site_covered", "site_uncovered"])
+def test_a_record_without_an_alternate_allele_does_not_drop_its_region(tmp_path, covered):
+    # Review finding 1. On cf4f84e the position key hid C>. behind C>T (and C>A, C>G with it);
+    # on 502fd72 C>. was kept, raised in the evidence code, and the whole BRCA1 region vanished.
+    data = _variant_check(
+        tmp_path, BRCA1_43067696 + [BRCA1_NEIGHBOUR], _neighbour_reads("C", "T", covered), "BRCA1"
+    )
+    assert "BRCA1" in data["genes"]
+    alleles = _by_allele(data, "BRCA1")
+    assert set(alleles) == {(101, "C", "A"), (101, "C", "G"), (101, "C", "T"), (121, "C", "T")}
+    assert alleles[(121, "C", "T")]["supported"] is True
+    assert data["genes"]["BRCA1"]["summary"]["pathogenic_status"] == "present_with_good_coverage"
+    assert data["metadata"]["clinvar_records_not_checkable"] == 1
+
+
+@pytest.mark.parametrize("covered", [True, False], ids=["site_covered", "site_uncovered"])
+def test_a_lone_record_without_an_alternate_allele_does_not_drop_its_region(tmp_path, covered):
+    # Review finding 1, the part that predates batch 9: a lone G>. dropped its region on cf4f84e too.
+    data = _variant_check(
+        tmp_path, PTEN_87864144 + [PTEN_NEIGHBOUR], _neighbour_reads("G", "A", covered), "PTEN"
+    )
+    assert "PTEN" in data["genes"]
+    assert set(_by_allele(data, "PTEN")) == {(121, "G", "A")}
+    assert data["genes"]["PTEN"]["summary"]["pathogenic_status"] == "present_with_good_coverage"
+    assert data["metadata"]["clinvar_records_not_checkable"] == 1
+
+
+def _variant_check_with_html(tmp_path, records, reads, gene):
+    from robin.analysis.lightweight_gene_analysis import LightweightGeneAnalysis
+
+    bam = write_bam(tmp_path / "s.bam", reads)
+    bed = write_bed(tmp_path / "s.bed", [(50, 150, gene)])
+    vcf = _clinvar(tmp_path / "clinvar.vcf", records)
+    analysis = LightweightGeneAnalysis(str(tmp_path / "work"), str(vcf))
+    reports = analysis.analyze_bed_regions(str(bam), str(bed))
+    data = json.loads(Path(analysis.export_json(reports, str(tmp_path / "r.json"))).read_text())
+    html = Path(analysis.generate_report(reports, str(tmp_path / "r.html"))).read_text()
+    return data, html
+
+
+@pytest.mark.parametrize(
+    "reads,status,found,phrase",
+    [
+        (_reads("A"), "present_with_good_coverage", 1, "PATHOGENIC SNPS PRESENT (1 with good coverage)"),
+        (_reads("G"), "none_detected", 0, "NO PATHOGENIC SNPS DETECTED"),
+        (_reads("G", 18) + _reads("A", 2), "insufficient_evidence", 0, "INSUFFICIENT EVIDENCE"),
+    ],
+    ids=["all_alt", "reference_only", "two_alt_reads"],
+)
+def test_the_html_export_counts_what_the_json_counts(tmp_path, reads, status, found, phrase):
+    # Review finding 2 (predates batch 9; VAR-1 made it larger): the HTML export counted every
+    # checked record with reads as a found pathogenic variant (3 here), whatever the reads showed.
+    data, html = _variant_check_with_html(tmp_path, IDH1_C394, reads, "IDH1")
+    summary = data["genes"]["IDH1"]["summary"]
+    assert (summary["pathogenic_status"], summary["total_variants"]) == (status, found)
+    assert phrase in html
+    assert f"<strong>Total Pathogenic Variants:</strong> {found} " in html
