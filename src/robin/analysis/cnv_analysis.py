@@ -987,6 +987,7 @@ def save_cnv_files(
     logger,
     reference: Optional[str] = None,
     generate_master_bed: bool = False,
+    target_panel: Optional[str] = None,
 ):
     """
     Save CNV data files in the specified format from the documentation.
@@ -1082,8 +1083,9 @@ def save_cnv_files(
                 # work_dir is the parent of sample_dir
                 work_dir = os.path.dirname(sample_dir)
                 
-                # Try to get target_panel from fusion metadata if available
-                target_panel = _try_get_target_panel_from_fusion_metadata(sample_id, work_dir)
+                # The handler's panel; fusion metadata only as a fallback (TGT-2: without
+                # either, the master BED holds breakpoints but not the panel).
+                target_panel = target_panel or _try_get_target_panel_from_fusion_metadata(sample_id, work_dir)
                 
                 # Generate asynchronously (non-blocking)
                 generate_master_bed_async(
@@ -1405,7 +1407,10 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2, referenc
         return analysis_result
 
 
-def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2, reference: Optional[str] = None):
+def process_multiple_bams(
+    bam_paths, metadata_list, work_dir, logger, threads=2, reference: Optional[str] = None,
+    target_panel: Optional[str] = None,
+):
     """
     Process multiple BAM files for CNV analysis using aggregated CNV data.
     
@@ -1716,6 +1721,7 @@ def process_multiple_bams(bam_paths, metadata_list, work_dir, logger, threads=2,
             logger,
             reference=reference,
             generate_master_bed=True,  # Batch processing - generate master BED once at the end
+            target_panel=target_panel,
         )
         logger.info(f"[cnv] save_cnv_files (incl. master BED) completed in {time.time() - t0:.2f}s")
 
@@ -1840,6 +1846,7 @@ def cnv_handler(job, work_dir=None, target_panel=None, threads=2):
             logger=logger,
             threads=threads,
             reference=reference,
+            target_panel=target_panel,
         )
         
         # Store batch results in job context (maintain compatibility with existing structure)
