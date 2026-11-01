@@ -58,3 +58,16 @@ whenever a claim is withdrawn or a finding turns out to be an artifact. Concrete
   old-code run found it.
 - **Gate:** C, with D.3 — run every control on the old code before locking it. A control that
   can't pass there is a fault row.
+
+## 8. "Cleared after the next good build", tested on a build that rebuilt nothing (batch 7, 2026-11-01)
+- **Claimed:** round 3 (`97b34ee`): after a failed fusion build, the earlier-result note "goes away
+  after the next good build"; its test passed, and the build loop cleared the `.failed` record on
+  any build that returned.
+- **Rested on:** a test whose failing build raised in the filter step, before the CSV was appended,
+  so the old pickle still matched the CSV. When preprocessing fails after the append, a quiet
+  next build rebuilds nothing, clears the record, and the stale pickle reads as current (a
+  target-panel fusion then shows as "genome-wide"). Found by the second review's probe, which
+  compared the pickle's pairs with the CSV's.
+- **Gate:** D.1 and D.2 — when a check says "state X is cleared", test it against the source of
+  truth (pickle vs CSV), and on the path where the state is actually stale, not one where it
+  happens to be fine.
