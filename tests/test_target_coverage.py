@@ -91,6 +91,44 @@ def test_a_half_written_staging_set_is_not_claimed(tmp_path, panel):
     assert (staging / "bedcov_000001.parquet").exists()
 
 
+def test_a_staged_set_missing_a_file_is_not_claimed(tmp_path, panel):
+    """A set whose coverage file exists but which lost another file stays staged.
+    A guard for Task 3's claim (it catches the claim without its completeness check);
+    on db7269c its setup fails first, as that code writes no stretches file."""
+    bams, merged = write_bams(str(tmp_path), 1)
+    work = tmp_path / "work"
+    ta = _analysis(work)
+    ta.process_file_with_staging(bams[0], {"sample_id": SAMPLE})  # counter 0, complete
+    staging = work / SAMPLE / "_staging"
+    for kind, ext in (("coverage", "parquet"), ("bedcov", "parquet"), ("stretches", "parquet"), ("timestamp", "txt")):
+        shutil.copy2(staging / f"{kind}_000000.{ext}", staging / f"{kind}_000001.{ext}")
+    ta.accumulate_staged_files(SAMPLE, force=True)
+    ref = samtools_reference(merged, panel)
+    out = pd.read_csv(work / SAMPLE / "bed_coverage_main.csv")
+    assert {r.name: int(r.bases) for r in out.itertuples(index=False)} == {k[3]: v[0] for k, v in ref["targets"].items()}
+    assert (staging / "coverage_000001.parquet").exists()
+
+
+def test_staging_writes_the_coverage_file_last(tmp_path, panel, monkeypatch):
+    """A guard for Task 3's design: if staging fails part-way, no coverage file exists,
+    so no claim can take the set (on db7269c there is no covered_stretches to fail)."""
+    from robin.analysis import target_analysis as ta_mod
+
+    class FailingFrame(pd.DataFrame):
+        def to_parquet(self, *args, **kwargs):
+            raise OSError("disk full")
+
+    monkeypatch.setattr(ta_mod, "covered_stretches",
+                        lambda bam: FailingFrame({"chrom": [], "start": [], "end": []}))
+    bams, _ = write_bams(str(tmp_path), 1)
+    work = tmp_path / "work"
+    meta, _ = _analysis(work).process_file_with_staging(bams[0], {"sample_id": SAMPLE})
+    assert meta.error_message
+    staging = work / SAMPLE / "_staging"
+    assert (staging / "bedcov_000000.parquet").exists()
+    assert not (staging / "coverage_000000.parquet").exists()
+
+
 def test_an_old_coverage_folder_carries_on(tmp_path, panel):
     """A sample folder written by the old code: depth carries on, covered bases become unknown."""
     bams, merged = write_bams(str(tmp_path), 2)

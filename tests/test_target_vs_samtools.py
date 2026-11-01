@@ -55,6 +55,11 @@ def _worker(work, bams, panel):
     """One of two processes accumulating at the same time (a fresh interpreter: spawn)."""
     TargetAnalysis._find_target_bed = lambda self, p: panel
     ta_mod.get_read_counts_per_target = _slow(ta_mod.get_read_counts_per_target)
+    if hasattr(ta_mod, "covered_bases"):
+        # Also slow a step between reading and writing the totals inside the commit,
+        # so a commit that isn't locked loses an update (a survivor of the first
+        # mutation run; added after seeing it, rules unchanged).
+        ta_mod.covered_bases = _slow(ta_mod.covered_bases)
     _stage_and_accumulate(work, bams)
 
 
