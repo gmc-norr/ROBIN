@@ -948,3 +948,132 @@ def test_the_body_without_a_failed_build_says_none_found(tmp_path):
     body, _ = _report_text(d)
     assert NONE_FOUND in body
     assert "latest build failed" not in body
+
+
+# ------------------------------------------------------------------ batch 7b: unreadable candidate files
+def _staged(tmp_path, name):
+    return Path(fusion_work._get_staging_dir(str(tmp_path), SAMPLE)) / name
+
+
+def _csv_rows_per_tag(csv):
+    return pd.read_csv(csv)["tag"].value_counts().to_dict()
+
+
+def test_a_damaged_staged_file_fails_and_stays_staged(tmp_path, monkeypatch):
+    # 7b test 1: a damaged staged target file next to good genome-wide ones, first build.
+    monkeypatch.setattr(fusion_work, "_ensure_gene_regions_loaded", lambda panel: None)
+    _stage(tmp_path, _rows(4), kinds=("genome",))
+    _staged(tmp_path, "target_1.parquet").write_bytes(b"PAR1 half written PAR1")
+    assert _accumulate(tmp_path)["status"] == "error"
+    assert _staged(tmp_path, "target_1.parquet").exists()
+    _, summary = _report_text(tmp_path / SAMPLE)
+    assert NONE_FOUND_SUMMARY not in summary, summary
+
+
+def test_a_damaged_staged_file_after_a_good_build_says_the_latest_build_failed(tmp_path, monkeypatch):
+    # 7b test 2 (F5): the accumulation fails before its builds; earlier results say so.
+    monkeypatch.setattr(fusion_work, "_ensure_gene_regions_loaded", lambda panel: None)
+    _stage(tmp_path, _rows(4))
+    assert _accumulate(tmp_path)["status"] == "success"
+    _stage(tmp_path, _rows(4, "GENEC", "GENED", prefix="c"), kinds=("genome",), n=2)
+    _staged(tmp_path, "target_2.parquet").write_bytes(b"PAR1 half written PAR1")
+    assert _accumulate(tmp_path)["status"] == "error"
+    _, summary = _report_text(tmp_path / SAMPLE)
+    assert TARGET_EARLIER in summary, summary
+
+
+def _dataset_read_fails(monkeypatch, which_pass, part=None, only_once=False):
+    """pq.ParquetFile for the target dataset raises in one pass of the build (first: the
+    read_id/col4 pass; second: the full-row pass), optionally for one part only, optionally once."""
+    real_pf = fusion_work.pq.ParquetFile
+    fired = []
+
+    class Faulty:
+        def __init__(self, path, *args, **kwargs):
+            self._pf = real_pf(path, *args, **kwargs)
+            self._path = str(path)
+
+        def __getattr__(self, name):
+            return getattr(self._pf, name)
+
+        def iter_batches(self, columns=None, **kwargs):
+            hit = (
+                "target_candidates_dataset" in self._path
+                and (columns is None) == (which_pass == "second")
+                and (part is None or self._path.endswith(part))
+                and not (only_once and fired)
+            )
+            if hit:
+                fired.append(self._path)
+                raise OSError("synthetic dataset read failure")
+            return self._pf.iter_batches(columns=columns, **kwargs)
+
+    monkeypatch.setattr(fusion_work.pq, "ParquetFile", Faulty)
+    return fired
+
+
+@pytest.mark.parametrize("which_pass", ["first", "second"])
+def test_a_dataset_read_error_fails_the_types_build(tmp_path, monkeypatch, which_pass):
+    # 7b test 3 (F3): the reviewer's case, first build.
+    from robin import fusion_status as fs
+
+    monkeypatch.setattr(fusion_work, "_ensure_gene_regions_loaded", lambda panel: None)
+    _stage(tmp_path, _rows(4))
+    fired = _dataset_read_fails(monkeypatch, which_pass)
+    assert _accumulate(tmp_path)["status"] == "error"
+    assert fired
+    d = tmp_path / SAMPLE
+    assert os.path.exists(fs.failed_build_marker(str(d / _TYPE_PICKLE["master"])))
+    assert fs.fusion_states(str(d))["master_state"] != fs.STATE_NONE
+
+
+def test_a_read_error_part_way_through_the_second_pass_appends_nothing_twice(tmp_path, monkeypatch):
+    # 7b test 4 (F4): build 2 reads part 2, then fails on part 3 in the second pass; build 3
+    # retries. Each read's rows must reach the CSV once.
+    monkeypatch.setattr(fusion_work, "_ensure_gene_regions_loaded", lambda panel: None)
+    _stage(tmp_path, _rows(4))
+    assert _accumulate(tmp_path)["status"] == "success"
+    _stage(tmp_path, _rows(4, "GENEC", "GENED", prefix="c"), n=2)
+    _stage(tmp_path, _rows(4, "GENEG", "GENEH", prefix="g"), n=3)
+    fired = _dataset_read_fails(monkeypatch, "second", part="part_000003.parquet", only_once=True)
+    _accumulate(tmp_path)
+    assert fired
+    _stage(tmp_path, _rows(1, "GENEE", "GENEF", prefix="e"), n=4)
+    assert _accumulate(tmp_path)["status"] == "success"
+    rows = _csv_rows_per_tag(tmp_path / SAMPLE / _TYPE_CSV["master"])
+    assert rows == {"GENEA,GENEB": 8, "GENEC,GENED": 8, "GENEG,GENEH": 8}, rows
+
+
+def test_after_a_damaged_staged_file_is_repaired_each_read_counts_once(tmp_path, monkeypatch):
+    # 7b test 5 (F2): the genome-wide staged file is damaged, the target one is good. The failed
+    # accumulation must append nothing, so the retry appends each read once.
+    monkeypatch.setattr(fusion_work, "_ensure_gene_regions_loaded", lambda panel: None)
+    _stage(tmp_path, _rows(4), kinds=("target",))
+    _staged(tmp_path, "genome_1.parquet").write_bytes(b"PAR1 half written PAR1")
+    assert _accumulate(tmp_path)["status"] == "error"
+    _rows(4).to_parquet(_staged(tmp_path, "genome_1.parquet"), index=False)
+    assert _accumulate(tmp_path)["status"] == "success"
+    d = tmp_path / SAMPLE
+    for kind in ("master", "all"):
+        assert _csv_rows_per_tag(d / _TYPE_CSV[kind]) == {"GENEA,GENEB": 8}, kind
+
+
+def test_parquet_writes_go_through_a_temporary_name(tmp_path, monkeypatch):
+    # 7b test 6 (F1): a reader never sees half a staged file or dataset part.
+    import inspect
+
+    calls = []
+    real_replace = os.replace
+
+    def recording_replace(a, b):
+        calls.append((str(a), str(b)))
+        return real_replace(a, b)
+
+    monkeypatch.setattr(fusion_work.os, "replace", recording_replace)
+    path = tmp_path / "x.parquet"
+    fusion_work._write_parquet_atomically(_rows(1), str(path), index=False)
+    assert calls == [(str(path) + ".tmp", str(path))]
+    assert len(pd.read_parquet(path)) == 2
+    for fn in (fusion_work._append_fusion_candidates_parquet, fusion_work.process_bam_with_staging):
+        src = inspect.getsource(fn)
+        assert "_write_parquet_atomically(" in src and ".to_parquet(" not in src, fn.__name__

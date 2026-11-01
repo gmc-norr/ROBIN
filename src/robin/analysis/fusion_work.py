@@ -2113,21 +2113,23 @@ def process_bam_with_staging(
         genome_staging = os.path.join(staging_dir, f"genome_{counter:06d}.parquet")
         master_bed_staging = os.path.join(staging_dir, f"master_bed_{counter:06d}.parquet")
 
+        # Each staged file is written under a temporary name and renamed into place, so an
+        # accumulation running in another worker never reads half a file.
         if target_candidates is not None and not target_candidates.empty:
-            target_candidates.to_parquet(target_staging, **_staging_opts)
+            _write_parquet_atomically(target_candidates, target_staging, **_staging_opts)
             logger.info(f"Saved {len(target_candidates)} target candidates to staging")
         else:
-            pd.DataFrame().to_parquet(target_staging, **_staging_opts)
+            _write_parquet_atomically(pd.DataFrame(), target_staging, **_staging_opts)
         if genome_wide_candidates is not None and not genome_wide_candidates.empty:
-            genome_wide_candidates.to_parquet(genome_staging, **_staging_opts)
+            _write_parquet_atomically(genome_wide_candidates, genome_staging, **_staging_opts)
             logger.debug(f"Saved {len(genome_wide_candidates)} genome-wide candidates to staging")
         else:
-            pd.DataFrame().to_parquet(genome_staging, **_staging_opts)
+            _write_parquet_atomically(pd.DataFrame(), genome_staging, **_staging_opts)
         if master_bed_candidates is not None and not master_bed_candidates.empty:
-            master_bed_candidates.to_parquet(master_bed_staging, **_staging_opts)
+            _write_parquet_atomically(master_bed_candidates, master_bed_staging, **_staging_opts)
             logger.info(f"Saved {len(master_bed_candidates)} master BED candidates to staging")
         else:
-            pd.DataFrame().to_parquet(master_bed_staging, **_staging_opts)
+            _write_parquet_atomically(pd.DataFrame(), master_bed_staging, **_staging_opts)
         
         # Check if accumulation should run
         # Note: This check is not atomic - multiple workers might see threshold reached
@@ -2201,6 +2203,7 @@ def accumulate_fusion_candidates(
     Returns:
         Dictionary with accumulation results
     """
+    builds_started = False
     try:
         logger.info(f"Starting fusion batch accumulation for {sample_id} (force={force})")
         start_time = time.time()
@@ -2293,10 +2296,22 @@ def accumulate_fusion_candidates(
                         load_elapsed,
                     )
                 except Exception as e:
-                    logger.warning(
-                        f"Error loading {candidate_type} staging file {os.path.basename(file_path)}: {e}"
-                    )
+                    # A staged file that can't be read fails the accumulation; it stays staged.
+                    raise RuntimeError(
+                        f"Could not load {candidate_type} staging file "
+                        f"{os.path.basename(file_path)}: {e}"
+                    ) from e
             return total_rows
+
+        # Open every staged file before appending any, so one that can't be read appends
+        # nothing: the staged files stay, and the next try appends each read once.
+        for file_path in target_files + genome_files + master_bed_files:
+            try:
+                pq.ParquetFile(file_path)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Could not read staging file {os.path.basename(file_path)}: {e}"
+                ) from e
 
         append_start = time.time()
         batch_target_rows = _append_staged_files(target_files, "target_candidates")
@@ -2379,6 +2394,7 @@ def accumulate_fusion_candidates(
         if force:
             logger.info("Final accumulation detected - generating output files (CSV, BED, etc.)")
             output_start = time.time()
+            builds_started = True  # from here, each build records its own outcome
             try:
                 _generate_output_files(
                     sample_id,
@@ -2443,6 +2459,10 @@ def accumulate_fusion_candidates(
         logger.error(f"Error during fusion batch accumulation for {sample_id}: {e}")
         import traceback
         logger.error(traceback.format_exc())
+        if not builds_started:
+            # Failed before its builds (staging, appending): neither type's results are current.
+            for name in ("fusion_candidates_master_processed.pkl", "fusion_candidates_all_processed.pkl"):
+                _record_build_outcome(os.path.join(work_dir, sample_id, name), e)
         return {"status": "error", "error": str(e)}
 
 
@@ -2841,9 +2861,12 @@ def _generate_output_files(
             subset = subset[subset["tag"] != ""]
             if subset.empty:
                 continue
+            filtered_batches.append(subset)
+        # Every file was read: only now append to the CSV, so a read failure part-way leaves it
+        # as it was and the retry can't append the same rows twice.
+        for subset in filtered_batches:
             subset.to_csv(output_csv_path, mode="a", header=write_header, index=False)
             write_header = False
-            filtered_batches.append(subset)
 
         if not filtered_batches:
             if not written_read_ids:
@@ -5019,6 +5042,16 @@ def _extract_staging_batch_id(staging_files: List[str]) -> int:
     return int(time.time())
 
 
+def _write_parquet_atomically(df: pd.DataFrame, path: str, **opts: Any) -> None:
+    """Write ``df`` to ``path`` under a temporary name, then rename it into place.
+
+    No ``*.parquet`` glob matches the temporary name, so a reader never sees half a file.
+    """
+    tmp_path = path + ".tmp"
+    df.to_parquet(tmp_path, **opts)
+    os.replace(tmp_path, path)
+
+
 def _append_fusion_candidates_parquet(
     candidates_df: pd.DataFrame,
     candidate_type: str,
@@ -5034,8 +5067,8 @@ def _append_fusion_candidates_parquet(
     part_path = os.path.join(dataset_dir, f"part_{batch_id:06d}.parquet")
     if os.path.exists(part_path):
         part_path = os.path.join(dataset_dir, f"part_{batch_id:06d}_{int(time.time())}.parquet")
-    candidates_df.to_parquet(
-        part_path, index=False, engine="pyarrow", compression="snappy"
+    _write_parquet_atomically(
+        candidates_df, part_path, index=False, engine="pyarrow", compression="snappy"
     )
     logger.debug(f"Appended {len(candidates_df)} {candidate_type} to {part_path}")
 
@@ -5192,7 +5225,8 @@ def _iter_fusion_candidates_parquet_batches(
                     if not df.empty:
                         yield df
             except Exception as e:
-                logger.warning(f"Error iterating {candidate_type} from {path}: {e}")
+                # A file that can't be read must fail the build, not read as "no candidates".
+                raise RuntimeError(f"Could not read {candidate_type} from {path}: {e}") from e
 
     return _iter_batches()
 
