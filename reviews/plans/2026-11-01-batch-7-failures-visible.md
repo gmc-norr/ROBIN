@@ -247,3 +247,23 @@ The splits match the implementer's reports for rounds 1–3.
 - A candidate CSV with rows, no pickle and no `sv_count.txt` now reads "could not be read" (it read "not run"). Cost: an old folder in that shape says "could not be read" where nothing ran; there are rows, so something did.
 - m-3 and the genome-wide half of m-1 are kept, because existing tests pin their text. Cost: one body sentence reads redundantly.
 - Round 4 was done by the controller, not an agent, to save tokens. Cost: the implementer and the checker are the same. An external review (Sol 6.1 / Astra) was requested to make up for that.
+
+## The external review's findings — locked before code (2026-11-01)
+
+The external review of round 4 (Codex, `/home/parlar_ai/robin-batch3-run/review-requests/batch7-round4-report-codex.md`) found 1 Critical, 1 Important and 2 Minor. The user chose (2026-11-01) to fix 1, 3 and 4 here and give 2 a small batch of its own. Locked before any code:
+
+- **Finding 1 (C1 not closed):** with a type's `.failed` record there, a quiet build whose candidate CSV is missing, zero bytes or header-only rebuilds nothing, returns, and clears the record over the stale pickle. ROBIN does not empty that CSV itself, so this needs the file damaged or removed after a failed build. Fix: in `_rebuild_missing`, when the record is there and the CSV gives no rows, raise. The build then fails and the record stays. Without the record, nothing changes.
+  - Test: for each type and each CSV state (missing, zero bytes, header-only), after the round-4 setup's failed build 2, quiet build 3 returns "error", the record stays, the note shows, and the pickle still holds the earlier pairs.
+  - Control: with no record and the CSV removed, a quiet build returns "success" and writes no record.
+- **Finding 3 (m-1's body):** with a type's note set and no validated network anywhere, the body says "No fusion candidates were identified." Fix: a type with a note reads "the latest build failed; an earlier run identified no fusion candidates" in the body's per-type parts; the whole-sample "No fusion candidates were identified." needs every type read and no note.
+  - Test: 3-read pickles for both types and the target panel's record: the body has "Target panel: the latest build failed; an earlier run identified no fusion candidates." and "Genome-wide: no fusion candidates were identified.", and not "No fusion candidates were identified.".
+  - Control: the same pickles without the record still give "No fusion candidates were identified.".
+- **Finding 4 (GUI "No errors detected." with a count of 1):** when an `ERROR_UPDATE` carries counts above 0 and no recent failures, and the summary still says "No errors detected.", it says "N failure(s) recorded; the details are no longer available." Details already shown are kept.
+  - Test: the I-1 setup (a real Coordinator log, the failure evicted) through `publish_failures` and the real `GUILauncher._update_errors` on the stand-in panel gives a count of "1" and "1 failure recorded; the details are no longer available.".
+  - Controls: counts 0 and no recent failures keeps "No errors detected."; a panel already showing a failure's line keeps it when an update has no recent failures.
+- **Deferred to its own small batch (finding 2):** a candidate parquet file that can't be read is logged and skipped by `_iter_fusion_candidates_parquet_batches`, so its type can read "none found" (measured by the reviewer; pre-existing). The skipping may be deliberate for files still being written, so it gets a look of its own first.
+
+**Pass, all of:**
+- Each test fails on `1f64cf9` and passes after; controls pass on both.
+- One mutant per fix is caught, and the no-op control survives.
+- The full suite passes.
