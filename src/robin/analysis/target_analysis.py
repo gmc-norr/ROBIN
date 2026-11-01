@@ -35,10 +35,12 @@ import pysam
 from robin.logging_config import get_job_logger
 from robin.analysis.snp_processing import build_snp_display_data
 from robin.analysis.target_coverage import (
+    UNION_FILE,
     aligned_blocks,
     contig_totals,
     covered_bases,
     covered_stretches,
+    panel_union_bases,
     read_bed_targets,
     target_bases,
     union_stretches,
@@ -1065,6 +1067,7 @@ class TargetAnalysis:
             blocks = aligned_blocks(file_path)  # one pass gives contig bases and stretches
             newcovdf = contig_totals(file_path, blocks)
             bedcovdf = target_bases(file_path, self.bedfile)
+            union = panel_union_bases(file_path, self.bedfile)  # each panel base once
             stretches = covered_stretches(file_path, blocks)
             del blocks
 
@@ -1080,6 +1083,7 @@ class TargetAnalysis:
             n = f"{analysis_counter:06d}"
             coverage_staging = os.path.join(staging_dir, f"coverage_{n}.parquet")
             bedcovdf.to_parquet(os.path.join(staging_dir, f"bedcov_{n}.parquet"), index=False)
+            union.to_parquet(os.path.join(staging_dir, f"union_{n}.parquet"), index=False)
             stretches.to_parquet(os.path.join(staging_dir, f"stretches_{n}.parquet"), index=False)
             current_timestamp = timestamp * 1000 if (self.simtime and timestamp) else time.time() * 1000
             with open(os.path.join(staging_dir, f"timestamp_{n}.txt"), "w") as f:
@@ -1875,9 +1879,11 @@ class TargetAnalysis:
         timestamps: List[float],
         batch_reads: Optional[pd.DataFrame],
         logger,
+        union: Optional[pd.DataFrame] = None,
     ) -> Dict[str, Any]:
         """Add one batch to the sample's totals and write every file. The caller holds the
-        accumulation lock for the whole call (TGT-4)."""
+        accumulation lock for the whole call (TGT-4). ``union`` is the batch's aligned bases
+        over the merged panel, or None when a BAM in it was staged before batch 8."""
         cov_path = os.path.join(sample_dir, "coverage_main.csv")
         bed_path = os.path.join(sample_dir, "bed_coverage_main.csv")
         stretch_path = os.path.join(sample_dir, "_covered_stretches.parquet")
@@ -1936,6 +1942,21 @@ class TargetAnalysis:
         target_df = target_df[["chrom", "startpos", "endpos", "name", "length", "coverage", "bases"]]
         run_list = target_df[target_df["coverage"].ge(self.callthreshold)]
 
+        # The merged panel: each panel base once (batch 8). Known only while every batch of
+        # the sample carried its merged-panel counts; a folder whose totals exist without the
+        # file, or a batch without them, leaves it unknown and the readers use the row sum.
+        union_path = os.path.join(sample_dir, UNION_FILE)
+        union_total = None
+        if union is not None and (existing_bed is None or os.path.exists(union_path)):
+            ukeys = ["chrom", "start", "end"]
+            uframes = [union[ukeys + ["bases"]].astype({"chrom": str})]
+            if os.path.exists(union_path):
+                uframes.insert(0, pd.read_csv(union_path, dtype={"chrom": str})[ukeys + ["bases"]])
+            union_total = pd.concat(uframes, ignore_index=True).groupby(
+                ukeys, as_index=False, sort=False
+            )["bases"].sum()
+            union_total["bases"] = union_total["bases"].astype("int64")
+
         chart_old = self._load_existing_coverage_over_time(sample_dir, logger)
         current_timestamp = max(timestamps) if timestamps else time.time() * 1000
         row = np.array([[current_timestamp, global_depth]])
@@ -1950,6 +1971,10 @@ class TargetAnalysis:
                 all_stretches.to_parquet(f, index=False)
         write_csv(totals, "coverage_main.csv")
         write_csv(target_df, "bed_coverage_main.csv")
+        if union_total is not None:
+            write_csv(union_total, UNION_FILE)
+        elif os.path.exists(union_path):
+            os.remove(union_path)  # this batch has no merged-panel counts: unknown from now on
         write_csv(target_df, "target_coverage.csv")
         with atomic_open(os.path.join(sample_dir, "coverage_time_chart.npy"), "wb") as f:
             np.save(f, chart)
@@ -2030,9 +2055,14 @@ class TargetAnalysis:
                     for kind, ext in _STAGED_KINDS:
                         name = f"{kind}_{n}.{ext}"
                         shutil.move(os.path.join(staging_dir, name), os.path.join(batch_dir, name))
+                    # The merged-panel part is optional: a BAM staged before batch 8 has none.
+                    union_name = f"union_{n}.parquet"
+                    if os.path.exists(os.path.join(staging_dir, union_name)):
+                        shutil.move(os.path.join(staging_dir, union_name), os.path.join(batch_dir, union_name))
 
             # --- Not locked: load the batch, count reads, write its batch BAM ---
             contigs, targets, stretch_frames, timestamps, source_bams = [], [], [], [], []
+            union_frames = []
             used = []
             for n in claimed:
                 def staged(kind: str, ext: str) -> str:
@@ -2045,9 +2075,15 @@ class TargetAnalysis:
                         ts = float(f.read().strip())
                     with open(staged("source_bam", "txt")) as f:
                         src = f.read().strip()
+                    u = (
+                        pd.read_parquet(staged("union", "parquet"))
+                        if os.path.exists(staged("union", "parquet"))
+                        else None
+                    )
                 except Exception as e:
                     logger.warning(f"Error loading staged set {n} for {sample_id}: {e}")
                     continue
+                union_frames.append(u)
                 contigs.append(c)
                 targets.append(t)
                 stretch_frames.append(s)
@@ -2089,6 +2125,11 @@ class TargetAnalysis:
                     timestamps,
                     batch_reads,
                     logger,
+                    # None when any BAM in the batch was staged before batch 8
+                    union=(
+                        None if any(u is None for u in union_frames)
+                        else pd.concat(union_frames, ignore_index=True)
+                    ),
                 )
                 if batch_bam:
                     final = os.path.join(sample_dir, f"batch_{used[0]}_{uuid.uuid4().hex[:8]}.bam")

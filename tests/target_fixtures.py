@@ -22,6 +22,15 @@ PANEL = [
     ("chr1", 1500, 1800, "GENE_C"),
     ("chr2", 1700, 1900, "GENE_D"),  # no read reaches it
 ]
+# Batch 8: the panel with its overlapping rows merged, written by hand (GENE_A + GENE_B).
+MERGED_PANEL = [("chr1", 100, 700), ("chr1", 1500, 1800), ("chr2", 1700, 1900)]
+# Batch 8: every way two rows can overlap, and the same panel merged by hand.
+PANEL_OVERLAPS = PANEL + [
+    ("chr1", 1550, 1650, "INSIDE_C"),  # a row inside another
+    ("chr1", 1500, 1800, "GENE_C_ALIAS"),  # the same interval under another name
+    ("chr1", 650, 1520, "BRIDGE_B_C"),  # a row bridging GENE_B and GENE_C
+]
+MERGED_PANEL_OVERLAPS = [("chr1", 100, 1800), ("chr2", 1700, 1900)]
 SAMPLE = "S"
 HEADER = {
     "HD": {"VN": "1.6", "SO": "coordinate"},
@@ -112,6 +121,14 @@ def write_panel(path: str, rows=PANEL) -> str:
         for chrom, start, end, name in rows:
             f.write(f"{chrom}\t{start}\t{end}\t{name}\n")
     return path
+
+
+def samtools_merged_depth(merged_bam: str, merged_rows, directory: str) -> float:
+    """samtools bedcov -j over a hand-merged panel, divided by its length: each base once."""
+    rows = [(c, s, e, f"m{i}") for i, (c, s, e) in enumerate(merged_rows)]
+    bed = write_panel(os.path.join(directory, "merged_panel.bed"), rows)
+    bases = sum(int(line.split("\t")[-1]) for line in pysam.bedcov("-j", bed, merged_bam).splitlines())
+    return bases / sum(e - s for _, s, e in merged_rows)
 
 
 def record_key(line_or_seg) -> Tuple:

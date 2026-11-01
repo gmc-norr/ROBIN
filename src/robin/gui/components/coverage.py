@@ -12,7 +12,7 @@ import pandas as pd
 from robin.analysis.target_coverage import (
     contig_length,
     global_depth,
-    target_depth,
+    panel_depth,
     target_length,
     with_target_depth,
 )
@@ -6660,7 +6660,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     if state.get("cov_df") is not None:
                         global_cov = global_depth(state["cov_df"])
                     if state.get("bed_df") is not None:
-                        target_cov_v = target_depth(state["bed_df"])
+                        target_cov_v = panel_depth(sample_dir, state["bed_df"])
                     if (
                         global_cov is not None
                         and target_cov_v is not None

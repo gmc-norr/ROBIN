@@ -9,6 +9,7 @@ duplicate records don't count; supplementary records do. The result equals
 samtools run once on all of a sample's reads (step 6 of the code review).
 """
 
+import logging
 import os
 import tempfile
 from io import StringIO
@@ -24,6 +25,10 @@ _SKIP_FLAGS = 0x4 | 0x100 | 0x200 | 0x400
 CONTIG_COLUMNS = ["#rname", "startpos", "endpos", "numreads", "bases"]
 TARGET_COLUMNS = ["chrom", "startpos", "endpos", "name", "bases"]
 STRETCH_COLUMNS = ["chrom", "start", "end"]
+UNION_COLUMNS = ["chrom", "start", "end", "bases"]
+# The sample's aligned bases over the merged panel (batch 8). Absent in a folder, or after a
+# staged BAM, from before batch 8: the panel depth then falls back to the row sum.
+UNION_FILE = "target_union_coverage.csv"
 
 
 def read_bed_targets(bed_path: str) -> List[Tuple[str, int, int, str]]:
@@ -143,6 +148,23 @@ def union_stretches(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:
     return _merged_frame(per_contig)
 
 
+def panel_union_bases(bam_path: str, bed_path: str) -> pd.DataFrame:
+    """Aligned bases (samtools bedcov -j) over the panel with its overlapping rows merged:
+    each base of the panel once. Adds up across BAMs like the per-row bases."""
+    per_contig: Dict[str, Tuple[List[int], List[int]]] = {}
+    for chrom, start, end, _ in read_bed_targets(bed_path):
+        starts, ends = per_contig.setdefault(chrom, ([], []))
+        starts.append(start)
+        ends.append(end)
+    merged = _merged_frame({
+        chrom: (np.asarray(s, dtype=np.int64), np.asarray(e, dtype=np.int64))
+        for chrom, (s, e) in per_contig.items()
+    })
+    rows = [(str(c), int(s), int(e), "") for c, s, e in merged.itertuples(index=False)]
+    merged["bases"] = _bedcov_j(bam_path, rows) if rows else []
+    return merged[UNION_COLUMNS]
+
+
 def covered_bases(stretches: pd.DataFrame) -> Dict[str, int]:
     """Covered bases per contig: the total length of its stretches."""
     if stretches is None or not len(stretches):
@@ -176,6 +198,23 @@ def target_depth(bed_df: pd.DataFrame):
         return None
     length = target_length(bed_df).sum()
     return float(bed_df["bases"].sum() / length) if length > 0 else None
+
+
+def panel_depth(sample_dir, bed_df: pd.DataFrame):
+    """Mean depth over the panel, each base once (overlapping rows merged), from the sample's
+    UNION_FILE; without it (a folder from before batch 8), the row sum ``target_depth``."""
+    path = os.path.join(os.fspath(sample_dir), UNION_FILE)
+    if os.path.exists(path):
+        try:
+            union = pd.read_csv(path, dtype={"chrom": str})
+            length = float((union["end"] - union["start"]).sum())
+            if length > 0:
+                return float(union["bases"].sum() / length)
+        except Exception as e:
+            logging.getLogger("robin.target").warning(
+                f"Could not read {path} ({e}); the panel depth falls back to the row sum"
+            )
+    return target_depth(bed_df)
 
 
 def contig_length(cov_df: pd.DataFrame) -> pd.Series:

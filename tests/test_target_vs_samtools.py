@@ -20,7 +20,8 @@ import pandas as pd
 import pytest
 
 from target_fixtures import (
-    CONTIGS, SAMPLE, bam_records, samtools_reference, write_bams, write_panel,
+    CONTIGS, MERGED_PANEL, SAMPLE, bam_records, samtools_merged_depth, samtools_reference,
+    write_bams, write_panel,
 )
 from robin.analysis import target_analysis as ta_mod
 from robin.analysis.bam_preprocessor import process_bam_reads
@@ -117,6 +118,14 @@ def read_back(work) -> Dict:
     target_bam = os.path.join(sd, "target.bam")
     if os.path.exists(target_bam):
         out["target_bam"] = bam_records(target_bam)
+    # Batch 8: the panel's summary depth, through the readers' shared helper.
+    out["panel_depth"] = None
+    try:
+        from robin.analysis.target_coverage import panel_depth
+    except ImportError:
+        panel_depth = None
+    if panel_depth is not None and os.path.exists(bed_path):
+        out["panel_depth"] = panel_depth(sd, pd.read_csv(bed_path))
     return out
 
 
@@ -163,9 +172,18 @@ def _run(tmp_path_factory, k, way):
             mp.setattr(TargetAnalysis, "_find_target_bed", lambda self, p: panel)
             bams, merged = write_bams(str(d), k)
             ref = samtools_reference(merged, panel)
+            ref["panel_depth"] = samtools_merged_depth(merged, MERGED_PANEL, str(d))
             robin = run_robin(str(d / "work"), bams, way, panel)
         _RUNS[(k, way)] = (robin, ref)
     return _RUNS[(k, way)]
+
+
+@pytest.mark.parametrize("way", WAYS)
+@pytest.mark.parametrize("k", [1, 2, 4])
+def test_panel_depth_matches_samtools_over_the_merged_panel(tmp_path_factory, k, way):
+    # Batch 8, U1: each base of the panel counts once (GENE_A and GENE_B overlap).
+    robin, ref = _run(tmp_path_factory, k, way)
+    assert _close(robin["panel_depth"], ref["panel_depth"]), (robin["panel_depth"], ref["panel_depth"])
 
 
 @pytest.mark.parametrize("way", WAYS)

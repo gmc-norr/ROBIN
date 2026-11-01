@@ -1171,9 +1171,9 @@ def _extract_coverage_data(sample_dir: Path) -> Dict[str, Any]:
                 bed_df = pd.read_csv(bed_cov)
 
                 # Mean depth over the targets (same helper as the coverage component)
-                from robin.analysis.target_coverage import target_depth
+                from robin.analysis.target_coverage import panel_depth
 
-                target_cov_v = target_depth(bed_df)
+                target_cov_v = panel_depth(bed_cov.parent, bed_df)
                 if target_cov_v is not None:
                     coverage_data["target_coverage"] = f"{target_cov_v:.2f}x"
 

@@ -21,7 +21,7 @@ import logging
 from robin.analysis.target_coverage import (
     covered_bases_known,
     global_depth,
-    target_depth,
+    panel_depth,
     target_length,
     with_target_depth,
 )
@@ -75,7 +75,7 @@ class CoverageSection(ReportSection):
             # Mean depth over the genome and over the targets (step 6: the global
             # number was covered bases / genome length, shown as if it were depth)
             global_coverage = global_depth(self.cov_df_main) or 0.0
-            target_coverage = target_depth(self.bedcov_df_main) or 0.0
+            target_coverage = panel_depth(output_dir, self.bedcov_df_main) or 0.0
 
             # Set coverage summary data
             self.coverage_data = {

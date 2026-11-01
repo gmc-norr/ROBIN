@@ -14,7 +14,9 @@ import pandas as pd
 import pysam
 import pytest
 
-from target_fixtures import CONTIGS, SAMPLE, samtools_reference, write_bams, write_panel
+from target_fixtures import (
+    CONTIGS, MERGED_PANEL, SAMPLE, samtools_merged_depth, samtools_reference, write_bams, write_panel,
+)
 from robin.analysis.target_analysis import TargetAnalysis
 
 import robin
@@ -34,9 +36,9 @@ def sample(tmp_path, monkeypatch):
         ta.process_file_with_staging(bam, {"sample_id": SAMPLE})
         ta.accumulate_staged_files(SAMPLE, force=True)
     ref = samtools_reference(merged, panel)
-    bases = sum(v[0] for v in ref["targets"].values())
-    length = sum(end - start for _, start, end, _ in ref["targets"])
-    return work / SAMPLE, ref, bases / length
+    # Batch 8: the target depth is samtools over the panel with its overlapping rows merged
+    # (each base once); it was the row sum, which counts GENE_A/GENE_B's overlap twice.
+    return work / SAMPLE, ref, samtools_merged_depth(merged, MERGED_PANEL, str(tmp_path))
 
 
 def _report_section(sample_dir):
