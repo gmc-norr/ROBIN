@@ -50,3 +50,11 @@ Probe: `scratchpad/b7b/probe_unreadable.py`.
 - `robin.yml` and `pyproject.toml` are unchanged.
 
 **Fail:** any one; then fix and re-run, or report it.
+
+## Result (2026-11-01, on `97dd97e`): supported
+
+- On `287172f`'s code, the 7 new test items failed and the control passed. Among them, a read error part-way through the second pass had silently lost a whole fusion (GENEG-GENEH) from the CSV.
+- After the fix, all pass.
+- Mutation check: F1–F5 caught; the no-op control survived (351 passed).
+- Full suite: 634 passed. `robin.yml` and `pyproject.toml` are unchanged.
+- The batch was done and checked by the controller, with no agent and no external review (the user asked to push once it was done).
