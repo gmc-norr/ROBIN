@@ -155,3 +155,21 @@ Gate D:
 4. *Fresh output:* in this commit's message.
 
 Differences from the plan, each ledgered: Ruling B (two `is True` assertions in `tests/test_mgmt_rscript.py` pinned the METH-8 bug and are now `is False`); Ruling C (F1 for the 5 job types whose error name is the job type passes on `standard` on `92c7c00`, where that bug isn't); Ruling E (a fail-only filed error stays in the context's errors; the GUI's list is built from failure events); Ruling F (the non-Ray runner applies the fail-only rule to crashes, as Ray does); Ruling G (the non-Ray runner counts only the errors a job filed itself); Ruling H (MGMT also fails on an import error or a BAM sort failure); Ruling I (the methods text also states the 4-read breakpoint rule the report applies); Ruling J (a failed fusion build still writes the step's other outputs and is rebuilt next run). The SnpSift version probe before each run (log-only) is gone.
+
+## Final review's fixes — locked before code (2026-11-01)
+
+The final review (fresh, read-only, on `11eb191`; `/home/parlar_ai/robin-batch3-run/final-review-7.md`) found no Critical, 2 Important and 12 Minor issues. Locked before any fix:
+
+- **Fixed in code, each with a test that fails on `11eb191` and passes after:**
+  - **I1:** the fusion report keeps a state per candidate type (target panel, genome-wide). The summary's target-panel sentence says the results could not be read when the target-panel pickle is unreadable, or missing while its candidate CSV has rows (including when only that build raised); never "No fusion networks identified within the target panel." in those cases. Tests: the review's three P4 cases (missing, unreadable, only the target-panel build raised, the last through the real writer).
+  - **I2:** a VCF with no status line (`not_recorded`) that holds pathogenic rows no longer says "could not be assessed"; it says the status was not recorded and the variants listed carry ClinVar annotations. With no rows the current sentence stays.
+  - **M1:** `publish_failures` advances `last_seq` per event; one bad event or failing send is logged and doesn't block the rest.
+  - **M2:** `ERROR_UPDATE` and forwarded worker messages go out at a priority the launcher neither drops nor merges (the drop and merge rules measured on `GUILauncher.send_update` first).
+  - **M3:** events lost from the 200-event log between two polls are logged, and the GUI gets one line saying how many were not shown.
+  - **M11:** the `##ROBIN_ClinVar` line goes right after `##fileformat=` wherever that line is (first if there is none).
+  - **M12:** one classifier set (`CLASSIFICATION_TYPES`); no new test (a refactor; the existing ones cover it).
+  - **M10 (tests only):** in `--no-use-ray`, a handler that files an error and raises files it once; a failed job triggers nothing. Each must be shown caught by a mutant.
+- **Records only:** M4 (a crashed job's worker messages go with that worker's next job, or never), M6 (the non-Ray runner never marks a submission fail-only: the CHANGELOG sentence goes, Ruling F is moot), M7 ("only `target` has one" is the `standard` case), M8 (the GUI's fusion panel still says "No fusion data available": listed as not done), M9 (a BAM with no reads is now a failed CNV job).
+- **Deferred:** M5, the legacy retry that runs a raising handler twice, is JOB-3 (step 8).
+
+**Pass, all of:** each code fix's test fails on `11eb191` and passes after; the mutation check, extended with one mutant per code fix and per M10 case, catches every mutant, and its no-op control survives, on the fixes' commit; the full suite passes; the batch-7 tests' old-code run changes only by the new tests. **Fail:** any one; then fix and re-run, or report it.
