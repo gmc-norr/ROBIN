@@ -45,6 +45,7 @@ from robin.fusion_status import (  # noqa: E402
     STATE_FOUND,
     STATE_NONE,
     candidate_type_state,
+    earlier_result_note,
     status_message,
 )
 
@@ -2736,6 +2737,16 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
         },
     }
 
+    def _show_earlier_result_note(section: str, note: Optional[str]) -> None:
+        """Under a section's candidates: its latest build failed, these are from an earlier run."""
+        if not note:
+            return
+        try:
+            with state[section]["status_container"].classes("w-full"):
+                ui.label(note).classes("text-orange-700 text-sm")
+        except Exception:
+            pass
+
     def _handle_gene_pair_selection(section: str, gene_pair: List[str], data: Dict[str, Any]) -> None:
         """Handle gene pair selection and update visualization."""
         try:
@@ -2811,6 +2822,9 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             g_state = candidate_type_state(
                 sample_dir, "all", pickle_read=(g is not None, _has_candidates(g))
             )
+            # Candidates from an earlier run, the latest build having failed: a line to show.
+            t_note = earlier_result_note(sample_dir, "master", t_state)
+            g_note = earlier_result_note(sample_dir, "all", g_state)
 
             # Master BED CSV loading has been deprecated - the table is no longer displayed in the GUI
             # The Parquet file (master_bed_candidates.parquet) is still used for BED generation
@@ -2931,12 +2945,14 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                     "mtime": target_mtime,
                     "data_hash": target_data_hash,
                     "state": t_state,
+                    "note": t_note,
                 },
                 "genome": {
                     "data": g,
                     "mtime": genome_mtime,
                     "data_hash": genome_data_hash,
                     "state": g_state,
+                    "note": g_note,
                 },
                 "master_bed": {
                     "data": master_bed_df,
@@ -2969,6 +2985,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             target_data_hash = target_data.get("data_hash")
             
             target_state = target_data.get("state")
+            target_note = target_data.get("note")
 
             # Nothing to show: not run, or the results could not be read (M8)
             if t is None or target_state not in (STATE_FOUND, STATE_NONE):
@@ -3012,11 +3029,13 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             elif t is not None and (
                 target_mtime != state["target"].get("mtime")
                 or target_state != state["target"].get("fusion_state")
+                or target_note != state["target"].get("fusion_note")
             ):
                 state["target"]["data"] = t
                 state["target"]["mtime"] = target_mtime
                 state["target"]["data_hash"] = target_data_hash
                 state["target"]["fusion_state"] = target_state
+                state["target"]["fusion_note"] = target_note
                 
                 # summary
                 try:
@@ -3095,6 +3114,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                         ui.label(NONE_FOUND_MESSAGE).classes("text-gray-600 text-sm")
                         ui.label("(No validated fusion pairs found in target panel)").classes("text-gray-500 text-xs")
                 
+                # A line under the candidates when they are from an earlier run
+                _show_earlier_result_note("target", target_note)
                 # Restore selected gene pair if it exists (for both cases above)
                 if state["target"]["selected_gene_pair"] and state["target"]["dropdown"]:
                     try:
@@ -3139,6 +3160,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                         ui.label(NONE_FOUND_MESSAGE).classes("text-gray-600 text-sm")
                         ui.label("(No validated fusion pairs found in target panel)").classes("text-gray-500 text-xs")
                 
+                # A line under the candidates when they are from an earlier run
+                _show_earlier_result_note("target", target_note)
                 # Restore selected gene pair if it exists (for both cases above)
                 if state["target"]["selected_gene_pair"] and state["target"]["dropdown"]:
                     try:
@@ -3153,6 +3176,7 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             logging.info(f"[Fusion] Genome-wide update check: g={g is not None}, mtime_changed={genome_mtime != state['genome'].get('mtime')}")
             
             genome_state = genome_data.get("state")
+            genome_note = genome_data.get("note")
 
             # Nothing to show: not run, or the results could not be read (M8)
             if g is None or genome_state not in (STATE_FOUND, STATE_NONE):
@@ -3183,11 +3207,13 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
             elif g is not None and (
                 genome_mtime != state["genome"].get("mtime")
                 or genome_state != state["genome"].get("fusion_state")
+                or genome_note != state["genome"].get("fusion_note")
             ):
                 state["genome"]["data"] = g
                 state["genome"]["mtime"] = genome_mtime
                 state["genome"]["data_hash"] = genome_data_hash
                 state["genome"]["fusion_state"] = genome_state
+                state["genome"]["fusion_note"] = genome_note
                 
                 # summary
                 try:
@@ -3264,6 +3290,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                         ui.label(NONE_FOUND_MESSAGE).classes("text-gray-600 text-sm")
                         ui.label("(No validated fusion pairs found genome-wide)").classes("text-gray-500 text-xs")
                 
+                # A line under the candidates when they are from an earlier run
+                _show_earlier_result_note("genome", genome_note)
                 # Restore selected gene pair if it exists (for both cases above)
                 if state["genome"]["selected_gene_pair"] and state["genome"]["dropdown"]:
                     try:
@@ -3308,6 +3336,8 @@ def add_fusion_section(launcher: Any, sample_dir: Path) -> None:
                         ui.label(NONE_FOUND_MESSAGE).classes("text-gray-600 text-sm")
                         ui.label("(No validated fusion pairs found genome-wide)").classes("text-gray-500 text-xs")
                 
+                # A line under the candidates when they are from an earlier run
+                _show_earlier_result_note("genome", genome_note)
                 # Restore selected gene pair if it exists (for both cases above)
                 if state["genome"]["selected_gene_pair"] and state["genome"]["dropdown"]:
                     try:

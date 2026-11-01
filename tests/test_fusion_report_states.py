@@ -542,6 +542,84 @@ def test_i1a_a_good_build_that_finds_nothing_after_a_failed_one_reads_as_none_fo
     assert UNREADABLE not in body and "could not be read" not in summary
 
 
+TARGET_EARLIER = "The latest target-panel fusion build failed; these results are from an earlier run."
+GENOME_EARLIER = "The latest genome-wide fusion build failed; these results are from an earlier run."
+
+
+def _target_filter_raises(real_iter):
+    def target_filter_raises(candidate_type, *args, **kwargs):
+        if candidate_type == "target_candidates":
+            raise RuntimeError("synthetic target-panel filter crash")
+        return real_iter(candidate_type, *args, **kwargs)
+    return target_filter_raises
+
+
+def test_earlier_candidates_after_a_failed_build_say_so(tmp_path, monkeypatch):
+    # A good build with candidates, then a build that fails for the target panel, then a good
+    # one: through the real writer.
+    monkeypatch.setattr(fusion_work, "_ensure_gene_regions_loaded", lambda panel: None)
+    real_iter = fusion_work._iter_fusion_candidates_parquet_batches
+    d = tmp_path / SAMPLE
+    found = "Found 1 fusion networks within the target panel"
+
+    _stage(tmp_path, _rows(4))
+    assert _accumulate(tmp_path)["status"] == "success"
+    _, summary = _report_text(d)
+    assert found in summary and TARGET_EARLIER not in summary
+
+    monkeypatch.setattr(fusion_work, "_iter_fusion_candidates_parquet_batches",
+                        _target_filter_raises(real_iter))
+    _stage(tmp_path, _rows(1, "GENEC", "GENED", prefix="x"), n=2)
+    assert _accumulate(tmp_path)["status"] == "error"
+    _, summary = _report_text(d)
+    assert found in summary  # the earlier candidates still show
+    assert TARGET_EARLIER in summary
+    assert GENOME_EARLIER not in summary  # the genome-wide build worked
+
+    monkeypatch.setattr(fusion_work, "_iter_fusion_candidates_parquet_batches", real_iter)
+    _stage(tmp_path, _rows(1, "GENEE", "GENEF", prefix="y"), n=3)
+    assert _accumulate(tmp_path)["status"] == "success"
+    _, summary = _report_text(d)
+    assert found in summary and TARGET_EARLIER not in summary
+
+
+def test_earlier_result_note_from_the_shared_helper(tmp_path):
+    from robin import fusion_status as fs
+
+    d = _sample_dir(tmp_path)
+    _write_pickles(d, _rows(4))
+    states = fs.fusion_states(str(d))
+    assert (states["master_note"], states["all_note"]) == (None, None)
+    Path(fs.failed_build_marker(str(d / "fusion_candidates_all_processed.pkl"))).write_text("x\n")
+    states = fs.fusion_states(str(d))
+    assert (states["master_state"], states["all_state"]) == (fs.STATE_FOUND, fs.STATE_FOUND)
+    assert (states["master_note"], states["all_note"]) == (None, GENOME_EARLIER)
+    assert fs.earlier_result_note(str(d), "all", fs.STATE_FOUND) == GENOME_EARLIER
+    # no note where the record already makes the type "could not be read"
+    assert fs.earlier_result_note(str(d), "all", fs.STATE_UNREADABLE) is None
+    _, summary = _report_text(d)
+    assert GENOME_EARLIER in summary and TARGET_EARLIER not in summary
+
+
+def test_earlier_result_note_in_the_gui_panel():
+    import ast
+
+    tree = _gui_fusion_tree()
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    load_calls = [
+        ast.unparse(c) for c in ast.walk(fns["_load_fusion_data"])
+        if isinstance(c, ast.Call) and getattr(c.func, "id", None) == "earlier_result_note"
+    ]
+    assert any("'master'" in c for c in load_calls) and any("'all'" in c for c in load_calls), load_calls
+    shown = [
+        ast.unparse(c) for c in ast.walk(fns["_update_fusion_ui"])
+        if isinstance(c, ast.Call) and getattr(c.func, "id", None) == "_show_earlier_result_note"
+    ]
+    # each section shows its note wherever it redraws its candidates (two paths each)
+    assert sum("'target'" in c for c in shown) == 2, shown
+    assert sum("'genome'" in c for c in shown) == 2, shown
+
+
 def test_i1b_body_says_which_results_could_not_be_read(tmp_path):
     # (b) The target panel's results can't be read; the genome-wide ones hold candidates
     # (3 reads) but none at a validated breakpoint (4 reads), so no table is drawn.

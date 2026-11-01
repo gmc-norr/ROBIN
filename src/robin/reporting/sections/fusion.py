@@ -4,9 +4,7 @@ fusion.py
 This module contains the fusion analysis section of the report.
 """
 
-import os
 import logging
-import pickle
 from reportlab.platypus import Paragraph, Spacer, Table, TableStyle
 from reportlab.lib import colors
 from reportlab.lib.units import inch
@@ -460,6 +458,9 @@ class FusionSection(ReportSection):
             summary_text.append(UNREADABLE_TEXT)
         else:
             summary_text.append(NOT_RUN_TEXT)
+        # Candidates from an earlier run, the latest build having failed: say so.
+        if fusion_data.get("master_note"):
+            summary_text.append(f"<br/>{fusion_data['master_note']}")
 
         if all_networks and len(all_networks) > len(master_networks):
             summary_text.append(
@@ -471,6 +472,8 @@ class FusionSection(ReportSection):
         ):
             # (When the target panel's results are missing too, the sentence above covers both.)
             summary_text.append(f"<br/>{GENOME_WIDE_UNREADABLE_SUMMARY_TEXT}")
+        if fusion_data.get("all_note"):
+            summary_text.append(f"<br/>{fusion_data['all_note']}")
 
         summary_paragraph = "\n".join(summary_text)
 

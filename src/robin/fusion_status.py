@@ -51,9 +51,31 @@ _MESSAGES = {
 }
 
 
+# Shown beside a type's candidates when they come from an earlier run: the pickle still holds
+# an earlier good build's candidates and the latest build of that type failed.
+_EARLIER_RESULT_NOTES = {
+    "master": "The latest target-panel fusion build failed; these results are from an earlier run.",
+    "all": "The latest genome-wide fusion build failed; these results are from an earlier run.",
+}
+
+
 def failed_build_marker(pickle_path: Any) -> str:
     """The record the writer leaves next to a pickle whose last build failed."""
     return os.fspath(pickle_path) + FAILED_BUILD_SUFFIX
+
+
+def earlier_result_note(sample_dir: Any, kind: str, state: Optional[str]) -> Optional[str]:
+    """The line to show beside a type's candidates when they are from an earlier run, else None.
+
+    That is a type whose state is found while its latest build failed (its ``.failed`` record
+    is there). Without candidates the record already makes the type "could not be read".
+    """
+    if state != STATE_FOUND:
+        return None
+    path = os.path.join(os.fspath(sample_dir), PICKLE_NAMES[kind])
+    if os.path.exists(failed_build_marker(path)):
+        return _EARLIER_RESULT_NOTES[kind]
+    return None
 
 
 def read_processed_pickle(path: Any) -> Tuple[pd.DataFrame, bool]:
@@ -146,7 +168,8 @@ def fusion_states(sample_dir: Any) -> Dict[str, Any]:
 
     Keys: ``master_candidates``/``all_candidates`` (the good-pair frame, None when the pickle
     could not be read or is missing), ``master_path``/``all_path``, ``master_state``/
-    ``all_state``, ``state`` and ``unreadable`` (pickles that exist but can't be read).
+    ``all_state``, ``master_note``/``all_note`` (``earlier_result_note``), ``state`` and
+    ``unreadable`` (pickles that exist but can't be read).
     """
     sample_dir = os.fspath(sample_dir)
     out: Dict[str, Any] = {"unreadable": []}
@@ -163,6 +186,7 @@ def fusion_states(sample_dir: Any) -> Dict[str, Any]:
                 out["unreadable"].append(path)
             pickle_read = (readable, readable and not candidates.empty)
         out[f"{kind}_state"] = candidate_type_state(sample_dir, kind, pickle_read)
+        out[f"{kind}_note"] = earlier_result_note(sample_dir, kind, out[f"{kind}_state"])
     out["state"] = sample_state(out["master_state"], out["all_state"])
     return out
 
