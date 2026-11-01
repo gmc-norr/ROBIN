@@ -35,6 +35,7 @@ import pysam
 from robin.logging_config import get_job_logger
 from robin.analysis.snp_processing import build_snp_display_data
 from robin.analysis.target_coverage import (
+    aligned_blocks,
     contig_totals,
     covered_bases,
     covered_stretches,
@@ -931,9 +932,11 @@ class TargetAnalysis:
             
             # Step 4: This BAM's totals, which add up across BAMs (no accumulated data loaded)
             logger.info("Extracting coverage data...")
-            newcovdf = contig_totals(file_path)
+            blocks = aligned_blocks(file_path)  # one pass gives contig bases and stretches
+            newcovdf = contig_totals(file_path, blocks)
             bedcovdf = target_bases(file_path, self.bedfile)
-            stretches = covered_stretches(file_path)
+            stretches = covered_stretches(file_path, blocks)
+            del blocks
 
             target_result.processing_steps.append("coverage_extracted")
             logger.info(
@@ -1712,12 +1715,11 @@ class TargetAnalysis:
                 f.write(f"{chrom}\t{start}\t{end}\n")
         return out_path
 
-    def _write_batch_bam(
-        self, sample_id: str, sample_dir: str, batch_dir: str, source_bams: List[str], first_counter: str
-    ) -> Optional[str]:
+    def _write_batch_bam(self, sample_id: str, batch_dir: str, source_bams: List[str]) -> Optional[str]:
         """Every source BAM's records in the extraction regions (samtools view -L), merged
-        into one batch BAM. It is written in the batch folder and renamed into the sample
-        folder, so finalize never sees half a file (TGT-1: every BAM, from its arrival)."""
+        into one indexed BAM in the batch folder (TGT-1: every BAM, from its arrival). The
+        commit moves it into the sample folder, where finalize looks, only once the
+        batch's coverage is written; so target.bam never gets reads the coverage misses."""
         if not source_bams:
             return None
         regions = self._extraction_regions(sample_id, os.path.join(batch_dir, "regions.bed"))
@@ -1732,10 +1734,7 @@ class TargetAnalysis:
         else:
             os.replace(parts[0], tmp)
         pysam.index(tmp)
-        final = os.path.join(sample_dir, f"batch_{first_counter}_{uuid.uuid4().hex[:8]}.bam")
-        os.replace(f"{tmp}.bai", f"{final}.bai")
-        os.replace(tmp, final)
-        return final
+        return tmp
 
     def _commit_batch(
         self,
@@ -1941,16 +1940,16 @@ class TargetAnalysis:
                     ["chrom", "startpos", "endpos", "name"], as_index=False
                 ).agg({"reads": "sum"})
 
-            batch_bam_error = None
+            batch_bam, batch_bam_error = None, None
             try:
-                self._write_batch_bam(
-                    sample_id, sample_dir, batch_dir, list(dict.fromkeys(source_bams)), used[0]
-                )
+                batch_bam = self._write_batch_bam(sample_id, batch_dir, list(dict.fromkeys(source_bams)))
             except Exception as e:
                 batch_bam_error = str(e)
                 logger.error(f"Could not write the batch BAM for {sample_id}; target.bam will miss these reads: {e}")
 
-            # --- Locked: read the totals, add this batch, write every file ---
+            # --- Locked: read the totals, add this batch, write every file; then move the
+            # batch BAM to where finalize looks. If the commit fails, the batch BAM stays in
+            # the batch folder with the staged files: the coverage and target.bam both miss it.
             with FileLock(lock_file, timeout=120.0):
                 summary = self._commit_batch(
                     sample_dir,
@@ -1961,6 +1960,10 @@ class TargetAnalysis:
                     batch_reads,
                     logger,
                 )
+                if batch_bam:
+                    final = os.path.join(sample_dir, f"batch_{used[0]}_{uuid.uuid4().hex[:8]}.bam")
+                    os.replace(f"{batch_bam}.bai", f"{final}.bai")
+                    os.replace(batch_bam, final)  # finalize globs *.bam: the index is there first
                 shutil.rmtree(batch_dir, ignore_errors=True)
 
             gc.collect()
@@ -2518,26 +2521,64 @@ def _merge_into_target_bam(inputs: List[str], target_bam_path: str, merged_names
     folder = os.path.dirname(target_bam_path)
     tag = uuid.uuid4().hex[:8]
     tmp_merged = os.path.join(folder, f".target_merge_{tag}.bam")
+    tmp_header = os.path.join(folder, f".target_header_{tag}.sam")
     tmp_final = os.path.join(folder, f".target_final_{tag}.bam")
     try:
         pysam.merge("-f", "-o", tmp_merged, *inputs)
         with pysam.AlignmentFile(tmp_merged, "rb") as src:
             header = src.header.to_dict()
-            header["CO"] = [c for c in header.get("CO", []) if not c.startswith(_MERGED_TAG)] + [
-                f"{_MERGED_TAG}{name}" for name in merged_names
-            ]
-            with pysam.AlignmentFile(tmp_final, "wb", header=header) as out:
-                for record in src.fetch(until_eof=True):
-                    out.write(record)
+        header["CO"] = [c for c in header.get("CO", []) if not c.startswith(_MERGED_TAG)] + [
+            f"{_MERGED_TAG}{name}" for name in merged_names
+        ]
+        with open(tmp_header, "w") as f:
+            f.write(str(pysam.AlignmentHeader.from_dict(header)))
+        # reheader copies the compressed records as they are: no second decode and encode.
+        pysam.reheader("-P", tmp_header, tmp_merged, save_stdout=tmp_final)
         pysam.index(tmp_final)
         os.replace(tmp_final, target_bam_path)
         os.replace(f"{tmp_final}.bai", f"{target_bam_path}.bai")
     finally:
-        for path in (tmp_merged, tmp_final, f"{tmp_final}.bai"):
+        for path in (tmp_merged, tmp_header, tmp_final, f"{tmp_final}.bai"):
             try:
                 os.remove(path)
             except FileNotFoundError:
                 pass
+
+
+def _reindex_if_stale(bam_path: str, logger) -> None:
+    """Index ``bam_path`` again when its index is missing or older than it: a finalize
+    that replaced target.bam but failed to replace the index leaves the old one, and
+    region fetches through it return the wrong records."""
+    if not os.path.exists(bam_path):
+        return
+    bai = f"{bam_path}.bai"
+    if os.path.exists(bai) and os.stat(bai).st_mtime_ns >= os.stat(bam_path).st_mtime_ns:
+        return
+    logger.warning(f"{os.path.basename(bai)} is missing or older than its BAM; indexing again")
+    tmp = os.path.join(os.path.dirname(bam_path), f".reindex_{uuid.uuid4().hex[:8]}.bai")
+    try:
+        pysam.index(bam_path, tmp)
+        os.replace(tmp, bai)
+    finally:
+        try:
+            os.remove(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def _follows_target_bam(path: str, target_bam_path: str) -> bool:
+    """True when ``path``, a BAM sorted from target.bam, holds target.bam's current records:
+    its header lists the same merged batches (a sort keeps the @CO lines), and it isn't
+    older than target.bam (for folders from before the list existed)."""
+    if not os.path.exists(target_bam_path):
+        return True
+    try:
+        return (
+            _merged_batch_names(path) == _merged_batch_names(target_bam_path)
+            and os.stat(path).st_mtime_ns >= os.stat(target_bam_path).st_mtime_ns
+        )
+    except Exception:
+        return False
 
 
 def finalize_accumulation_for_sample(
@@ -2592,10 +2633,14 @@ def finalize_accumulation_for_sample(
         
         # Merge every new batch BAM into target.bam, keeping the reads already in it
         # (TGT-1). target.bam's header lists the batch BAMs merged into it, so one left
-        # behind by a crash after the merge is not merged twice.
+        # behind by a crash after the merge is not merged twice. The merge has its own
+        # lock, not the accumulation's: a batch BAM appears here only after its commit, by
+        # rename, so the glob below is a safe snapshot, and a long merge never makes a
+        # worker's commit time out.
         target_bam_path = os.path.join(sample_output_dir, "target.bam")
-        lock_file = target_analysis._get_lock_file(sample_id, "accumulation")
+        lock_file = target_analysis._get_lock_file(sample_id, "finalize")
         with FileLock(lock_file, timeout=300.0):
+            _reindex_if_stale(target_bam_path, logger)
             merged_before = _merged_batch_names(target_bam_path)
             batch_bams = sorted(glob.glob(os.path.join(sample_output_dir, "batch_*.bam")))
             new_bams = [b for b in batch_bams if os.path.basename(b) not in merged_before]
@@ -2617,6 +2662,10 @@ def finalize_accumulation_for_sample(
                         pass
                     except OSError as e:
                         logger.warning(f"Could not remove {os.path.basename(path)}: {e}")
+            # IGV and the per-gene variant check read igv_ready.bam: keep it in step.
+            if os.path.exists(os.path.join(sample_output_dir, "igv", "igv_ready.bam")):
+                if not ensure_sorted_igv_bam(sample_output_dir):
+                    logger.warning(f"Could not refresh igv_ready.bam for {sample_id}")
         return result
         
     except Exception as e:
@@ -2712,7 +2761,8 @@ def ensure_sorted_igv_bam(
     Preferred output: ``sample_dir/igv/igv_ready.bam`` (+ .bai).
     Backward compat: if an existing Clair3-sorted BAM is present, reuse it.
     If neither exists, sort and index ``sample_dir/target.bam`` into
-    ``sample_dir/igv/igv_ready.bam``.
+    ``sample_dir/igv/igv_ready.bam``. An existing IGV or Clair3 BAM is used only while
+    it holds target.bam's current records; after a finalize adds reads it is rebuilt.
 
     Args:
         sample_dir: Path to the sample output directory.
@@ -2732,43 +2782,69 @@ def ensure_sorted_igv_bam(
         # Preferred IGV-ready path
         out_bam = os.path.join(igv_dir, "igv_ready.bam")
         out_bai = f"{out_bam}.bai"
-
-        # Check if files exist and force_regenerate is not set
-        if not force_regenerate and os.path.exists(out_bam) and os.path.exists(out_bai):
-            logger.info(f"IGV BAM already present: {out_bam}")
-            return out_bam
-
-        # Backward compatibility: reuse Clair3-sorted BAM if present
-        legacy_bams = [
-            os.path.join(clair_dir, "sorted_targets_exceeding_rerun.bam"),
-            os.path.join(clair_dir, "sorted_targets_exceeding.bam"),
-        ]
-        for legacy in legacy_bams:
-            if os.path.exists(legacy) and os.path.exists(f"{legacy}.bai"):
-                logger.info(f"Reusing legacy Clair3 BAM for IGV: {legacy}")
-                # Optionally copy to IGV location to standardize
-                try:
-                    import shutil
-
-                    shutil.copy2(legacy, out_bam)
-                    shutil.copy2(f"{legacy}.bai", out_bai)
-                    return out_bam
-                except Exception:
-                    # Fallback: just return legacy path
-                    return legacy
-
         in_bam = os.path.join(sample_dir, "target.bam")
-        if not os.path.exists(in_bam):
-            logger.warning(
-                f"target.bam not found in {sample_dir}; cannot build IGV BAM"
-            )
-            return ""
 
-        logger.info(f"Sorting BAM for IGV: {in_bam} -> {out_bam}")
-        pysam.sort(f"-@{threads}", "-o", out_bam, in_bam)
-        pysam.index(out_bam, out_bai)
-        logger.info(f"IGV BAM ready: {out_bam}")
-        return out_bam
+        def install(bam: str, bai: str) -> None:
+            # Readers (IGV, the per-gene check) never see half a file.
+            os.replace(bai, out_bai)
+            os.replace(bam, out_bam)
+
+        # One builder at a time per sample, so a sort of an older target.bam can't
+        # replace one of the current target.bam after finalize checked it.
+        with FileLock(os.path.join(sample_dir, "_locks", "igv.lock"), timeout=600.0):
+            if (
+                not force_regenerate
+                and os.path.exists(out_bam)
+                and os.path.exists(out_bai)
+                and _follows_target_bam(out_bam, in_bam)
+            ):
+                logger.info(f"IGV BAM already present: {out_bam}")
+                return out_bam
+
+            tag = uuid.uuid4().hex[:8]
+            tmp_bam = os.path.join(igv_dir, f".igv_ready_{tag}.bam")
+            tmp_bai = f"{tmp_bam}.bai"
+            try:
+                # Backward compatibility: reuse Clair3-sorted BAM if present
+                legacy_bams = [
+                    os.path.join(clair_dir, "sorted_targets_exceeding_rerun.bam"),
+                    os.path.join(clair_dir, "sorted_targets_exceeding.bam"),
+                ]
+                for legacy in legacy_bams:
+                    if (
+                        os.path.exists(legacy)
+                        and os.path.exists(f"{legacy}.bai")
+                        and _follows_target_bam(legacy, in_bam)
+                    ):
+                        logger.info(f"Reusing legacy Clair3 BAM for IGV: {legacy}")
+                        # Optionally copy to IGV location to standardize
+                        try:
+                            shutil.copy2(legacy, tmp_bam)
+                            shutil.copy2(f"{legacy}.bai", tmp_bai)
+                            install(tmp_bam, tmp_bai)
+                            return out_bam
+                        except Exception:
+                            # Fallback: just return legacy path
+                            return legacy
+
+                if not os.path.exists(in_bam):
+                    logger.warning(
+                        f"target.bam not found in {sample_dir}; cannot build IGV BAM"
+                    )
+                    return ""
+
+                logger.info(f"Sorting BAM for IGV: {in_bam} -> {out_bam}")
+                pysam.sort(f"-@{threads}", "-o", tmp_bam, in_bam)
+                pysam.index(tmp_bam, tmp_bai)
+                install(tmp_bam, tmp_bai)
+                logger.info(f"IGV BAM ready: {out_bam}")
+                return out_bam
+            finally:
+                for path in (tmp_bam, tmp_bai):
+                    try:
+                        os.remove(path)
+                    except FileNotFoundError:
+                        pass
     except Exception as e:
         logger.error(f"Failed to create IGV BAM in {sample_dir}: {e}")
         return ""

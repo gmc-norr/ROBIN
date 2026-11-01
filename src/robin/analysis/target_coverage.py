@@ -12,7 +12,7 @@ samtools run once on all of a sample's reads (step 6 of the code review).
 import os
 import tempfile
 from io import StringIO
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -64,13 +64,31 @@ def _bedcov_j(bam_path: str, rows: List[Tuple[str, int, int, str]]) -> List[int]
     return [counts.get(r, 0) for r in rows]
 
 
-def contig_totals(bam_path: str) -> pd.DataFrame:
+def aligned_blocks(bam_path: str) -> Dict[str, np.ndarray]:
+    """Per contig, the aligned blocks (0-based start, end) of every record samtools counts:
+    deletions and reference skips split blocks; insertions and clips add none."""
+    blocks: Dict[str, List[Tuple[int, int]]] = {}
+    with pysam.AlignmentFile(bam_path, "rb") as bam:
+        for read in bam.fetch(until_eof=True):
+            if read.flag & _SKIP_FLAGS or read.reference_id < 0:
+                continue
+            blocks.setdefault(read.reference_name, []).extend(read.get_blocks())
+    return {chrom: np.asarray(pairs, dtype=np.int64).reshape(-1, 2) for chrom, pairs in blocks.items()}
+
+
+def contig_totals(bam_path: str, blocks: Optional[Dict[str, np.ndarray]] = None) -> pd.DataFrame:
     """Per contig: samtools coverage's #rname, startpos, endpos (1-based) and numreads, plus
-    ``bases``, the aligned bases (so mean depth = bases / contig length, exactly)."""
+    ``bases``, the aligned bases (so mean depth = bases / contig length, exactly). ``bases``
+    is the blocks' total length, which equals samtools bedcov -j over the whole contig (same
+    records, no deletions; measured equal at 12,000x, so bedcov doesn't cap depth)."""
+    if blocks is None:
+        blocks = aligned_blocks(bam_path)
     cov = pd.read_csv(StringIO(pysam.coverage(bam_path)), sep="\t")
     cov = cov[["#rname", "startpos", "endpos", "numreads"]].copy()
-    rows = [(str(r[0]), int(r[1]) - 1, int(r[2]), str(r[0])) for r in cov.itertuples(index=False)]
-    cov["bases"] = _bedcov_j(bam_path, rows)
+    cov["bases"] = [
+        int((blocks[c][:, 1] - blocks[c][:, 0]).sum()) if c in blocks else 0
+        for c in cov["#rname"].astype(str)
+    ]
     return cov[CONTIG_COLUMNS]
 
 
@@ -105,19 +123,11 @@ def _merged_frame(per_contig: Dict[str, Tuple[np.ndarray, np.ndarray]]) -> pd.Da
     return pd.concat(frames, ignore_index=True)[STRETCH_COLUMNS]
 
 
-def covered_stretches(bam_path: str) -> pd.DataFrame:
+def covered_stretches(bam_path: str, blocks: Optional[Dict[str, np.ndarray]] = None) -> pd.DataFrame:
     """The merged reference stretches that have at least one aligned base in this BAM."""
-    blocks: Dict[str, List[Tuple[int, int]]] = {}
-    with pysam.AlignmentFile(bam_path, "rb") as bam:
-        for read in bam.fetch(until_eof=True):
-            if read.flag & _SKIP_FLAGS or read.reference_id < 0:
-                continue
-            blocks.setdefault(read.reference_name, []).extend(read.get_blocks())
-    per_contig = {}
-    for chrom, pairs in blocks.items():
-        arr = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
-        per_contig[chrom] = (arr[:, 0], arr[:, 1])
-    return _merged_frame(per_contig)
+    if blocks is None:
+        blocks = aligned_blocks(bam_path)
+    return _merged_frame({chrom: (arr[:, 0], arr[:, 1]) for chrom, arr in blocks.items()})
 
 
 def union_stretches(frames: Iterable[pd.DataFrame]) -> pd.DataFrame:

@@ -119,7 +119,7 @@ def test_staging_writes_the_coverage_file_last(tmp_path, panel, monkeypatch):
             raise OSError("disk full")
 
     monkeypatch.setattr(ta_mod, "covered_stretches",
-                        lambda bam: FailingFrame({"chrom": [], "start": [], "end": []}))
+                        lambda bam, blocks=None: FailingFrame({"chrom": [], "start": [], "end": []}))
     bams, _ = write_bams(str(tmp_path), 1)
     work = tmp_path / "work"
     meta, _ = _analysis(work).process_file_with_staging(bams[0], {"sample_id": SAMPLE})

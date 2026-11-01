@@ -17,7 +17,10 @@ import pytest
 from target_fixtures import CONTIGS, SAMPLE, samtools_reference, write_bams, write_panel
 from robin.analysis.target_analysis import TargetAnalysis
 
-SRC = Path(__file__).resolve().parents[1] / "src" / "robin"
+import robin
+
+# The code the tests import (PYTHONPATH decides), not this checkout's src/.
+SRC = Path(robin.__file__).resolve().parent
 
 
 @pytest.fixture
