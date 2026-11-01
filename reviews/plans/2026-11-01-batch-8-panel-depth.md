@@ -68,3 +68,24 @@ The batch-6 tests (totals, target.bam, read counts, every run the same) pass on 
 - **Full suite:** 656 passed. `robin.yml` and `pyproject.toml` are unchanged.
 - **Shipped panels, through the code's own merging:** AML 1,180 rows → 910 regions (3.59% counted more than once), as measured before the lock; rCNS2 243 → 243.
 - **Not yet done:** the external review (Sol 6.1 / Astra), before the merge.
+
+## The external review's findings — locked before code (2026-11-01)
+
+The external review (Codex, `/home/parlar_ai/robin-batch3-run/review-requests/batch8-report-codex.md`) found 1 Critical and 2 Important. Each one can make the new number wrong without anyone seeing. Locked: fix the merged-panel number's part of each, so it is either right or unknown (row sum shown). The older parts go into the records.
+
+- **R1 (finding 1): a commit that fails part-way.** `bed_coverage_main.csv` is written, then writing the union file fails. The union file then misses that batch for good: 1.887× shown against samtools' 2.566×. Fix: the union file records the panel-row bases total it matches (`rows_bases`). The commit adds to it only when that equals the sample's current row total; otherwise the total is unknown and the file is removed. The readers use it only when it equals the row total beside it; otherwise they show the row sum.
+  - Test: 4 BAMs, the second commit fails writing the union file, the rest go normally. The shown number is the row sum and the union file is absent. (Today: 1.887.)
+  - Guard: the first commit fails the same way. The row sum shows, and the union file is absent (as today).
+- **R2 (finding 2): a panel changed mid-run.** Merged regions from two panels are added up as if one: 1.061× against 1.703×. Fix: a batch whose merged regions differ from the sample's union file, or from another BAM's in the same batch, makes the total unknown (file removed, row sum shown).
+  - Test: BAM 1 with `PANEL`, then the BED replaced by `PANEL_OVERLAPS`, then BAM 2. The union file is absent and the row sum shows. (Today: 1.061.)
+- **R3 (finding 3): an unreadable union part** drops its BAM's whole staged set, and the accumulation reports success. Fix: an unreadable union part counts as missing (the merged total becomes unknown); the BAM's other staged files are still used.
+  - Test: 2 BAMs staged, the first one's union part damaged. `files_processed` is 2, the union file is absent, and the row sum shows. (Today: 1, BAM 1 lost.)
+- **Records only (pre-existing, for step 8 with JOB-1/JOB-2):**
+  - The commit is not a transaction: a commit that fails part-way leaves its files at different generations, and its batch folder stranded.
+  - An unreadable mandatory staged file drops that BAM's set, deletes it, and still reports success.
+  - Readers don't take the lock, so during a commit they can see two generations. With R1 that shows the row sum for a moment, never a partial merged total.
+
+**Pass, all of:**
+- Each test fails on `c090998` and passes after; the guard passes on both.
+- One mutant per fix is caught, and the no-op control survives.
+- The full suite passes.
