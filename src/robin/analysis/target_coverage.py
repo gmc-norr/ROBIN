@@ -139,3 +139,58 @@ def covered_bases(stretches: pd.DataFrame) -> Dict[str, int]:
         return {}
     lengths = (stretches["end"] - stretches["start"]).groupby(stretches["chrom"]).sum()
     return {str(k): int(v) for k, v in lengths.items()}
+
+
+# --- Reading the sample's files (report and GUI) ---------------------------------
+
+
+def target_length(df: pd.DataFrame) -> pd.Series:
+    """Length of each 0-based, half-open BED row: end - start."""
+    return (df["endpos"] - df["startpos"]).astype(float)
+
+
+def with_target_depth(df: pd.DataFrame) -> pd.DataFrame:
+    """A copy with ``length`` and ``coverage`` (mean depth) recomputed from ``bases``,
+    so a file written with the old end - start + 1 length reads right too."""
+    out = df.copy()
+    out["length"] = target_length(out)
+    if "bases" in out.columns:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out["coverage"] = out["bases"] / out["length"].replace(0, np.nan)
+    return out
+
+
+def target_depth(bed_df: pd.DataFrame):
+    """Mean depth over all targets (aligned bases / target bases), or None."""
+    if bed_df is None or "bases" not in bed_df.columns or not len(bed_df):
+        return None
+    length = target_length(bed_df).sum()
+    return float(bed_df["bases"].sum() / length) if length > 0 else None
+
+
+def contig_length(cov_df: pd.DataFrame) -> pd.Series:
+    """Contig length from samtools coverage's 1-based startpos/endpos."""
+    if "startpos" in cov_df.columns:
+        return (cov_df["endpos"] - cov_df["startpos"] + 1).astype(float)
+    return cov_df["endpos"].astype(float)
+
+
+def global_depth(cov_df: pd.DataFrame):
+    """Mean depth over the genome (sum of mean depth x length / genome length), or None.
+    Exact for files written since step 6; samtools' printed mean depth before that."""
+    if cov_df is None or not {"meandepth", "endpos"} <= set(cov_df.columns) or not len(cov_df):
+        return None
+    length = contig_length(cov_df)
+    total = length.sum()
+    return float((cov_df["meandepth"] * length).sum() / total) if total > 0 else None
+
+
+def covered_bases_known(cov_df: pd.DataFrame) -> bool:
+    """Covered bases are exact only in files written since step 6 (they carry ``bases``);
+    before that they were per-BAM counts summed together."""
+    return (
+        cov_df is not None
+        and "bases" in cov_df.columns
+        and "covbases" in cov_df.columns
+        and bool(cov_df["covbases"].notna().all())
+    )

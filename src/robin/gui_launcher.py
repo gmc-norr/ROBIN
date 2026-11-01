@@ -5838,7 +5838,8 @@ class GUILauncher:
                                         if "length" in df.columns and "bases" in df.columns:
                                             df["coverage"] = df["bases"] / df["length"]
                                         elif "startpos" in df.columns and "endpos" in df.columns:
-                                            df["length"] = df["endpos"] - df["startpos"] + 1
+                                            from robin.analysis.target_coverage import target_length
+                                            df["length"] = target_length(df)
                                             if "bases" in df.columns:
                                                 df["coverage"] = df["bases"] / df["length"]
                                             else:

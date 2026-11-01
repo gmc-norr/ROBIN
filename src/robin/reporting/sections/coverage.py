@@ -18,6 +18,13 @@ matplotlib.use("Agg")
 import io
 import natsort
 import logging
+from robin.analysis.target_coverage import (
+    covered_bases_known,
+    global_depth,
+    target_depth,
+    target_length,
+    with_target_depth,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,17 +68,14 @@ class CoverageSection(ReportSection):
             self.bedcov_df_main = pd.read_csv(
                 os.path.join(output_dir, "bed_coverage_main.csv")
             )
-            self.target_coverage_df = pd.read_csv(
-                os.path.join(output_dir, "target_coverage.csv")
+            self.target_coverage_df = with_target_depth(
+                pd.read_csv(os.path.join(output_dir, "target_coverage.csv"))
             )
 
-            # Calculate global and target coverage
-            global_coverage = (
-                self.cov_df_main["covbases"].sum() / self.cov_df_main["endpos"].sum()
-            )
-            target_coverage = (
-                self.bedcov_df_main["bases"].sum() / self.bedcov_df_main["length"].sum()
-            )
+            # Mean depth over the genome and over the targets (step 6: the global
+            # number was covered bases / genome length, shown as if it were depth)
+            global_coverage = global_depth(self.cov_df_main) or 0.0
+            target_coverage = target_depth(self.bedcov_df_main) or 0.0
 
             # Set coverage summary data
             self.coverage_data = {
@@ -79,14 +83,16 @@ class CoverageSection(ReportSection):
                 "target_coverage": target_coverage,
             }
 
-            # Process chromosome-level data
+            # Process chromosome-level data. Covered bases are unknown (None) in a
+            # folder written before step 6, where they were summed per BAM.
+            breadth_known = covered_bases_known(self.cov_df_main)
             for _, row in self.cov_df_main.iterrows():
                 if str(row["#rname"]).startswith("chr"):  # Only process chromosome data
                     self.chromosome_data.append(
                         {
                             "name": row["#rname"],
                             "mean_coverage": row["meandepth"],
-                            "covered_bases": row["covbases"],
+                            "covered_bases": int(row["covbases"]) if breadth_known else None,
                             "total_bases": row["endpos"],
                         }
                     )
@@ -176,9 +182,7 @@ class CoverageSection(ReportSection):
                 plt.axis('off')
             else:
                 # Calculate target statistics
-                self.bedcov_df_main["length"] = (
-                    self.bedcov_df_main["endpos"] - self.bedcov_df_main["startpos"] + 1
-                )
+                self.bedcov_df_main["length"] = target_length(self.bedcov_df_main)
                 grouped = (
                     self.bedcov_df_main.groupby("chrom")
                     .agg({"bases": "sum", "length": "sum"})

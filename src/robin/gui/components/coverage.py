@@ -9,6 +9,13 @@ import os
 import natsort
 import numpy as np
 import pandas as pd
+from robin.analysis.target_coverage import (
+    contig_length,
+    global_depth,
+    target_depth,
+    target_length,
+    with_target_depth,
+)
 import logging
 
 try:
@@ -2510,9 +2517,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     
                     # Read the data
                     df = pd.read_csv(bed_cov)
-                    if "coverage" not in df.columns:
-                        df["length"] = (df["endpos"] - df["startpos"] + 1).astype(float)
-                        df["coverage"] = df["bases"] / df["length"]
+                    if "bases" in df.columns:
+                        df = with_target_depth(df)
                     
                     # Filter for the selected chromosome
                     chrom_data = df[df["chrom"].astype(str) == chromosome].copy()
@@ -6189,7 +6195,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     return mapping.get(s, 1000)
 
             bed_df = bed_df.copy()
-            bed_df["length"] = (bed_df["endpos"] - bed_df["startpos"] + 1).astype(float)
+            bed_df["length"] = target_length(bed_df)
             grouped = (
                 bed_df.groupby("chrom")
                 .agg({"bases": "sum", "length": "sum"})
@@ -6270,9 +6276,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     def _update_boxplot(bed_df: pd.DataFrame, panel_display_name: str = "Target Coverage") -> None:
         try:
             df = bed_df.copy()
-            if "coverage" not in df.columns:
-                df["length"] = (df["endpos"] - df["startpos"] + 1).astype(float)
-                df["coverage"] = df["bases"] / df["length"]
+            if "bases" in df.columns:
+                df = with_target_depth(df)
             # Normalize chrom to canonical form so "chr1" and "1" map to one category per chromosome
             chrom_str = df["chrom"].astype(str).str.strip()
             df["chrom"] = chrom_str.where(chrom_str.str.startswith("chr"), "chr" + chrom_str)
@@ -6436,9 +6441,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
     def _update_target_table(df: pd.DataFrame) -> None:
         try:
             dfx = df.copy()
-            if "coverage" not in dfx.columns:
-                dfx["length"] = (dfx["endpos"] - dfx["startpos"] + 1).astype(float)
-                dfx["coverage"] = dfx["bases"] / dfx["length"]
+            if "bases" in dfx.columns:
+                dfx = with_target_depth(dfx)
             dfx["coverage"] = dfx["coverage"].astype(float).round(2)
 
             # Compute outlier status using 2 SD method (matches Target Coverage Over Time plot)
@@ -6576,14 +6580,14 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             cov_df = pd.read_csv(cov_main)
                             # Backfill meandepth if missing
                             if "meandepth" not in cov_df.columns and {
-                                "covbases",
+                                "bases",
                                 "endpos",
                             }.issubset(set(cov_df.columns)):
                                 cov_df = cov_df.copy()
                                 with np.errstate(divide="ignore", invalid="ignore"):
                                     cov_df["meandepth"] = (
-                                        cov_df["covbases"]
-                                        / cov_df["endpos"].replace(0, np.nan)
+                                        cov_df["bases"]
+                                        / contig_length(cov_df).replace(0, np.nan)
                                     ).fillna(0)
                             state["cov_df"] = cov_df
                             state["cov_main_mtime"] = m  # only set on success
@@ -6654,25 +6658,9 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                     target_cov_v = None
                     enrich_v = None
                     if state.get("cov_df") is not None:
-                        cdf = state["cov_df"]
-                        if (
-                            "covbases" in cdf.columns
-                            and "endpos" in cdf.columns
-                            and cdf["endpos"].sum() > 0
-                        ):
-                            global_cov = float(cdf["covbases"].sum()) / float(
-                                cdf["endpos"].sum()
-                            )
+                        global_cov = global_depth(state["cov_df"])
                     if state.get("bed_df") is not None:
-                        bdf = state["bed_df"].copy()
-                        if "length" not in bdf.columns:
-                            bdf["length"] = (bdf["endpos"] - bdf["startpos"] + 1).astype(
-                                float
-                            )
-                        if bdf["length"].sum() > 0:
-                            target_cov_v = float(bdf["bases"].sum()) / float(
-                                bdf["length"].sum()
-                            )
+                        target_cov_v = target_depth(state["bed_df"])
                     if (
                         global_cov is not None
                         and target_cov_v is not None

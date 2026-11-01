@@ -1153,15 +1153,11 @@ def _extract_coverage_data(sample_dir: Path) -> Dict[str, Any]:
 
                 cov_df = pd.read_csv(cov_main)
 
-                # Calculate global coverage using the same formula as coverage component
-                if (
-                    "covbases" in cov_df.columns
-                    and "endpos" in cov_df.columns
-                    and cov_df["endpos"].sum() > 0
-                ):
-                    global_cov = float(cov_df["covbases"].sum()) / float(
-                        cov_df["endpos"].sum()
-                    )
+                # Mean depth over the genome (same helper as the coverage component)
+                from robin.analysis.target_coverage import global_depth
+
+                global_cov = global_depth(cov_df)
+                if global_cov is not None:
                     coverage_data["global_coverage"] = f"{global_cov:.2f}x"
             except Exception as e:
                 logging.debug(f"   MGMT: <access denied>: {e}")
@@ -1174,29 +1170,22 @@ def _extract_coverage_data(sample_dir: Path) -> Dict[str, Any]:
 
                 bed_df = pd.read_csv(bed_cov)
 
-                # Calculate target coverage using the same formula as coverage component
-                if "bases" in bed_df.columns:
-                    # Calculate length if not present (same as coverage component)
-                    if "length" not in bed_df.columns:
-                        bed_df["length"] = (
-                            bed_df["endpos"] - bed_df["startpos"] + 1
-                        ).astype(float)
+                # Mean depth over the targets (same helper as the coverage component)
+                from robin.analysis.target_coverage import target_depth
 
-                    if bed_df["length"].sum() > 0:
-                        target_cov_v = float(bed_df["bases"].sum()) / float(
-                            bed_df["length"].sum()
-                        )
-                        coverage_data["target_coverage"] = f"{target_cov_v:.2f}x"
+                target_cov_v = target_depth(bed_df)
+                if target_cov_v is not None:
+                    coverage_data["target_coverage"] = f"{target_cov_v:.2f}x"
 
-                        # Determine quality based on target coverage (same logic as coverage component)
-                        if target_cov_v >= 30:
-                            coverage_data["quality"] = "Excellent"
-                        elif target_cov_v >= 20:
-                            coverage_data["quality"] = "Good"
-                        elif target_cov_v >= 10:
-                            coverage_data["quality"] = "Moderate"
-                        else:
-                            coverage_data["quality"] = "Insufficient"
+                    # Determine quality based on target coverage (same logic as coverage component)
+                    if target_cov_v >= 30:
+                        coverage_data["quality"] = "Excellent"
+                    elif target_cov_v >= 20:
+                        coverage_data["quality"] = "Good"
+                    elif target_cov_v >= 10:
+                        coverage_data["quality"] = "Moderate"
+                    else:
+                        coverage_data["quality"] = "Insufficient"
             except Exception as e:
                 logging.debug(f"   MGMT: <access denied>: {e}")
                 pass
