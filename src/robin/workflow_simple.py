@@ -53,6 +53,10 @@ BATCH_CONFIG: Dict[str, Dict[str, Any]] = {
 }
 
 
+# The job ("<job_id>:<job_type>") the current worker thread is running; set around the handler.
+_running_job = threading.local()
+
+
 # === Shared Context for Each File ===
 @dataclass
 class WorkflowContext:
@@ -79,9 +83,13 @@ class WorkflowContext:
 
     def add_error(self, job_type: str, error: str) -> None:
         """Add an error to the context."""
-        self.errors.append(
-            {"job_type": job_type, "error": error, "timestamp": time.time()}
-        )
+        entry = {"job_type": job_type, "error": error, "timestamp": time.time()}
+        # Sibling jobs share one context across worker threads: tag the error with the job
+        # running on this thread, so each job counts only what it filed itself.
+        owner = getattr(_running_job, "key", None)
+        if owner is not None:
+            entry["owner"] = owner
+        self.errors.append(entry)
 
     def get_summary(self) -> dict:
         """Get a summary of the workflow execution."""
@@ -896,16 +904,23 @@ class WorkflowManager:
 
                     # The errors filed since the job started decide the outcome, whatever
                     # their name (same rule as the Ray wrapper).
+                    # Sibling jobs share a context, so only errors this job filed count.
                     errors_before = len(job.context.errors or [])
+                    owner = f"{job.job_id}:{job.job_type}"
+                    _running_job.key = owner
                     try:
                         handlers[job.job_type](job)
-                        outcome = job_outcome(job.job_type, job.context, errors_before)
+                        outcome = job_outcome(
+                            job.job_type, job.context, errors_before, owner=owner
+                        )
                     except Exception as exc:
                         outcome = job_outcome(
-                            job.job_type, job.context, errors_before, exc=exc
+                            job.job_type, job.context, errors_before, exc=exc, owner=owner
                         )
                         if outcome["status"] == "failed":
                             raise
+                    finally:
+                        _running_job.key = None
                     if outcome["status"] == "expected_failure":
                         job.context.add_result(
                             job.job_type,

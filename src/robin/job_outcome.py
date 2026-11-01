@@ -68,12 +68,18 @@ def job_outcome(
     context: Any,
     errors_before: int,
     exc: Optional[BaseException] = None,
+    owner: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Decide a job's outcome: {"status": success|failed|expected_failure, "ok", ...}.
 
     ``errors_before`` is ``len(context.errors)`` taken before the handler ran.
+    ``owner``: where sibling jobs share one context object and run concurrently (the non-Ray
+    runner), only the new errors tagged ``{"owner": owner}`` count. Ray tasks each have their
+    own copy of the context, so Ray leaves it None and every new error counts.
     """
     new_errors = list(getattr(context, "errors", None) or [])[errors_before:]
+    if owner is not None:
+        new_errors = [e for e in new_errors if isinstance(e, dict) and e.get("owner") == owner]
     if exc is None and not new_errors:
         return {"status": "success", "ok": True}
     if exc is not None:

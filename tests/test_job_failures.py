@@ -284,3 +284,39 @@ def test_non_ray_runner_fail_only_filed_error_is_expected_not_failed():
     )
     assert mgr.failed_jobs_by_type == {} and mgr.completed_jobs_by_type == {"sturgeon": 1}
     assert ctx.results["sturgeon"]["status"] == "expected_failure"
+
+
+def test_non_ray_runner_sibling_error_on_a_shared_context_fails_only_its_filer():
+    """can_trigger_jobs gives sibling jobs one context object and each runs on its own thread:
+    an error one sibling files must not fail another that succeeds."""
+    import queue
+    import threading
+
+    from robin.workflow_simple import Job, WorkflowContext, WorkflowManager
+
+    mgr = WorkflowManager(enable_batching=False)
+    ctx = WorkflowContext(filepath="x_pass_0.bam", metadata={"bam_metadata": {"sample_id": "s"}})
+    started = threading.Event()
+
+    def mgmt(job):  # succeeds, just takes a moment
+        started.set()
+        time.sleep(0.5)
+
+    def target(job):  # files its own error while mgmt is still running
+        started.wait(5)
+        job.context.add_error("target_analysis", "target broke")
+
+    qa, qb = queue.Queue(), queue.Queue()
+    qa.put(Job(1, "mgmt", ctx, "mgmt", ["mgmt:mgmt"]))
+    qb.put(Job(2, "target", ctx, "target", ["target:target"]))
+    ta = threading.Thread(target=mgr.worker, args=("a", qa, {"mgmt": mgmt}), daemon=True)
+    tb = threading.Thread(target=mgr.worker, args=("b", qb, {"target": target}), daemon=True)
+    ta.start()
+    tb.start()
+    qa.join()
+    qb.join()
+    mgr.running = False
+    ta.join(timeout=5)
+    tb.join(timeout=5)
+    assert mgr.failed_jobs_by_type == {"target": 1}
+    assert mgr.completed_jobs_by_type == {"mgmt": 1}
