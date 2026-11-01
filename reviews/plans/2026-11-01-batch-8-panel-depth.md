@@ -59,3 +59,12 @@ The batch-6 tests (totals, target.bam, read counts, every run the same) pass on 
 - Per-base panel depth (D4, the later feature).
 - A panel changed mid-run: merged regions are keyed by position, as rows are today.
 - "% of targets above".
+
+## Result (2026-11-01, on `c584ad3`): supported
+
+- **On `c81cc37`:** the 19 fix tests failed and the 4 guards and controls passed (the table above). After the fix, all pass, along with batch 6's samtools tests.
+- **One test added after the lock (guard):** `test_a_bam_staged_before_this_change_after_a_new_one_removes_the_union_file`. The rule "a batch without the parts removes the file" had no test, so its mutant would have survived. It passes on `c81cc37` and after.
+- **Mutation check:** 5 of 5 caught (staging, commit sum, old-folder rule, removal rule, readers); the no-op control survived (76 passed).
+- **Full suite:** 656 passed. `robin.yml` and `pyproject.toml` are unchanged.
+- **Shipped panels, through the code's own merging:** AML 1,180 rows → 910 regions (3.59% counted more than once), as measured before the lock; rCNS2 243 → 243.
+- **Not yet done:** the external review (Sol 6.1 / Astra), before the merge.
