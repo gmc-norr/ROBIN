@@ -882,3 +882,69 @@ def test_an_earlier_result_with_no_network_and_no_failed_build_says_none_found(t
     _, summary = _report_text(d)
     assert NONE_FOUND_SUMMARY in summary
     assert M1_SENTENCE not in summary and TARGET_EARLIER not in summary
+
+
+# ------------------------------------------------------------------ external review, findings 1 and 3
+def _spoil_csv(csv, how):
+    if how == "missing":
+        csv.unlink()
+    elif how == "zero_bytes":
+        csv.write_text("")
+    else:  # header only
+        pd.read_csv(csv).iloc[:0].to_csv(csv, index=False)
+
+
+@pytest.mark.parametrize("how", ["missing", "zero_bytes", "header_only"])
+@pytest.mark.parametrize("kind", ["master", "all"])
+def test_a_failed_build_whose_csv_cannot_rebuild_keeps_its_record(tmp_path, monkeypatch, kind, how):
+    # External review finding 1: after the failed build, the CSV is gone or empty; the quiet
+    # build can't rebuild, so it must not clear the record over the stale pickle.
+    from robin import fusion_status as fs
+
+    real, d = _good_then_failed_build(tmp_path, monkeypatch, kind)
+    monkeypatch.setattr(fusion_work, "preprocess_fusion_data_standalone", real)
+    _spoil_csv(d / _TYPE_CSV[kind], how)
+    _stage(tmp_path, _rows(1, "GENEE", "GENEF", prefix="e"), n=3)
+    assert _accumulate(tmp_path)["status"] == "error"
+    pkl = d / _TYPE_PICKLE[kind]
+    assert os.path.exists(fs.failed_build_marker(str(pkl)))
+    assert _good_pair_tags(pkl) == ["GENEA,GENEB"]
+    note = TARGET_EARLIER if kind == "master" else GENOME_EARLIER
+    assert fs.fusion_states(str(d))[f"{kind}_note"] == note
+
+
+def test_a_quiet_build_with_no_record_and_no_csv_still_succeeds(tmp_path, monkeypatch):
+    # Control for finding 1: without a failed build behind it, a missing CSV changes nothing.
+    from robin import fusion_status as fs
+
+    monkeypatch.setattr(fusion_work, "_ensure_gene_regions_loaded", lambda panel: None)
+    _stage(tmp_path, _rows(4))
+    assert _accumulate(tmp_path)["status"] == "success"
+    d = tmp_path / SAMPLE
+    (d / _TYPE_CSV["master"]).unlink()
+    _stage(tmp_path, _rows(1, "GENEE", "GENEF", prefix="e"), n=2)
+    assert _accumulate(tmp_path)["status"] == "success"
+    assert not os.path.exists(fs.failed_build_marker(str(d / _TYPE_PICKLE["master"])))
+
+
+def test_the_body_says_a_types_latest_build_failed(tmp_path):
+    # External review finding 3: 3-read candidates for both types (none validated) and the
+    # target panel's latest build failed.
+    from robin import fusion_status as fs
+
+    d = _sample_dir(tmp_path)
+    _write_pickles(d, _rows(3))
+    Path(fs.failed_build_marker(str(d / _TYPE_PICKLE["master"]))).write_text("RuntimeError: x\n")
+    body, _ = _report_text(d)
+    assert "Target panel: the latest build failed; an earlier run identified no fusion candidates." in body
+    assert "Genome-wide: no fusion candidates were identified." in body
+    assert NONE_FOUND not in body
+
+
+def test_the_body_without_a_failed_build_says_none_found(tmp_path):
+    # Control for finding 3.
+    d = _sample_dir(tmp_path)
+    _write_pickles(d, _rows(3))
+    body, _ = _report_text(d)
+    assert NONE_FOUND in body
+    assert "latest build failed" not in body

@@ -49,6 +49,8 @@ _BODY_TYPE_STATUS = {
     STATE_NONE: "no fusion candidates were identified",
     STATE_FOUND: "no fusion candidates were identified",  # (none at a validated breakpoint)
 }
+# A type whose latest build failed and whose earlier result holds no validated network.
+_BODY_EARLIER_STATUS = "the latest build failed; an earlier run identified no fusion candidates"
 
 
 def fusion_methods_sentence():
@@ -666,16 +668,17 @@ class FusionSection(ReportSection):
                 pass
         else:
             type_states = (fusion_data["master_state"], fusion_data["all_state"])
+            type_notes = (fusion_data.get("master_note"), fusion_data.get("all_note"))
             if fusion_data["state"] == STATE_NOT_RUN:
                 body_text = NOT_RUN_TEXT
-            elif all(s in (STATE_FOUND, STATE_NONE) for s in type_states):
-                # every type's results were read
+            elif all(s in (STATE_FOUND, STATE_NONE) for s in type_states) and not any(type_notes):
+                # every type's results were read, from its latest build
                 body_text = NONE_FOUND_TEXT
             else:
-                # say which results could not be read (or were not run)
+                # say which results could not be read, were not run, or are from an earlier run
                 parts = [UNREADABLE_TEXT] if fusion_data["state"] == STATE_UNREADABLE else []
-                for label, s in zip(("Target panel", "Genome-wide"), type_states):
-                    parts.append(f"{label}: {_BODY_TYPE_STATUS[s]}.")
+                for label, s, note in zip(("Target panel", "Genome-wide"), type_states, type_notes):
+                    parts.append(f"{label}: {_BODY_EARLIER_STATUS if note else _BODY_TYPE_STATUS[s]}.")
                 body_text = " ".join(parts)
             self.elements.append(
                 Paragraph(

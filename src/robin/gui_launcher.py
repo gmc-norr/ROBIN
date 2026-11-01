@@ -1821,6 +1821,18 @@ class GUILauncher:
                         f"{hhmmss} {r.get('sample_id', '')} {r.get('job_type', '')}: {r.get('error', '')}"
                     )
                 self.error_summary_label.set_text("\n".join(lines))
+            elif hasattr(self, "error_summary_label"):
+                # Failures counted, but their details left the event log before they were shown:
+                # don't leave "No errors detected." beside a count (details already shown stay).
+                total = sum(
+                    int(data.get(k, 0) or 0)
+                    for k in ("preprocessing_errors", "analysis_errors", "classification_errors")
+                )
+                if total > 0 and getattr(self.error_summary_label, "text", None) == "No errors detected.":
+                    self.error_summary_label.set_text(
+                        f"{total} failure{'' if total == 1 else 's'} recorded; "
+                        "the details are no longer available."
+                    )
 
         except Exception as e:
             logging.debug(f"Error updating error information: {e}")

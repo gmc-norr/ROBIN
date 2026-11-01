@@ -2605,14 +2605,22 @@ def _generate_output_files(
             # passes this time, so a quiet build does not clear the record over a stale pickle.
             csv_path = os.path.join(work_dir, sample_id, output_csv_name)
             stale = os.path.exists(failed_build_marker(pickle_path))
-            if (os.path.exists(pickle_path) and not stale) or not os.path.exists(csv_path):
+            if os.path.exists(pickle_path) and not stale:
                 return
-            try:
-                df = pd.read_csv(csv_path)
-            except pd.errors.EmptyDataError:
-                return
+            df = pd.DataFrame()
+            if os.path.exists(csv_path):
+                try:
+                    df = pd.read_csv(csv_path)
+                except pd.errors.EmptyDataError:
+                    pass
             if not df.empty:
                 preprocess_fusion_data_standalone(df, pickle_path)
+            elif stale:
+                # The last build failed and there is nothing to rebuild from: keep the failure.
+                raise RuntimeError(
+                    f"The last {candidate_type} build failed and {output_csv_name} is missing "
+                    "or empty, so it cannot be rebuilt"
+                )
 
         def _write_empty() -> None:
             # The step ran and no read passed the filters. Say so: a reader that takes

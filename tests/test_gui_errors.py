@@ -74,10 +74,12 @@ def test_update_errors_shows_at_most_five():
 
 
 def test_update_errors_without_recent_leaves_the_summary_alone():
+    # Changed by the external review's finding 4 (round 5): a count above 0 with no recent
+    # failures no longer leaves "No errors detected."; details already shown are kept
+    # (test_shown_failure_details_are_kept_when_an_update_has_none).
     p = Panel()
     GUILauncher._update_errors(p, {"preprocessing_errors": 4})
-    assert p.error_summary_label.text == "No errors detected."
-    assert p.error_summary_label.calls == []
+    assert p.error_summary_label.text == "4 failures recorded; the details are no longer available."
     assert p.preprocessing_errors.text == "4"
 
 
@@ -322,3 +324,33 @@ def test_a_poll_with_no_lost_event_and_no_failure_sends_no_error_update():
     sent = []
     workflow_ray.publish_failures(_stats(msgs), {"last_seq": 0}, lambda t, d, p=0: sent.append(t.value))
     assert sent == ["log_message"] * 3
+
+
+# ------------------------------------------------------------------ external review, finding 4
+def test_an_evicted_failure_does_not_leave_no_errors_detected():
+    # The I-1 setup through the real _update_errors: the count is 1, and the summary must not
+    # still say "No errors detected." though the failure's details have left the log.
+    stats = _coordinator_stats_failure_first()
+    sent = []
+    workflow_ray.publish_failures(stats, {"last_seq": 0}, lambda t, d, p=0: sent.append((t.value, d)))
+    update = next(d for t, d in sent if t == "error_update")
+    p = Panel()
+    GUILauncher._update_errors(p, update)
+    assert p.analysis_errors.text == "1"
+    assert p.error_summary_label.text == "1 failure recorded; the details are no longer available."
+
+
+def test_no_failures_keeps_no_errors_detected():
+    # Control for finding 4.
+    p = Panel()
+    GUILauncher._update_errors(p, {"preprocessing_errors": 0, "analysis_errors": 0,
+                                   "classification_errors": 0, "recent": []})
+    assert p.error_summary_label.text == "No errors detected."
+
+
+def test_shown_failure_details_are_kept_when_an_update_has_none():
+    # Control for finding 4: details already on screen are still true; keep them.
+    p = Panel()
+    p.error_summary_label = Label("12:00:00 S1 mgmt: boom")
+    GUILauncher._update_errors(p, _payload([]))
+    assert p.error_summary_label.text == "12:00:00 S1 mgmt: boom"
