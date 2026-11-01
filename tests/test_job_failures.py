@@ -17,6 +17,8 @@ Each scheduler's whole matrix runs once, in a module-scoped fixture, then the Co
 down (which is what writes ``failed_jobs.csv``) and the tests assert on what was recorded.
 """
 
+import time
+
 import pytest
 
 from failure_fixtures import (
@@ -127,3 +129,158 @@ def test_C3_deliberate_skip_is_skipped_not_failed(campaign):
     assert o.d_skipped == 1, f"{campaign.scheduler}: skipped moved by {o.d_skipped}"
     assert o.d_failed == 0 and o.d_completed == 0 and o.d_failed_by_type == {}
     assert campaign.rows_for(o) == []
+
+
+# ---------------------------------------------------------------------------------------------
+# Task 2: one rule for a job's outcome (a job's own filed errors decide it, whatever their name)
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module", params=SCHEDULERS)
+def rule_campaign(request, ray_cluster, tmp_path_factory):
+    scheduler = request.param
+    work = str(tmp_path_factory.mktemp(f"rule_{scheduler}"))
+    harness = Harness(scheduler, work)
+    c = Campaign()
+    c.scheduler = scheduler
+    try:
+        # Review Focus 1: an error an earlier job left in the same context, own handler succeeds.
+        c.outcomes[("stale", "mgmt")] = harness.run_one("mgmt", "ok", tag="stale", pre_error=True)
+        # ... and the job's own error still fails it when an old one is there too.
+        c.outcomes[("stale_fail", "mgmt")] = harness.run_one(
+            "mgmt", "file_error", tag="stale", pre_error=True
+        )
+        # Review Focus 3: a successful target triggers igv_bam (control); a failed one must not.
+        c.outcomes[("trig_ok", "target")] = harness.run_one(
+            "target", "ok", tag="trig", downstream=True
+        )
+        c.igv_after_ok = harness.finished_count("igv_bam", timeout=30)
+        c.outcomes[("trig_fail", "target")] = harness.run_one(
+            "target", "file_error", tag="trig", downstream=True
+        )
+        time.sleep(3)  # long enough for a wrongly triggered igv_bam to have run
+        c.igv_after_fail = harness.finished_count("igv_bam") - c.igv_after_ok
+    finally:
+        c.csv_rows = harness.close()
+    return c
+
+
+def test_error_from_an_earlier_job_does_not_fail_a_later_one(rule_campaign):
+    o = rule_campaign.outcomes[("stale", "mgmt")]
+    assert o.d_completed == 1 and o.d_failed == 0 and o.d_failed_by_type == {}, (
+        f"{rule_campaign.scheduler}: stale error counted against the later job "
+        f"(completed {o.d_completed}, failed {o.d_failed})"
+    )
+    assert o.result.get("status") == "success"
+    assert rule_campaign.rows_for(o) == []
+
+
+def test_own_error_still_fails_when_an_old_one_is_present(rule_campaign):
+    o = rule_campaign.outcomes[("stale_fail", "mgmt")]
+    _counted_failed(rule_campaign, o, "synthetic mgmt failure")
+
+
+def test_filed_error_fallback_result_says_failed(rule_campaign):
+    o = rule_campaign.outcomes[("stale_fail", "mgmt")]
+    assert o.result == {"status": "failed"}
+
+
+def test_failed_target_submits_no_igv_bam(rule_campaign):
+    # Control: a successful target does trigger igv_bam (so the check below can fail).
+    assert rule_campaign.igv_after_ok == 1, (
+        f"{rule_campaign.scheduler}: control broken, igv_bam finished "
+        f"{rule_campaign.igv_after_ok}x after a successful target"
+    )
+    o = rule_campaign.outcomes[("trig_fail", "target")]
+    assert o.d_failed == 1 and o.d_failed_by_type == {"target": 1}
+    assert rule_campaign.igv_after_fail == 0, (
+        f"{rule_campaign.scheduler}: igv_bam ran after target filed target_analysis"
+    )
+
+
+def test_cnv_handler_files_its_batch_error(tmp_path):
+    """F3: process_multiple_bams returns an error_message -> the handler files cnv_analysis."""
+    from types import SimpleNamespace
+    from unittest import mock
+
+    from robin.analysis import cnv_analysis
+    from robin.workflow_ray import Job, WorkflowContext
+
+    bam = str(tmp_path / "s_pass_0.bam")
+    inner = WorkflowContext(filepath=bam, metadata={"bam_metadata": {"sample_id": "s"}})
+    batched = SimpleNamespace(
+        get_file_count=lambda: 1,
+        get_sample_id=lambda: "s",
+        batch_id="b1",
+        get_filepaths=lambda: [bam],
+        contexts=[inner],
+    )
+    ctx = WorkflowContext(filepath=bam, metadata={"_batched_job": batched})
+    job = Job(7, "cnv", "cnv", ["cnv:cnv"], 0, ctx)
+    with mock.patch.object(
+        cnv_analysis,
+        "process_multiple_bams",
+        return_value={"error_message": "synthetic batch failure", "files_processed": 0},
+    ):
+        cnv_analysis.cnv_handler(job, work_dir=str(tmp_path), target_panel="rCNS2")
+    assert [(e["job_type"], e["error"]) for e in ctx.errors] == [
+        ("cnv_analysis", "synthetic batch failure")
+    ]
+
+
+def _run_simple_worker(job_type, handler, metadata=None, filepath="x_pass_0.bam", old_error=False):
+    """Drive the real WorkflowManager.worker loop on one job; return (manager, context)."""
+    import queue
+    import threading
+
+    from robin.workflow_simple import Job, WorkflowContext, WorkflowManager
+
+    mgr = WorkflowManager(enable_batching=False)
+    ctx = WorkflowContext(
+        filepath=filepath,
+        metadata={"bam_metadata": {"sample_id": "simple_s"}, **(metadata or {})},
+    )
+    if old_error:
+        ctx.add_error("earlier_job", "left over from an earlier job")
+    q = queue.Queue()
+    q.put(Job(1, job_type, ctx, "fast", [f"fast:{job_type}"]))
+    t = threading.Thread(target=mgr.worker, args=("t", q, {job_type: handler}), daemon=True)
+    t.start()
+    q.join()
+    mgr.running = False
+    t.join(timeout=5)
+    return mgr, ctx
+
+
+def test_non_ray_runner_counts_a_filed_error_as_failed():
+    def handler(job):
+        job.context.add_error("mgmt_analysis", "synthetic mgmt failure")
+
+    mgr, ctx = _run_simple_worker("mgmt", handler)
+    assert mgr.failed_jobs_by_type == {"mgmt": 1}
+    assert mgr.completed_jobs_by_type == {}
+    assert [e["job_type"] for e in ctx.errors] == ["mgmt_analysis"]  # filed once, not doubled
+
+
+def test_non_ray_runner_ignores_an_error_from_an_earlier_job():
+    mgr, _ = _run_simple_worker("mgmt", lambda job: None, old_error=True)
+    assert mgr.completed_jobs_by_type == {"mgmt": 1} and mgr.failed_jobs_by_type == {}
+
+
+def test_non_ray_runner_counts_a_raised_exception_as_failed():
+    def handler(job):
+        raise RuntimeError("synthetic crash")
+
+    mgr, _ = _run_simple_worker("mgmt", handler)
+    assert mgr.failed_jobs_by_type == {"mgmt": 1}
+
+
+def test_non_ray_runner_fail_only_filed_error_is_expected_not_failed():
+    def handler(job):
+        job.context.add_error("sturgeon_analysis", "synthetic sturgeon failure")
+
+    mgr, ctx = _run_simple_worker(
+        "sturgeon", handler, metadata={"fail_only_bam_submission": True}, filepath="x_fail_0.bam"
+    )
+    assert mgr.failed_jobs_by_type == {} and mgr.completed_jobs_by_type == {"sturgeon": 1}
+    assert ctx.results["sturgeon"]["status"] == "expected_failure"

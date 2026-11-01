@@ -56,6 +56,13 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from robin.ray_setup import ray_init_options, ray_worker_runtime_env
+from robin.job_outcome import (
+    CLASSIFICATION_TYPES,
+    bam_filename_kind as _bam_filename_kind,
+    job_outcome,
+    record_outcome,
+    recorded_failure,
+)
 
 try:
     from rich.progress import (
@@ -395,8 +402,7 @@ DEDUP_TYPES: Set[str] = {
 # Disabled: treat CNV like other analysis jobs (mgmt/target/fusion)
 SERIALIZE_BY_TYPE_PER_SAMPLE: Set[str] = set()
 
-# Classification job types (single global pipeline per type)
-CLASSIFICATION_TYPES: Set[str] = {"sturgeon", "nanodx", "pannanodx", "random_forest"}
+# CLASSIFICATION_TYPES (single global pipeline per type) lives in robin.job_outcome
 
 # Job types that must be serialized per sample (no overlap across these types)
 ## Removed per-sample cross-type serialization to allow one job per type globally
@@ -676,6 +682,8 @@ def _wrap_real_handler(
                 _notify_coordinator_handler_started(int(jid))
         except Exception:
             pass
+        outcome = None
+        errors_before = len(job.context.errors or [])
         try:
             if py_handler is None:
                 import_reason = _HANDLER_IMPORT_ERRORS.get(job_type)
@@ -742,6 +750,22 @@ def _wrap_real_handler(
             except Exception:
                 # Fallback to legacy call
                 py_handler(job)
+            # The errors filed since the job started decide the outcome, whatever their name.
+            outcome = job_outcome(job_type, job.context, errors_before)
+            if outcome["status"] == "expected_failure":
+                job.context.add_result(
+                    job_type,
+                    {
+                        "status": "expected_failure",
+                        "reason": outcome["reason"],
+                        "message": outcome["message"],
+                    },
+                )
+                logger.warning(
+                    f"{job_type} expected failure for fail-only BAM submission: {outcome['message']}"
+                )
+            elif outcome["status"] == "failed":
+                logger.error(f"{job_type} failed: {outcome['error']}")
             # Log completion or skip based on handler-set context
             skipped = False
             try:
@@ -767,19 +791,9 @@ def _wrap_real_handler(
             else:
                 logger.info(f"{job_type} completed")
         except Exception as e:
-            # Suppress expected downstream failures for fail-only BAM submissions.
-            # Requirement: if *any* BAM in the submission contains 'pass', errors must remain visible.
-            suppress = False
-            try:
-                if job_type in (CLASSIFICATION_TYPES | {"bed_conversion"}):
-                    if bool(job.context.metadata.get("fail_only_bam_submission", False)):
-                        fp = getattr(job.context, "filepath", "") or ""
-                        if _bam_filename_kind(fp) == "fail":
-                            suppress = True
-            except Exception:
-                suppress = False
-
-            if suppress:
+            # Fail-only BAM submissions: the same rule as for a filed error (job_outcome).
+            outcome = job_outcome(job_type, job.context, errors_before, exc=e)
+            if outcome["status"] == "expected_failure":
                 # Expected: downstream tools may not support fail-only read BAMs.
                 # We still attempted analysis; we just don't treat this as a failing job.
                 try:
@@ -787,8 +801,8 @@ def _wrap_real_handler(
                         job_type,
                         {
                             "status": "expected_failure",
-                            "reason": "fail_only_bam_submission",
-                            "message": str(e),
+                            "reason": outcome["reason"],
+                            "message": outcome["message"],
                         },
                     )
                 except Exception:
@@ -804,11 +818,15 @@ def _wrap_real_handler(
             # Mark result if user handler didn't add one.
             # Keep a dict payload so downstream code can safely call .get(...).
             if job_type not in job.context.results:
-                had_error = any(
-                    (err.get("job_type") == job_type) for err in (job.context.errors or [])
-                )
+                had_error = outcome is not None and outcome["status"] == "failed"
                 fallback_result = {"status": "failed"} if had_error else {"status": "success"}
                 job.context.add_result(job_type, fallback_result)
+            if outcome is not None:
+                # Stored in the context so the judges (another process) read the same outcome.
+                try:
+                    record_outcome(job.context, job.job_id, job_type, outcome)
+                except Exception:
+                    pass
             
             # Trigger memory cleanup after handler execution
             # Let memory manager decide if cleanup is needed based on its heuristics
@@ -2906,13 +2924,17 @@ class Coordinator:
                 for r in ready:
                     job = self._inflight.pop(r, None)
                     ok, ctx, err = True, None, None
+                    failure_kind = None
                     try:
                         ctx = await r
+                        reported = recorded_failure(ctx, job.job_id, job.job_type) if job else None
+                        if reported is not None:
+                            ok, err, failure_kind = False, reported, "returned_error"
                     except Exception as e:
                         ok, err = False, str(e)
                         ctx = job.context if job else WorkflowContext(filepath="")
                     if job:
-                        await self._on_finish(job, ok, ctx, err)
+                        await self._on_finish(job, ok, ctx, err, failure_kind)
             except Exception:
                 await asyncio.sleep(0.1)
     
@@ -3515,11 +3537,10 @@ class Pool:
             try:
                 ctx = await r
                 # Treat handler "error return" as failure: context has errors for this job_type
-                errors = getattr(ctx, "errors", []) or []
-                job_errors = [e for e in errors if isinstance(e, dict) and e.get("job_type") == job.job_type]
-                if job_errors:
+                reported = recorded_failure(ctx, job.job_id, job.job_type)
+                if reported is not None:
                     ok = False
-                    err = job_errors[-1].get("error", "handler reported error")
+                    err = reported
                     failure_kind = "returned_error"
             except Exception as e:
                 ok, err = False, str(e)
@@ -3659,19 +3680,6 @@ def _is_bam_path(p: Path) -> bool:
         return p.suffix.lower() == ".bam"
     except Exception:
         return False
-
-
-def _bam_filename_kind(filepath: str) -> str:
-    """Classify BAM filenames by substring: 'pass' | 'fail' | 'unknown'."""
-    try:
-        n = os.path.basename(filepath).lower()
-    except Exception:
-        return "unknown"
-    if "pass" in n:
-        return "pass"
-    if "fail" in n:
-        return "fail"
-    return "unknown"
 
 
 def _detect_fail_only_bam_submission(

@@ -1864,6 +1864,8 @@ def cnv_handler(job, work_dir=None, target_panel=None, threads=2):
         
         if batch_result.get("error_message"):
             logger.error(f"Batch processing completed with errors: {batch_result['error_message']}")
+            # File it, so the job is judged failed (job_outcome) and the user sees it.
+            job.context.add_error("cnv_analysis", batch_result["error_message"])
         else:
             logger.info("Batch processing completed successfully with aggregated CNV analysis")
         

@@ -28,6 +28,7 @@ try:
 except Exception:
     _RICH_AVAILABLE = False
 from robin.logging_config import get_job_logger
+from robin.job_outcome import JobReportedFailure, job_outcome
 from robin.analysis.target_analysis import (
     igv_bam_handler,
     snp_analysis_handler,
@@ -893,7 +894,29 @@ class WorkflowManager:
                     # Set processing start time right before calling the handler (excludes queue waiting time)
                     self.active_jobs[job.job_id]["processing_start_time"] = time.time()
 
-                    handlers[job.job_type](job)
+                    # The errors filed since the job started decide the outcome, whatever
+                    # their name (same rule as the Ray wrapper).
+                    errors_before = len(job.context.errors or [])
+                    try:
+                        handlers[job.job_type](job)
+                        outcome = job_outcome(job.job_type, job.context, errors_before)
+                    except Exception as exc:
+                        outcome = job_outcome(
+                            job.job_type, job.context, errors_before, exc=exc
+                        )
+                        if outcome["status"] == "failed":
+                            raise
+                    if outcome["status"] == "expected_failure":
+                        job.context.add_result(
+                            job.job_type,
+                            {
+                                "status": "expected_failure",
+                                "reason": outcome["reason"],
+                                "message": outcome["message"],
+                            },
+                        )
+                    elif outcome["status"] == "failed":
+                        raise JobReportedFailure(outcome["error"])
 
                     # Track this job as completed regardless of whether it has a next job
                     logger.info(
@@ -949,7 +972,9 @@ class WorkflowManager:
 
                 except Exception as e:
                     error_msg = f"Job {job.job_type} failed: {str(e)}"
-                    job.context.add_error(job.job_type, error_msg)
+                    if not isinstance(e, JobReportedFailure):
+                        # (a filed error is already in the context)
+                        job.context.add_error(job.job_type, error_msg)
                     self.failed_jobs.append(job.job_id)
 
                     # Track failed jobs by type

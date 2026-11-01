@@ -165,11 +165,16 @@ class Harness:
         tag: str = "",
         fail_only: bool = False,
         timeout: float = 60.0,
+        pre_error: bool = False,
+        downstream: bool = False,
     ) -> Outcome:
         """Submit one job of ``job_type`` whose handler does ``fault``; wait for it to finish.
 
         ``fault``: ok | raise | file_error | skip. ``fail_only`` makes the job a fail-only BAM
         submission (metadata flag plus a file name with "fail" and not "pass").
+        ``pre_error`` puts an error from an "earlier job" in the context before submission.
+        ``downstream`` lets the job's success trigger its real downstream jobs (wr.TRIGGERS), by
+        listing them in original_workflow; they run on the synthetic handlers too.
         Each call uses its own sample id and file name, so dedup and the one-in-flight
         classifier rules never hold a job back. Raises (with the stats printed) on timeout.
         """
@@ -177,17 +182,22 @@ class Harness:
         job_id = next(Harness._ids)
         sample = f"{self.scheduler}_{job_type}_{fault}{'_fo' if fail_only else ''}_{tag}_{job_id}"
         kind = "fail" if fail_only else "pass"
+        steps = [f"{wr.job_queue_of(job_type)}:{job_type}"]
+        if downstream:
+            steps += [f"{wr.job_queue_of(t)}:{t}" for t in wr.TRIGGERS.get(job_type, [])]
         ctx = wr.WorkflowContext(
             filepath=os.path.join(self.work_dir, f"{sample}_{kind}_0.bam"),
             metadata={
                 "bam_metadata": {"sample_id": sample},
                 "work_dir": self.work_dir,
                 "target_panel": "rCNS2",
-                "original_workflow": [f"{wr.job_queue_of(job_type)}:{job_type}"],
+                "original_workflow": steps,
                 "fault": fault,
                 "fail_only_bam_submission": bool(fail_only),
             },
         )
+        if pre_error:
+            ctx.add_error("earlier_job", "left over from an earlier job in this context")
         job = wr.Job(job_id, job_type, wr.job_queue_of(job_type), [f"{wr.job_queue_of(job_type)}:{job_type}"], 0, ctx)
         before = self._counters()
         ray.get(self.coord.submit_jobs.remote([job]))
@@ -226,6 +236,16 @@ class Harness:
             errors=rec["errors"],
             sample_id=sample,
         )
+
+    def finished_count(self, job_type: str, timeout: float = 0.0) -> int:
+        """Completed + failed jobs of this type so far; with ``timeout``, waits for the first."""
+        t0 = time.time()
+        while True:
+            c = self._counters()
+            n = c["completed_by_type"].get(job_type, 0) + c["failed_by_type"].get(job_type, 0)
+            if n or time.time() - t0 >= timeout:
+                return n
+            time.sleep(0.2)
 
     def close(self) -> List[Dict[str, str]]:
         """Shut the Coordinator down (this writes failed_jobs.csv) and return its rows."""
