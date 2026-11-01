@@ -36,3 +36,13 @@ whenever a claim is withdrawn or a finding turns out to be an artifact. Concrete
 - **Rested on:** five sampled read counts. A full scan found 0.035 copies (at 25,000 reads) and
   wraps up to 24,000 reads.
 - **Gate:** D.3 — "at most" needs a scan of the whole range.
+
+## 6. A mutation check that could not report a survivor (batch 5, 2026-11-01)
+- **Claimed:** in the plan's Result (Gate D.2), each of nine fixes, undone alone, fails a test.
+- **Rested on:** a helper that called any non-zero pytest exit "caught". Given several test
+  files as one argument, pytest ran no tests (exit 5) and every mutant printed "caught". One
+  claim ("no dedupe") was true at Task 3 and went stale at Task 4, when a semi-join made the
+  dedupe redundant; the Result repeated it without a re-run. The final review found both.
+- **Gate:** D.2 applied to the checker itself — add a no-op control mutant that must survive,
+  count only "N failed" (exit 1) as caught, and re-run every mutant on the commit the claim is
+  about.

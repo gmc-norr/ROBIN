@@ -61,7 +61,7 @@ This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [g
 | The CNV control's profile no longer wraps at 16 bits | Found while fixing CNV-1 | `6ab6928` | Early in a run (up to about 24,000 reads), the CNV plot is no longer off by several copies |
 | A multi-BAM CNV batch counts each BAM once | CNV-3 | `391e159` | The batch's last BAM no longer counts double for the rest of the run |
 | Methylation counts are summed per CpG across batches and both strands | METH-1, METH-2, METH-4, METH-5 | `c50365a` | Methylation values and classifier results change; NanoDX sees minus-strand reads. A sample's old parquet is converted on its next merge |
-| matkit counts each call as modkit does | METH-3, METH-13, METH-14 | `d304ded` | Unsure calls leave coverage; implicit-mode Cs count as unmethylated; supplementary alignments no longer count; MGMT's input changes too |
+| matkit counts each call as modkit does | METH-3, METH-13, METH-14 | `d304ded`, `b70d6a5` | Unsure calls leave coverage; implicit-mode Cs count as unmethylated; supplementary alignments no longer count; MGMT's input changes too |
 | The CpG panel is read as 0-based, and its cache can't go stale | METH-6, METH-5, part of METH-12 | `dfd909f` | The base before each CpG is no longer pulled in |
 | A test against modkit pins step 5 | Step 5 | `dfe9f29`, `1c6c65f`, `5bcd583` | Nothing |
 
@@ -211,7 +211,7 @@ Only two tests exist (added after this review), and no CI runs them.
 - **What's wrong:** `Start - 1` widens every CpG to 3 bp, and the release note wrongly tells users their old parquets were wrong.
 - **Also:** the first data row is `chr1 -1 0 cg22940546`, which has a negative start.
 - **Fix:** read the file as plain 0-based BED, and correct the release note.
-- **Status:** fixed in our fork (`dfd909f`): the file is read as listed (cg13869341, cg02984631 and cg14817997 read "CG" in hg38 at their starts), the negative row is dropped, and `docs/releases/v0.5.md` carries a correction. 4,366 of the 900,614 rows are 1 bp long (3,091 "ch", 65 "rs" and 1,210 "cg" probes, some of them one base off a CpG in hg38); every row's start is treated as a CpG's C. Still open in the original ROBIN.
+- **Status:** fixed in our fork (`dfd909f`): the file is read as listed (cg13869341, cg02984631 and cg14817997 read "CG" in hg38 at their starts), the 26 rows with a negative start are dropped, and `docs/releases/v0.5.md` carries a correction. 4,366 of the 900,614 rows are 1 bp long (3,091 "ch", 65 "rs" and 1,210 "cg" probes; of the 1 bp "cg" rows, 2 of 4 we checked sit one base off a CpG in hg38, and 12 others the final review checked sit on one); every row's start is treated as a CpG's C. A "ch" row is a non-CpG C, so CpG calls give it no data (`b70d6a5`). Still open in the original ROBIN.
 
 **METH-7 · medium · Confirmed**: Classifiers never see coverage, and random forest gets a constant `cov=10`.
 - **Where:** `merge_bedmethyl.py:72-189, 751-797`, `random_forest_analysis.py:283-346`
@@ -249,7 +249,7 @@ Only two tests exist (added after this review), and no CI runs them.
 - **Reproduced:** two reads cover `CGCG`, each with one confident modified call and one implicit canonical base. matkit stores 100% instead of 50% at each CpG.
 - **Who it affects:** only BAMs that use implicit mode. In `?` mode, skipped bases are "unknown", and ignoring them is correct. To check which mode a BAM uses: `samtools view x.bam | head -1 | grep -o 'MM:Z:C+[a-z]*[.?]\?'`.
 - **Fix:** follow the MM skip-mode rules when building each read's observations. Add test files for explicit, implicit and unknown modes, and compare with modkit.
-- **Status:** fixed in our fork (`d304ded`): in implicit mode, every C the MM tag skips is an unmethylated call; `?` mode is unchanged; an implicit group with no positions now counts every C instead of skipping the read. Still open in the original ROBIN.
+- **Status:** fixed in our fork (`d304ded`, `b70d6a5`): in implicit mode, every CpG C the MM tag skips is an unmethylated call (CpG as the read reads it; the first fix counted every C, which the final review caught); a record with MM but no ML is skipped, as modkit does; `?` mode is unchanged; an implicit group with no positions now counts every C instead of skipping the read. Still open in the original ROBIN.
 
 **METH-14 · medium · Confirmed (reproduced)**: Whether a low-quality read is filtered depends on where its alignments lie. *(IR-06)*
 - **Where:** `utilities/matkit.py:1263-1284`
