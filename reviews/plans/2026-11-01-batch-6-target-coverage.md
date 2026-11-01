@@ -6,7 +6,7 @@
 
 **Architecture:** each BAM yields exact integer totals (aligned bases per contig and per target, read counts) and its covered stretches; the accumulation adds them to the sample's totals in one locked read-add-write step and unions the stretches; every BAM's panel reads go to a batch BAM when it arrives, and the final merge keeps everything already in `target.bam`. Consumers read depth from shared helpers.
 
-**Outcome:** supported (see Result). Built in `7b31e53` (Task 1), `7773e2f` (Task 2), `d6c87ff` (Tasks 3-4), `24ebbc8` (Task 5), `063398d` (Task 6), `d752ce6` (Task 7), `dd802d4` (stronger controls); result `ee2fdd8`; suite 229 → 279. Differences from the plan: the Result's last paragraph.
+**Outcome:** supported (see Result, and the final review's fixes after it). Built in `7b31e53` (Task 1), `7773e2f` (Task 2), `d6c87ff` (Tasks 3-4), `24ebbc8` (Task 5), `063398d` (Task 6), `d752ce6` (Task 7), `dd802d4` (stronger controls); result `ee2fdd8`; suite 229 → 279. Final review's fixes `888b5f0`, re-run in the commit after it; suite 286. Differences from the plan: the Result's last paragraph.
 
 **Tech Stack:** Python 3.12, pysam 0.24.1 (bundles samtools 1.24: `coverage`, `bedcov -j`, `view -L`, `stats`, `merge`), pandas, numpy.
 
@@ -135,3 +135,21 @@ Gate D:
 Differences from the plan, each ledgered: Tasks 3 and 4 in one commit (the staged format and its reader change together); `target.bam` follows `samtools view -L` (records overlapping the panel and the master BED's regions), not "every record of a read whose primary overlaps", so it no longer carries off-panel pieces of panel reads and gains in-panel pieces of off-panel reads; an old folder's covered bases become unknown rather than migrated; the master BED's cache key is unchanged (the union makes a stale file harmless); the test venv needed `networkx` and `scikit-learn==1.8.0` (declared dependencies) for the master BED lookup to work.
 
 Known limit, found by `trail check` after the result: the single target-coverage number (rule 5's reference too) is bases / length summed over panel rows, so where rows overlap the overlap counts twice. The AML panel has 270 overlapping rows, rCNS2 none. samtools over the merged panel would count it once. It was the same before this batch; each target's own numbers (rule 1) are exact. Left as it is.
+
+## Final review's fixes (2026-11-01, on `888b5f0`): supported
+
+The final review (fresh, read-only, on `4a4290a`) found no Critical, 2 Important and 6 Minor issues. The locked rules are unchanged; fixed in `888b5f0`:
+
+1. **A finalize held the accumulation lock for its whole merge** (Important 1). A worker waiting more than 120 s for it gave up, and its batch's reads were in `target.bam` (the batch BAM was moved in before the commit) but not in the coverage. Now a batch BAM moves into the sample folder only after its commit, under the same lock, so a commit that fails leaves both without it; and finalize merges under its own lock. The merge sets `target.bam`'s header with `samtools reheader` instead of a second pass over every record.
+2. **`igv/igv_ready.bam` was built once and never again** (Important 2), so IGV and the per-gene variant check stopped at the first finalize. Now it (or a legacy Clair3 BAM) counts as current only while its header lists the same merged batches as `target.bam`'s and it isn't older; finalize refreshes it; it is written by rename, one builder at a time. The batch list catches a sort that read an older `target.bam` and finished after the newer one; the time covers folders from before the list.
+3. **Contig bases come from the aligned blocks the stretch pass reads anyway** (Minor 3), not a second `bedcov -j` over each whole contig. Equal to `bedcov -j`: the locked tests, and a 50,000-read synthetic BAM with an hg38-sized header (the same 195 contig rows and 163,171 stretches; the per-BAM work 26.3 s → 14.5 s, the finalize merge 23.9 s → 12.8 s, `b6fix/perf_fix.py`); `bedcov` doesn't cap depth (equal at 12,000×, `b6fix/probe_depth_cap.py`).
+4. **A stale `target.bam` index is rebuilt** at finalize (Minor 4), when it is missing or older than the BAM.
+5. **The scan test reads the `robin` package the tests import** (the review's process note), not this checkout's `src/`: on `db7269c`'s code it now fails, listing the 11 old sites.
+
+Tests: `tests/test_target_finalize.py` (7 tests) fails 7 of 7 on `4a4290a`, each on its own bug, and passes now. Mutants (`b6fix/mutate6.py`, one fix undone at a time, only pytest exit 1 counts): 22 of 22 caught (the 13 earlier ones and 9 for these fixes: the batch BAM visible before its commit, finalize under the accumulation lock, no IGV refresh, a stale IGV or legacy BAM kept, freshness by time only or by batch list only, a stale index kept, blocks spanning deletions); the no-op control survived.
+
+Records (Minors 5–7): an old folder's covered bases are blank cells in `coverage_main.csv` (nothing shows covered bases; "shown as not available" was wrong); its coverage-over-time chart changes meaning at the upgrade (measured on the fixture: 0.4364, covered bases over genome length, then 1.1414, mean depth). "Overlapping rows" in the known limit means rows overlapping an earlier row in file order: in the AML panel 270 of 1,180 rows, while 473 rows overlap some other row (203 groups, one interval listed twice under two names), and 3,173,388 of 88,388,915 summed bases (3.59%) are counted more than once. So the single target-depth number differs from samtools over the merged panel by 3.59% × (the twice-counted bases' depth − the merged panel's depth), an identity checked on numbers. rCNS2 has no overlaps.
+
+Minor 8 declined: `24ebbc8`'s "target.bam 10-11 records vs 22" is right for its parent `d6c87ff` (measured: 10 at k = 2, 11 at k = 4). The review's 9 and 10 are `db7269c`'s (measured: 10 at k = 2, 9 at k = 4).
+
+Re-run on `888b5f0` (`b6fix/result6.py`): every number in the Result's table is unchanged; rules 1–3 hold in all 15 runs and the 15 runs are identical. The batch-6 tests, 57, pass; the suite, 286.
