@@ -24,6 +24,10 @@ NOT_RUN_TEXT = "Fusion analysis has not been run for this sample."
 UNREADABLE_TEXT = "The fusion results could not be read."
 NONE_FOUND_TEXT = "No fusion candidates were identified."
 NONE_FOUND_SUMMARY_TEXT = "No fusion networks identified within the target panel."
+# When only one candidate type's results are missing and the other's hold candidates.
+TARGET_UNREADABLE_SUMMARY_TEXT = "The target-panel fusion results could not be read."
+TARGET_NOT_RUN_SUMMARY_TEXT = "Fusion analysis has not been run for the target panel."
+GENOME_WIDE_UNREADABLE_SUMMARY_TEXT = "The genome-wide fusion results could not be read."
 
 # The breakpoint validation the report applies on top of the read filters (the same default as
 # the GUI's _validate_fusion_breakpoints): reads that support the same breakpoint.
@@ -190,36 +194,37 @@ class FusionSection(ReportSection):
             logger.warning(f"Could not read fusion pickle {path}: {e}")
             return pd.DataFrame(), False
 
-    def _old_folder_state(self):
-        """State of a folder with no processed pickle (written before the writer always made one).
+    def _missing_pickle_state(self, csv_name):
+        """State of one candidate type whose processed pickle is missing.
 
-        ``sv_count.txt`` is written when the step finishes; the filtered candidate CSVs hold
-        the reads that passed. No ``sv_count.txt``: never run. Run, no CSV rows: nothing
-        passed. Run, CSV rows but no pickle: the results exist but were not processed.
+        The type's filtered candidate CSV holds the reads that passed; ``sv_count.txt`` is
+        written when the step finishes. CSV rows but no pickle: the results exist but were
+        not processed (a folder from before the writer always made one, or this type's build
+        failed). No rows: with ``sv_count.txt`` the step ran and nothing passed; without it,
+        never run.
         """
-        if not os.path.exists(os.path.join(self.report.output, "sv_count.txt")):
-            return STATE_NOT_RUN
-        for name in ("fusion_candidates_master.csv", "fusion_candidates_all.csv"):
-            path = os.path.join(self.report.output, name)
-            if not os.path.exists(path):
-                continue
+        path = os.path.join(self.report.output, csv_name)
+        if os.path.exists(path):
             try:
                 if not pd.read_csv(path).empty:
                     return STATE_UNREADABLE
             except pd.errors.EmptyDataError:
-                continue
+                pass
             except Exception as e:
                 logger.warning(f"Could not read fusion candidates {path}: {e}")
                 return STATE_UNREADABLE
-        return STATE_NONE
+        if os.path.exists(os.path.join(self.report.output, "sv_count.txt")):
+            return STATE_NONE
+        return STATE_NOT_RUN
 
     def _load_fusion_data(self):
-        """Load fusion data from the processed pickle files and decide the sample's state.
+        """Load the processed pickles and decide a state per candidate type and for the sample.
 
-        state: found when a readable pickle holds candidates; unreadable when a processed
-        pickle can't be read and no readable one holds candidates; none when the readable
-        pickles hold none; with no processed pickle at all, the old-folder evidence
-        (sv_count.txt and the candidate CSVs) decides, and no evidence means not run.
+        Per type (``master_state``: target panel; ``all_state``: genome-wide): found when its
+        pickle is readable and holds candidates; none when readable and empty; unreadable when
+        it can't be read; a missing pickle is decided by that type's own evidence
+        (``_missing_pickle_state``). ``state``, the sample's: found if either type is, else
+        unreadable if either is, else none if either is, else not run.
         """
         fusion_data = {
             "master_candidates": None,
@@ -228,30 +233,34 @@ class FusionSection(ReportSection):
                 self.report.output, "fusion_candidates_master_processed.pkl"
             ),
             "all_path": os.path.join(self.report.output, "fusion_candidates_all_processed.pkl"),
+            "master_state": STATE_NOT_RUN,
+            "all_state": STATE_NOT_RUN,
             "state": STATE_NOT_RUN,
             "unreadable": [],
         }
 
-        readable = []
-        for key, path_key in (("master_candidates", "master_path"), ("all_candidates", "all_path")):
-            path = fusion_data[path_key]
+        for kind, csv_name in (
+            ("master", "fusion_candidates_master.csv"),
+            ("all", "fusion_candidates_all.csv"),
+        ):
+            path = fusion_data[f"{kind}_path"]
             if not os.path.exists(path):
-                continue
-            candidates, ok = self._read_processed_pickle(path)
-            if ok:
-                fusion_data[key] = candidates
-                readable.append(candidates)
+                state = self._missing_pickle_state(csv_name)
             else:
-                fusion_data["unreadable"].append(path)
+                candidates, ok = self._read_processed_pickle(path)
+                if ok:
+                    fusion_data[f"{kind}_candidates"] = candidates
+                    state = STATE_NONE if candidates.empty else STATE_FOUND
+                else:
+                    fusion_data["unreadable"].append(path)
+                    state = STATE_UNREADABLE
+            fusion_data[f"{kind}_state"] = state
 
-        if any(not df.empty for df in readable):
-            fusion_data["state"] = STATE_FOUND
-        elif fusion_data["unreadable"]:
-            fusion_data["state"] = STATE_UNREADABLE
-        elif readable:
-            fusion_data["state"] = STATE_NONE
-        else:
-            fusion_data["state"] = self._old_folder_state()
+        states = {fusion_data["master_state"], fusion_data["all_state"]}
+        for state in (STATE_FOUND, STATE_UNREADABLE, STATE_NONE, STATE_NOT_RUN):
+            if state in states:
+                fusion_data["state"] = state
+                break
         return fusion_data
 
     def _format_fusion_table(self, data, title):
@@ -504,7 +513,9 @@ class FusionSection(ReportSection):
         master_networks = self._get_gene_networks(master_pairs)
         all_networks = self._get_gene_networks(all_pairs)
 
-        # Create summary text
+        # Create summary text: the target-panel sentence follows the target panel's state,
+        # the genome-wide sentence the genome-wide state.
+        master_state = fusion_data["master_state"]
         summary_text = []
         if master_networks:
             summary_text.append(
@@ -512,17 +523,30 @@ class FusionSection(ReportSection):
             )
             for network in master_networks:
                 summary_text.append(f"• {' - '.join(network)}")
-        elif fusion_data["state"] == STATE_NOT_RUN:
-            summary_text.append(NOT_RUN_TEXT)
+        elif master_state in (STATE_FOUND, STATE_NONE):
+            summary_text.append(NONE_FOUND_SUMMARY_TEXT)
+        elif fusion_data["state"] in (STATE_FOUND, STATE_NONE):
+            # The genome-wide results were read; the target panel's were not.
+            summary_text.append(
+                TARGET_UNREADABLE_SUMMARY_TEXT
+                if master_state == STATE_UNREADABLE
+                else TARGET_NOT_RUN_SUMMARY_TEXT
+            )
         elif fusion_data["state"] == STATE_UNREADABLE:
             summary_text.append(UNREADABLE_TEXT)
         else:
-            summary_text.append(NONE_FOUND_SUMMARY_TEXT)
+            summary_text.append(NOT_RUN_TEXT)
 
         if all_networks and len(all_networks) > len(master_networks):
             summary_text.append(
                 f"<br/>Additional {len(all_networks) - len(master_networks)} genome-wide fusion networks identified."
             )
+        elif fusion_data["all_state"] == STATE_UNREADABLE and master_state in (
+            STATE_FOUND,
+            STATE_NONE,
+        ):
+            # (When the target panel's results are missing too, the sentence above covers both.)
+            summary_text.append(f"<br/>{GENOME_WIDE_UNREADABLE_SUMMARY_TEXT}")
 
         summary_paragraph = "\n".join(summary_text)
 

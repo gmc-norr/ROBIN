@@ -233,14 +233,21 @@ def test_cnv_handler_files_its_batch_error(tmp_path):
     ]
 
 
-def _run_simple_worker(job_type, handler, metadata=None, filepath="x_pass_0.bam", old_error=False):
-    """Drive the real WorkflowManager.worker loop on one job; return (manager, context)."""
+def _run_simple_worker(
+    job_type, handler, metadata=None, filepath="x_pass_0.bam", old_error=False, enqueued=None
+):
+    """Drive the real WorkflowManager.worker loop on one job; return (manager, context).
+
+    ``enqueued``: a list that receives every job the worker hands on (triggered or next).
+    """
     import queue
     import threading
 
     from robin.workflow_simple import Job, WorkflowContext, WorkflowManager
 
     mgr = WorkflowManager(enable_batching=False)
+    if enqueued is not None:
+        mgr.enqueue_jobs = enqueued.extend
     ctx = WorkflowContext(
         filepath=filepath,
         metadata={"bam_metadata": {"sample_id": "simple_s"}, **(metadata or {})},
@@ -278,6 +285,49 @@ def test_non_ray_runner_counts_a_raised_exception_as_failed():
 
     mgr, _ = _run_simple_worker("mgmt", handler)
     assert mgr.failed_jobs_by_type == {"mgmt": 1}
+
+
+def test_non_ray_runner_handler_that_files_an_error_and_raises_is_failed_once():
+    """M10a: the filed error stays once, the exception is recorded once, the job fails once."""
+
+    def handler(job):
+        job.context.add_error("mgmt_analysis", "synthetic mgmt failure")
+        raise RuntimeError("synthetic crash")
+
+    mgr, ctx = _run_simple_worker("mgmt", handler)
+    assert mgr.failed_jobs_by_type == {"mgmt": 1}
+    assert mgr.completed_jobs_by_type == {}
+    assert [(e["job_type"], e["error"]) for e in ctx.errors] == [
+        ("mgmt_analysis", "synthetic mgmt failure"),
+        ("mgmt", "Job mgmt failed: synthetic crash"),
+    ]
+
+
+PREPROCESSING_PLAN = {"original_workflow": ["preprocessing:preprocessing", "mgmt:mgmt", "cnv:cnv"]}
+
+
+@pytest.mark.parametrize("how", ["files_an_error", "raises"])
+def test_non_ray_runner_failed_job_triggers_nothing(how):
+    """M10b: a failed preprocessing job hands on none of the jobs it would trigger."""
+
+    def handler(job):
+        if how == "raises":
+            raise RuntimeError("synthetic crash")
+        job.context.add_error("preprocessing", "synthetic preprocessing failure")
+
+    enqueued = []
+    mgr, _ = _run_simple_worker("preprocessing", handler, metadata=PREPROCESSING_PLAN, enqueued=enqueued)
+    assert mgr.failed_jobs_by_type == {"preprocessing": 1}
+    assert enqueued == []
+
+
+def test_non_ray_runner_control_successful_job_triggers_its_next_jobs():
+    enqueued = []
+    mgr, _ = _run_simple_worker(
+        "preprocessing", lambda job: None, metadata=PREPROCESSING_PLAN, enqueued=enqueued
+    )
+    assert mgr.completed_jobs_by_type == {"preprocessing": 1}
+    assert sorted(j.job_type for j in enqueued) == ["cnv", "mgmt"]
 
 
 def test_non_ray_runner_fail_only_filed_error_is_expected_not_failed():

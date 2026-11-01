@@ -213,6 +213,51 @@ def test_stale_status_line_in_the_input_is_not_carried_over(
     assert "##ROBIN_ClinVar=unavailable;reason=ClinVar database not found" in text
 
 
+def test_status_line_goes_right_after_a_fileformat_line_that_is_not_first(folder):
+    # M11: strict readers require ##fileformat= first; the status line must not go above it.
+    (folder / "snpeff.vcf").write_text(
+        "##source=x\n##fileformat=VCFv4.2\n##INFO=<ID=DP>\n#CHROM\tPOS\nchr1\t1\n"
+    )
+    final = folder / "snpsift_output.vcf"
+    _annotate(folder / "snpeff.vcf", final, db=None)
+    assert _lines(final) == [
+        "##source=x",
+        "##fileformat=VCFv4.2",
+        "##ROBIN_ClinVar=unavailable;reason=ClinVar database not found",
+        "##INFO=<ID=DP>",
+        "#CHROM\tPOS",
+        "chr1\t1",
+    ]
+
+
+def test_status_line_goes_first_without_a_fileformat_line(folder):
+    (folder / "snpeff.vcf").write_text(
+        "##source=x\n##ROBIN_ClinVar=annotated\n#CHROM\tPOS\nchr1\t1\n"
+    )
+    final = folder / "snpsift_output.vcf"
+    _annotate(folder / "snpeff.vcf", final, db=None)
+    assert _lines(final) == [
+        "##ROBIN_ClinVar=unavailable;reason=ClinVar database not found",
+        "##source=x",
+        "#CHROM\tPOS",
+        "chr1\t1",
+    ]
+
+
+def test_a_status_line_below_the_column_header_is_not_carried_over(folder):
+    (folder / "snpeff.vcf").write_text(
+        "##fileformat=VCFv4.2\n#CHROM\tPOS\n##ROBIN_ClinVar=annotated\nchr1\t1\n"
+    )
+    final = folder / "snpsift_output.vcf"
+    _annotate(folder / "snpeff.vcf", final, db=None)
+    assert _lines(final) == [
+        "##fileformat=VCFv4.2",
+        "##ROBIN_ClinVar=unavailable;reason=ClinVar database not found",
+        "#CHROM\tPOS",
+        "chr1\t1",
+    ]
+
+
 def test_empty_snpsift_output_is_unavailable(folder, tmp_path, monkeypatch):
     _stand_in(tmp_path / "bin", "pass\n")
     _use_path(monkeypatch, tmp_path / "bin")
@@ -344,6 +389,34 @@ def test_pathogenic_rows_are_still_listed_when_the_other_file_was_not_annotated(
     assert "unavailable for the INDEL file" in text
     assert NOT_ANNOTATED_SENTENCE not in text
     assert "Detailed Analysis" in text
+
+
+def test_not_recorded_file_with_pathogenic_rows_keeps_its_count_and_says_they_are_annotated(
+    tmp_path,
+):
+    # I2 / P5: a pre-batch SNP file (no status line) that lists a CLNSIG=Pathogenic row. Such a
+    # row can only come from ClinVar, so "could not be assessed" would contradict the list.
+    out = _clair(tmp_path, None, snp_rows=PATHOGENIC_ROW)
+    text, section = _report_text(out)
+    assert len(section.variant_result.snp_data) == 1
+    assert "Found 1 candidate pathogenic SNPs" in text
+    assert "BRCA9" in text
+    assert "ClinVar annotation status was not recorded for the SNP file" in text
+    assert "the SNP variants listed carry ClinVar annotations" in text
+    assert "could not be assessed" not in text
+    assert NOT_ANNOTATED_SENTENCE not in text
+
+
+def test_not_recorded_files_old_folder_rows_in_one_file_only(tmp_path):
+    # A typical old folder: neither file has a status line; only the SNP file has a row.
+    out = _clair(tmp_path, None, snp_rows=PATHOGENIC_ROW, indel_line=None)
+    text, _ = _report_text(out)
+    assert "Found 1 candidate pathogenic SNPs" in text
+    assert "the SNP variants listed carry ClinVar annotations" in text
+    assert "pathogenic SNP variants could not be assessed" not in text
+    # the INDEL file has no rows: its sentence stays, and no count is claimed for it
+    assert "pathogenic INDEL variants could not be assessed" in text
+    assert "0 candidate pathogenic indels" not in text
 
 
 def test_report_does_not_claim_zero_for_the_unannotated_file(tmp_path):

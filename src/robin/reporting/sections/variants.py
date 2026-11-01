@@ -279,8 +279,14 @@ class VariantsSection(ReportSection):
 
     def _clinvar_notes(self):
         """Sentences for each present variant file that was not ClinVar-annotated."""
+        rows = {
+            "SNP": self.variant_result.snp_data,
+            "INDEL": self.variant_result.indel_data,
+        }
         return [
-            describe_not_annotated(kind, status, escape(reason))
+            describe_not_annotated(
+                kind, status, escape(reason), has_pathogenic_rows=bool(rows.get(kind))
+            )
             for kind, (status, reason) in self.clinvar_states.items()
             if status != ANNOTATED
         ]

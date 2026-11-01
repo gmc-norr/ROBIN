@@ -194,6 +194,15 @@ def test_c5_old_folder_with_header_only_csv_says_none_found(tmp_path):
     assert UNREADABLE not in body
 
 
+def test_c5_old_folder_with_zero_byte_csv_says_none_found(tmp_path):
+    d = _sample_dir(tmp_path)
+    (d / "sv_count.txt").write_text("0")
+    (d / "fusion_candidates_master.csv").write_text("")
+    body, summary = _report_text(d)
+    assert NONE_FOUND in body and NONE_FOUND_SUMMARY in summary
+    assert UNREADABLE not in body
+
+
 def test_old_folder_with_candidate_rows_but_no_pickle_is_unreadable(tmp_path):
     d = _sample_dir(tmp_path)
     (d / "sv_count.txt").write_text("1")
@@ -381,6 +390,98 @@ def test_a_failed_build_is_rebuilt_on_the_next_run_without_double_counting(tmp_p
     assert len(pd.read_csv(d / "fusion_candidates_master.csv")) == csv_rows
     body, summary = _report_text(d)
     assert "GENEA" in summary
+
+
+# ------------------------------------------------------------------ one candidate type at a time (I1)
+# The target-panel (master) and genome-wide (all) results each have their own state: one of them
+# missing or unreadable must not read as "none found" because the other holds candidates.
+TARGET_UNREADABLE = "The target-panel fusion results could not be read."
+GENOME_WIDE_UNREADABLE = "The genome-wide fusion results could not be read."
+ONE_GENOME_WIDE = "Additional 1 genome-wide fusion networks identified."
+
+
+def _target_unreadable_genome_wide_shown(d):
+    body, summary = _report_text(d)
+    assert NONE_FOUND_SUMMARY not in summary, summary
+    assert TARGET_UNREADABLE in summary, summary
+    # the genome-wide candidates still show
+    assert ONE_GENOME_WIDE in summary, summary
+    assert "Genome-wide Fusions" in body
+    assert NONE_FOUND not in body and NOT_RUN not in body
+
+
+def test_i1_target_pickle_missing_while_its_csv_has_rows(tmp_path):
+    # P4 A: the genome-wide pickle holds candidates (writing it also writes sv_count.txt); the
+    # target panel's candidates are in its CSV only.
+    d = _sample_dir(tmp_path)
+    _write_pickles(d, _rows(4), names=("all",))
+    _rows(4).to_csv(d / "fusion_candidates_master.csv", index=False)
+    assert (d / "sv_count.txt").exists()
+    _target_unreadable_genome_wide_shown(d)
+
+
+def test_i1_target_pickle_unreadable(tmp_path):
+    # P4 B: a truncated target-panel pickle next to a genome-wide one with candidates.
+    d = _sample_dir(tmp_path)
+    _write_pickles(d, _rows(4), names=("all",))
+    (d / "fusion_candidates_master_processed.pkl").write_bytes(b"\x80\x04\x95")
+    _target_unreadable_genome_wide_shown(d)
+
+
+def test_i1_only_the_target_panel_build_raised(tmp_path, monkeypatch):
+    # P4 C, through the real writer: both builds run (Ruling J); the preprocessing raises only
+    # for the target-panel pickle.
+    monkeypatch.setattr(fusion_work, "_ensure_gene_regions_loaded", lambda panel: None)
+    real = fusion_work.preprocess_fusion_data_standalone
+
+    def target_panel_only_raises(df, output_file):
+        if "master" in os.path.basename(output_file):
+            raise RuntimeError("synthetic target-panel crash")
+        return real(df, output_file)
+
+    monkeypatch.setattr(
+        fusion_work, "preprocess_fusion_data_standalone", target_panel_only_raises
+    )
+    _stage(tmp_path, _rows(4))
+    result = _accumulate(tmp_path)
+    assert result["status"] == "error"
+    d = tmp_path / SAMPLE
+    assert not (d / "fusion_candidates_master_processed.pkl").exists()
+    assert len(pd.read_csv(d / "fusion_candidates_master.csv")) == 8
+    assert not _load(d / "fusion_candidates_all_processed.pkl")["annotated_data"].empty
+    _target_unreadable_genome_wide_shown(d)
+
+
+def test_i1_genome_wide_pickle_unreadable_is_said_beside_the_target_panel_candidates(tmp_path):
+    d = _sample_dir(tmp_path)
+    _write_pickles(d, _rows(4), names=("master",))
+    (d / "fusion_candidates_all_processed.pkl").write_bytes(b"garbage")
+    _, summary = _report_text(d)
+    assert "Found 1 fusion networks within the target panel" in summary
+    assert GENOME_WIDE_UNREADABLE in summary
+
+
+def test_i1_target_panel_with_no_trace_of_a_run_is_not_called_none_found(tmp_path):
+    # No target-panel pickle or CSV and no sv_count.txt (a pickle write makes one, so it is
+    # removed by hand): the target panel shows no sign of a run.
+    d = _sample_dir(tmp_path)
+    _write_pickles(d, _rows(4), names=("all",))
+    (d / "sv_count.txt").unlink()
+    _, summary = _report_text(d)
+    assert "Fusion analysis has not been run for the target panel." in summary
+    assert NONE_FOUND_SUMMARY not in summary
+    assert ONE_GENOME_WIDE in summary
+
+
+def test_i1_control_target_panel_ran_and_found_nothing_is_none_found(tmp_path):
+    # The target-panel build ran and nothing passed (an empty pickle): "none found" is right.
+    d = _sample_dir(tmp_path)
+    _write_pickles(d, _rows(4), names=("all",))
+    fusion_work.write_empty_fusion_pickle(str(d / "fusion_candidates_master_processed.pkl"))
+    _, summary = _report_text(d)
+    assert NONE_FOUND_SUMMARY in summary
+    assert ONE_GENOME_WIDE in summary
+    assert TARGET_UNREADABLE not in summary and UNREADABLE not in summary
 
 
 def test_a_step_inside_the_real_preprocessing_that_raises_fails_the_job(tmp_path, monkeypatch):

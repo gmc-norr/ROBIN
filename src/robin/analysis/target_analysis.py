@@ -149,24 +149,32 @@ def _resolve_clinvar_db_for_snpsift(logger: logging.Logger) -> Optional[str]:
 
 
 def _write_with_clinvar_header(src: str, dst: str, header_line: str) -> None:
-    """Copy VCF ``src`` to ``dst`` with the ClinVar status line after ``##fileformat=``."""
+    """Copy VCF ``src`` to ``dst`` with the ClinVar status line right after ``##fileformat=``,
+    wherever that line is in the meta-information; first when there is none."""
     from robin.analysis.clinvar_status import CLINVAR_HEADER_KEY
 
-    placed = False
     with open(src, "r") as fin, open(dst, "w") as fout:
+        # The ## meta lines are few: read them all, then place the status line.
+        meta = []
+        first_other = None
         for line in fin:
             if line.startswith(CLINVAR_HEADER_KEY):
                 continue  # never carry a stale status line over
-            if not placed and not line.startswith("##fileformat="):
-                # No ##fileformat= line first: the status line goes on top.
-                fout.write(header_line + "\n")
-                placed = True
+            if not line.startswith("##"):
+                first_other = line
+                break
+            meta.append(line)
+        at = next(
+            (i + 1 for i, line in enumerate(meta) if line.startswith("##fileformat=")), 0
+        )
+        meta.insert(at, header_line + "\n")
+        fout.writelines(meta)
+        if first_other is not None:
+            fout.write(first_other)
+        for line in fin:
+            if line.startswith(CLINVAR_HEADER_KEY):
+                continue
             fout.write(line)
-            if not placed and line.startswith("##fileformat="):
-                fout.write(header_line + "\n")
-                placed = True
-        if not placed:
-            fout.write(header_line + "\n")
 
 
 def annotate_with_clinvar(

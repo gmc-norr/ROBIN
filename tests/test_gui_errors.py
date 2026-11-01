@@ -7,6 +7,8 @@ site turns a test red.
 
 import ast
 import inspect
+import logging
+import queue
 import time
 from pathlib import Path
 
@@ -135,3 +137,140 @@ def test_failures_by_category_mapping():
          "random_forest": 1, "mgmt": 5, "cnv": 1, "igv_bam": 1}
     )
     assert f == {"preprocessing": 3, "classification": 6, "analysis": 7}
+
+
+# ---------------------------------------------------------------- publish_failures (M1, M2, M3)
+
+
+def _failure(seq):
+    return {"seq": seq, "kind": "failure", "sample_id": "S", "job_type": "mgmt", "error": "boom",
+            "time": float(seq)}
+
+
+def _msg(seq, message, update_type="warning_notification", priority=5):
+    return {"seq": seq, "kind": "gui_message", "update_type": update_type,
+            "data": {"message": message}, "priority": priority}
+
+
+def _stats(events):
+    return {"recent_events": events,
+            "failures_by_category": {"preprocessing": 0, "classification": 0, "analysis": 1}}
+
+
+def test_an_unknown_update_type_does_not_block_the_events_behind_it(caplog):
+    # P1: one event's update_type is not an UpdateType; the failure behind it still goes out.
+    events = [_msg(1, "w1"), _msg(2, "", update_type="not_a_real_type", priority=0), _failure(3)]
+    state = {"last_seq": 0}
+    sent = []
+    with caplog.at_level(logging.WARNING):
+        workflow_ray.publish_failures(_stats(events), state, lambda t, d, p=0: sent.append(t.value))
+    assert sent == ["warning_notification", "error_update"]
+    assert state["last_seq"] == 3
+    assert "not_a_real_type" in caplog.text
+    again = []
+    workflow_ray.publish_failures(_stats(events), state, lambda t, d, p=0: again.append(t.value))
+    assert again == []  # nothing is sent twice
+
+
+def test_a_send_that_raises_does_not_block_the_events_behind_it(caplog):
+    # P1b: send itself raises on the second event.
+    events = [_msg(1, "w1"), _msg(2, "w2"), _failure(3)]
+    state = {"last_seq": 0}
+    sent = []
+
+    def flaky(t, d, p=0):
+        if d.get("message") == "w2":
+            raise RuntimeError("queue closed")
+        sent.append(t.value)
+
+    with caplog.at_level(logging.WARNING):
+        workflow_ray.publish_failures(_stats(events), state, flaky)
+    assert sent == ["warning_notification", "error_update"]
+    assert state["last_seq"] == 3
+    assert "queue closed" in caplog.text
+    sent.clear()
+    workflow_ray.publish_failures(_stats(events), state, flaky)
+    assert sent == []  # w1 is not re-sent, the failure not announced twice
+
+
+def _launcher():
+    """A real GUILauncher, NiceGUI not started: only the attributes send_update reads."""
+    g = object.__new__(GUILauncher)
+    g.update_queue = queue.PriorityQueue()
+    g._last_update_times = {}
+    g._last_queue_size_logged = 0
+    g._last_log_time = 0.0
+    g._update_seq = 0
+    g.total_updates_enqueued = 0
+    return g
+
+
+def _enqueued(g):
+    out = []
+    while not g.update_queue.empty():
+        _, _, update = g.update_queue.get_nowait()
+        if update is not None:
+            out.append(update)
+    return out
+
+
+def test_error_update_is_enqueued_when_the_launcher_queue_is_full():
+    # M2: the launcher drops updates below priority 5 once its queue holds more than 1000.
+    g = _launcher()
+    for i in range(1001):
+        g.update_queue.put((0, -1 - i, None))
+    g.send_update(UpdateType.LOG_MESSAGE, {"message": "control"}, 0)
+    assert g.update_queue.qsize() == 1001, "the pre-fill is not past the launcher's drop threshold"
+    workflow_ray.publish_failures(_stats([_failure(1)]), {"last_seq": 0}, g.send_update)
+    assert [u.update_type for u in _enqueued(g)] == [UpdateType.ERROR_UPDATE]
+
+
+def test_two_forwarded_messages_of_one_type_within_half_a_second_are_both_enqueued():
+    # M2: the launcher merges same-type updates below priority 5 that arrive within 0.5 s.
+    g = _launcher()
+    skipped = [
+        _msg(i, f"Skipped (too many reads): {name}", update_type="log_message", priority=0)
+        for i, name in ((1, "a_pass_0.bam"), (2, "b_pass_0.bam"))
+    ]
+    workflow_ray.publish_failures({"recent_events": skipped}, {"last_seq": 0}, g.send_update)
+    assert sorted(u.data["message"] for u in _enqueued(g)) == [
+        "Skipped (too many reads): a_pass_0.bam",
+        "Skipped (too many reads): b_pass_0.bam",
+    ]
+
+
+def test_events_dropped_from_the_log_between_two_polls_are_reported(caplog):
+    # M3 / P2: 230 worker messages then one failure, all between two polls; the log keeps 200.
+    class FakeJob:
+        job_type = "mgmt"
+        context = workflow_ray.WorkflowContext(
+            filepath="x_pass_0.bam", metadata={"bam_metadata": {"sample_id": "s"}}
+        )
+
+    coord = object.__new__(workflow_ray.Coordinator.__ray_metadata__.modified_class)
+    coord._events = workflow_ray.deque(maxlen=workflow_ray.EVENT_LOG_MAX)
+    coord._event_seq = 0
+    for i in range(230):
+        ctx = workflow_ray.WorkflowContext(filepath="x_pass_0.bam", metadata={
+            "bam_metadata": {"sample_id": f"s{i}"},
+            "gui_messages": [{"update_type": "warning_notification",
+                              "data": {"message": f"warn {i}"}, "priority": 5}],
+        })
+        coord._record_events(FakeJob, True, ctx, None, None, False)
+    coord._record_events(FakeJob, False, FakeJob.context, "the failure", "returned_error", False)
+    stats = {"recent_events": list(coord._events), "failures_by_category": {"analysis": 1}}
+    assert len(stats["recent_events"]) == 200 and stats["recent_events"][0]["seq"] == 32
+
+    sent = []
+    with caplog.at_level(logging.WARNING):
+        workflow_ray.publish_failures(
+            stats, {"last_seq": 0}, lambda t, d, p=0: sent.append((t.value, d, p))
+        )
+    lost = [(d, p) for t, d, p in sent if t == "log_message"]
+    assert len(lost) == 1
+    assert lost[0][0]["message"].startswith("31 earlier messages were not shown")
+    assert lost[0][1] >= 5  # the launcher neither drops nor merges it
+    assert "31" in caplog.text
+    # what the log still holds goes out as before
+    assert len([d for t, d, _ in sent if t == "warning_notification"]) == 199
+    assert [t for t, _, _ in sent].count("error_update") == 1

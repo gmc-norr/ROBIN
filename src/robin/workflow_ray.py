@@ -583,8 +583,11 @@ _job_id_counter = itertools.count(1000)
 EVENT_LOG_MAX = 200
 EVENT_ERROR_CHARS = 300
 _PREPROCESSING_TYPES = {"preprocessing", "bed_conversion"}
-_CLASSIFICATION_FAILURE_TYPES = {"sturgeon", "nanodx", "pannanodx", "random_forest"}
 _FAILURE_KINDS = ("failure", "file_failed")  # event kinds that raise an ERROR_UPDATE
+# Priority for what publish_failures sends. GUILauncher.send_update drops updates below 5 when
+# its queue holds more than 1000, and merges same-type updates below 5 within 0.5 s; these are
+# few (one per job event, polled every 15 s) and none may be lost.
+GUI_EVENT_PRIORITY = 5
 
 
 def failures_by_category(
@@ -598,7 +601,7 @@ def failures_by_category(
     for jt, n in counts.items():
         if jt in _PREPROCESSING_TYPES:
             out["preprocessing"] += n
-        elif jt in _CLASSIFICATION_FAILURE_TYPES:
+        elif jt in CLASSIFICATION_TYPES:
             out["classification"] += n
         else:
             out["analysis"] += n
@@ -611,19 +614,52 @@ def publish_failures(stats: Dict[str, Any], state: Dict[str, Any], send: Callabl
     Each ``gui_message`` goes out as its own update type with its own data. If any new ``failure``
     event arrived, one ``ERROR_UPDATE`` follows with the three category counts and ``recent``
     (newest first: time, sample_id, job_type, error). ``send(update_type, data, priority)``.
+
+    ``last_seq`` advances event by event: an event that can't be sent (an update type the GUI
+    doesn't know, a ``send`` that raises) is logged and skipped and holds back nothing behind
+    it. Events that left the bounded event log before this poll are logged, and the GUI gets
+    one line saying how many were not shown. Everything goes out at ``GUI_EVENT_PRIORITY`` or
+    above, which the launcher neither drops nor merges.
     """
+    log = logging.getLogger("robin.workflow")
     last = int(state.get("last_seq", 0) or 0)
     all_events = stats.get("recent_events") or []
-    events = [e for e in all_events if e.get("seq", 0) > last]
+    events = sorted((e for e in all_events if e.get("seq", 0) > last), key=lambda e: e["seq"])
     if not events:
         return
+
+    def _send(update_type, data, priority, what):
+        try:
+            send(update_type, data, priority)
+        except Exception as exc:
+            log.warning(f"Could not send {what} to the GUI: {exc}")
+
+    lost = events[0]["seq"] - last - 1
+    if lost > 0:
+        log.warning(
+            f"{lost} workflow events left the event log (it keeps the newest {EVENT_LOG_MAX}) "
+            "before the GUI could show them"
+        )
+        _send(
+            _GUIUpdateType.LOG_MESSAGE,
+            {"message": f"{lost} earlier messages were not shown", "level": "WARNING"},
+            GUI_EVENT_PRIORITY,
+            "the lost-messages line",
+        )
     new_failure = False
-    for e in sorted(events, key=lambda e: e["seq"]):
+    for e in events:
+        state["last_seq"] = e["seq"]
         if e.get("kind") == "gui_message":
-            send(_GUIUpdateType(e["update_type"]), e.get("data") or {}, e.get("priority", 0))
+            what = f"worker message {e.get('update_type')!r} (event {e['seq']})"
+            try:
+                update_type = _GUIUpdateType(e["update_type"])
+                priority = max(int(e.get("priority", 0) or 0), GUI_EVENT_PRIORITY)
+            except Exception as exc:
+                log.warning(f"Could not send {what} to the GUI: {exc}")
+                continue
+            _send(update_type, e.get("data") or {}, priority, what)
         elif e.get("kind") in _FAILURE_KINDS:
             new_failure = True
-    state["last_seq"] = max(e["seq"] for e in events)
     if new_failure:
         cats = stats.get("failures_by_category") or {}
         failures = [e for e in all_events if e.get("kind") in _FAILURE_KINDS]
@@ -640,7 +676,7 @@ def publish_failures(stats: Dict[str, Any], state: Dict[str, Any], send: Callabl
             }
             for e in sorted(failures, key=lambda e: e["seq"], reverse=True)
         ]
-        send(
+        _send(
             _GUIUpdateType.ERROR_UPDATE,
             {
                 "preprocessing_errors": cats.get("preprocessing", 0),
@@ -648,7 +684,8 @@ def publish_failures(stats: Dict[str, Any], state: Dict[str, Any], send: Callabl
                 "classification_errors": cats.get("classification", 0),
                 "recent": recent,
             },
-            1,
+            GUI_EVENT_PRIORITY,
+            "the error update",
         )
 
 

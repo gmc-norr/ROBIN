@@ -65,13 +65,26 @@ def clinvar_status(vcf_path) -> Tuple[str, str]:
     return NOT_RECORDED, ""
 
 
-def describe_not_annotated(kind: str, status: str, reason: str = "") -> str:
-    """Sentence for the report/GUI when ``kind`` ('SNP'/'INDEL') was not annotated."""
+def describe_not_annotated(
+    kind: str, status: str, reason: str = "", has_pathogenic_rows: bool = False
+) -> str:
+    """Sentence for the report/GUI when ``kind`` ('SNP'/'INDEL') was not annotated.
+
+    ``has_pathogenic_rows``: the file lists ClinVar-pathogenic rows. For a file with no status
+    line such rows can only come from ClinVar, so it was annotated: say so instead of
+    "could not be assessed".
+    """
     if status == UNAVAILABLE:
         why = f" ({reason})" if reason else ""
         return (
             f"ClinVar annotation was unavailable for the {kind} file{why}; "
             f"pathogenic {kind} variants could not be assessed."
+        )
+    if has_pathogenic_rows:
+        return (
+            f"ClinVar annotation status was not recorded for the {kind} file "
+            f"(it predates status recording); the {kind} variants listed carry ClinVar "
+            "annotations."
         )
     return (
         f"ClinVar annotation status was not recorded for the {kind} file "
