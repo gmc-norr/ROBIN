@@ -208,7 +208,15 @@ def panel_depth(sample_dir, bed_df: pd.DataFrame):
         try:
             union = pd.read_csv(path, dtype={"chrom": str})
             length = float((union["end"] - union["start"]).sum())
-            if length > 0:
+            # Only the generation written beside these row totals: during a commit, or after
+            # one that failed part-way, the two can differ.
+            in_step = (
+                bed_df is not None
+                and "bases" in bed_df.columns
+                and len(union)
+                and int(union["rows_bases"].iloc[0]) == int(bed_df["bases"].sum())
+            )
+            if in_step and length > 0:
                 return float(union["bases"].sum() / length)
         except Exception as e:
             logging.getLogger("robin.target").warning(

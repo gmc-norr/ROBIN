@@ -796,6 +796,13 @@ _STAGED_KINDS = (
 )
 
 
+def _regions(union: pd.DataFrame) -> frozenset:
+    """The merged panel a union table covers: its (chrom, start, end) set."""
+    return frozenset(
+        (str(c), int(s), int(e)) for c, s, e in union[["chrom", "start", "end"]].itertuples(index=False)
+    )
+
+
 def _complete_staged_counters(staging_dir: str) -> List[str]:
     """Counters whose five staged files all exist, oldest first."""
     counters = []
@@ -1949,13 +1956,34 @@ class TargetAnalysis:
         union_total = None
         if union is not None and (existing_bed is None or os.path.exists(union_path)):
             ukeys = ["chrom", "start", "end"]
-            uframes = [union[ukeys + ["bases"]].astype({"chrom": str})]
+            batch_union = union[ukeys + ["bases"]].astype({"chrom": str})
+            previous_union = None
             if os.path.exists(union_path):
-                uframes.insert(0, pd.read_csv(union_path, dtype={"chrom": str})[ukeys + ["bases"]])
-            union_total = pd.concat(uframes, ignore_index=True).groupby(
-                ukeys, as_index=False, sort=False
-            )["bases"].sum()
-            union_total["bases"] = union_total["bases"].astype("int64")
+                previous_union = pd.read_csv(union_path, dtype={"chrom": str})
+                # The file is the previous generation only if it matches the row totals it was
+                # written beside (a commit that failed after the rows were written leaves it
+                # behind), and only if it covers the same merged panel (a panel changed mid-run).
+                in_step = (
+                    "rows_bases" in previous_union.columns
+                    and existing_bed is not None
+                    and "bases" in existing_bed.columns
+                    and len(previous_union)
+                    and int(previous_union["rows_bases"].iloc[0]) == int(existing_bed["bases"].sum())
+                )
+                if not in_step or _regions(previous_union) != _regions(batch_union):
+                    logger.warning(
+                        f"{union_path} doesn't match the sample's row totals or panel; the panel "
+                        "depth falls back to the row sum"
+                    )
+                    previous_union = None
+                    batch_union = None
+            if batch_union is not None:
+                uframes = [batch_union] if previous_union is None else [previous_union[ukeys + ["bases"]], batch_union]
+                union_total = pd.concat(uframes, ignore_index=True).groupby(
+                    ukeys, as_index=False, sort=False
+                )["bases"].sum()
+                union_total["bases"] = union_total["bases"].astype("int64")
+                union_total["rows_bases"] = int(target_df["bases"].sum())
 
         chart_old = self._load_existing_coverage_over_time(sample_dir, logger)
         current_timestamp = max(timestamps) if timestamps else time.time() * 1000
@@ -2075,14 +2103,17 @@ class TargetAnalysis:
                         ts = float(f.read().strip())
                     with open(staged("source_bam", "txt")) as f:
                         src = f.read().strip()
-                    u = (
-                        pd.read_parquet(staged("union", "parquet"))
-                        if os.path.exists(staged("union", "parquet"))
-                        else None
-                    )
                 except Exception as e:
                     logger.warning(f"Error loading staged set {n} for {sample_id}: {e}")
                     continue
+                # The merged-panel part is optional: unreadable counts as missing (the panel
+                # depth falls back to the row sum); the BAM's other totals are still used.
+                u = None
+                if os.path.exists(staged("union", "parquet")):
+                    try:
+                        u = pd.read_parquet(staged("union", "parquet"))
+                    except Exception as e:
+                        logger.warning(f"Could not read the merged-panel part of staged set {n}: {e}")
                 union_frames.append(u)
                 contigs.append(c)
                 targets.append(t)
@@ -2125,9 +2156,12 @@ class TargetAnalysis:
                     timestamps,
                     batch_reads,
                     logger,
-                    # None when any BAM in the batch was staged before batch 8
+                    # None when any BAM in the batch has no merged-panel part, or the BAMs'
+                    # merged panels differ (the panel changed while they were staged)
                     union=(
-                        None if any(u is None for u in union_frames)
+                        None
+                        if any(u is None for u in union_frames)
+                        or len({_regions(u) for u in union_frames}) > 1
                         else pd.concat(union_frames, ignore_index=True)
                     ),
                 )

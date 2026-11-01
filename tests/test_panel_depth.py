@@ -153,3 +153,92 @@ def test_an_old_folder_with_no_new_bams_shows_the_row_sum(tmp_path, monkeypatch)
     report, summary = _shown(sample_dir)
     assert report == pytest.approx(_row_sum(sample_dir), rel=1e-9)
     assert summary == f"{_row_sum(sample_dir):.2f}x"
+
+
+# ------------------------------------------------------------------ the external review's findings
+def _union_write_fails(monkeypatch):
+    """Writing the union file raises (a disk full, say); every other file is written."""
+    from robin.analysis import target_analysis as ta_mod
+
+    real = ta_mod.atomic_open
+
+    def failing(path, *args, **kwargs):
+        if str(path).endswith(UNION_FILE):
+            raise OSError("synthetic disk full")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(ta_mod, "atomic_open", failing)
+    return lambda: monkeypatch.setattr(ta_mod, "atomic_open", real)
+
+
+def test_a_commit_that_fails_part_way_never_shows_a_partial_total(tmp_path, monkeypatch):
+    # R1: the second of four commits writes bed_coverage_main.csv, then fails on the union file.
+    ta, _ = _analysis(tmp_path, monkeypatch, PANEL)
+    bams, _ = write_bams(str(tmp_path), 4)
+    _add(ta, bams[0])
+    restore = _union_write_fails(monkeypatch)
+    _add(ta, bams[1])
+    restore()
+    sample_dir = tmp_path / "work" / SAMPLE
+    # read right after the failed commit: the union file is a generation behind the rows
+    report, _ = _shown(sample_dir)
+    assert report == pytest.approx(_row_sum(sample_dir), rel=1e-9), report
+    _add(ta, bams[2])
+    _add(ta, bams[3])
+    report, summary = _shown(sample_dir)
+    assert report == pytest.approx(_row_sum(sample_dir), rel=1e-9), report
+    assert summary == f"{_row_sum(sample_dir):.2f}x"
+    assert not (sample_dir / UNION_FILE).exists()
+
+
+def test_a_first_commit_that_fails_part_way_falls_back_to_the_row_sum(tmp_path, monkeypatch):
+    # R1 guard: the first commit fails on the union file; the sample stays on the row sum.
+    ta, _ = _analysis(tmp_path, monkeypatch, PANEL)
+    bams, _ = write_bams(str(tmp_path), 2)
+    restore = _union_write_fails(monkeypatch)
+    _add(ta, bams[0])
+    restore()
+    _add(ta, bams[1])
+    sample_dir = tmp_path / "work" / SAMPLE
+    report, _ = _shown(sample_dir)
+    assert report == pytest.approx(_row_sum(sample_dir), rel=1e-9)
+    assert not (sample_dir / UNION_FILE).exists()
+
+
+@pytest.mark.parametrize("when", ["between_commits", "within_one_batch"])
+def test_a_panel_changed_mid_run_is_not_added_to_the_old_one(tmp_path, monkeypatch, when):
+    # R2: BAM 1 with PANEL, then the same BED file holds PANEL_OVERLAPS for BAM 2.
+    ta, panel = _analysis(tmp_path, monkeypatch, PANEL)
+    bams, _ = write_bams(str(tmp_path), 2)
+    if when == "between_commits":
+        _add(ta, bams[0])
+        write_panel(panel, PANEL_OVERLAPS)
+        _add(ta, bams[1])
+    else:  # both BAMs staged, then committed in one batch
+        ta.process_file_with_staging(bams[0], {"sample_id": SAMPLE})
+        write_panel(panel, PANEL_OVERLAPS)
+        ta.process_file_with_staging(bams[1], {"sample_id": SAMPLE})
+        ta.accumulate_staged_files(SAMPLE, force=True)
+    sample_dir = tmp_path / "work" / SAMPLE
+    assert not (sample_dir / UNION_FILE).exists()
+    report, _ = _shown(sample_dir)
+    assert report == pytest.approx(_row_sum(sample_dir), rel=1e-9), report
+
+
+def test_an_unreadable_union_part_keeps_the_bams_other_data(tmp_path, monkeypatch):
+    # R3: two BAMs staged; the first one's union part is damaged.
+    ta, panel = _analysis(tmp_path, monkeypatch, PANEL)
+    bams, merged = write_bams(str(tmp_path), 2)
+    for bam in bams:
+        ta.process_file_with_staging(bam, {"sample_id": SAMPLE})
+    staging = Path(ta._get_staging_dir(SAMPLE))
+    sorted(staging.glob("union_*.parquet"))[0].write_bytes(b"PAR1 damaged PAR1")
+    result = ta.accumulate_staged_files(SAMPLE, force=True)
+    assert result["files_processed"] == 2, result
+    sample_dir = tmp_path / "work" / SAMPLE
+    assert not (sample_dir / UNION_FILE).exists()
+    bed = pd.read_csv(sample_dir / "bed_coverage_main.csv")
+    ref = [int(line.split("\t")[-1]) for line in pysam.bedcov("-j", panel, merged).splitlines()]
+    assert list(bed["bases"]) == ref  # both BAMs counted
+    report, _ = _shown(sample_dir)
+    assert report == pytest.approx(_row_sum(sample_dir), rel=1e-9)
