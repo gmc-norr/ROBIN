@@ -105,3 +105,29 @@
 ### Task 8: Result and records
 - Run the full comparison; commit `result: … — supported / refuted` with its output.
 - CHANGELOG; review Status lines for TGT-1..5 and the fork table; D4 per-base panel depth on the later list; a learning; plan Outcome; `trail check`.
+
+## Result (2026-11-01, on `dd802d4`): supported
+
+Every locked rule passes. samtools on the merged BAM against ROBIN (k = 1, in order; all 15 runs identical):
+
+| | samtools | ROBIN |
+|---|---|---|
+| GENE_A (bases, depth, reads) | 1097, 3.656667, 11 | 1097, 3.656667, 11 |
+| GENE_B | 1733, 4.332500, 10 | 1733, 4.332500, 10 |
+| GENE_C | 540, 1.800000, 4 | 540, 1.800000, 4 |
+| GENE_D (no reads) | 0, 0, 0 | 0, 0, 0 |
+| chr1 (numreads, covered bases, depth) | 30, 2119, 1.572333 | 30, 2119, 1.572333 |
+| chr2 | 9, 800, 0.495000 | 9, 800, 0.495000 |
+| Global depth; time chart's last value | 1.141400 | 1.141400; 1.141400 |
+| target.bam records (`view -L`) | 22 | 22, the same multiset |
+| Read counts (mapped, unmapped, mapped bases, yield), k = 1, 2, 4 | 33, 4, 5783, 6443 | 33, 4, 5783, 6443 |
+
+Rules 1–4: `tests/test_target_vs_samtools.py` (34 tests; no problem over 15 runs). Rule 5: `tests/test_coverage_consumers.py`. Rule 6: `tests/test_master_bed_panel.py`. Suite 229 → 279.
+
+Gate D:
+1. *Could the pipeline have produced this?* The reference is samtools run once on the merged BAM; ROBIN runs the same samtools library per BAM, so a samtools bug would hit both. Checked by hand from the fixture's read list: chr2's covered bases are 800 (the union of nine aligned spans) and its 9 reads are 3 plain, 3 supplementary, 3 primary.
+2. *Does the control tell working from broken?* On `db7269c`'s code 34 of 34 locked tests fail, each for the named bug (two processes, 4 BAMs: 722 bases where 1,111 were sent). Mutants (one fix undone at a time, only pytest exit 1 counts, a no-op control must survive): first run 10 of 12 caught; the two survivors were weak tests ("commit outside the lock", "half-written set claimed"), strengthened in `dd802d4` after seeing them; then all caught, plus "coverage file written first"; the control survived. The lock mutant is caught in 3 of 3 runs, not at every k (timing).
+3. *Measured or inferred?* Measured: the table, the test runs, the mutants, the hand count.
+4. *Fresh output:* in this commit's message.
+
+Differences from the plan, each ledgered: Tasks 3 and 4 in one commit (the staged format and its reader change together); `target.bam` follows `samtools view -L` (records overlapping the panel and the master BED's regions), not "every record of a read whose primary overlaps", so it no longer carries off-panel pieces of panel reads and gains in-panel pieces of off-panel reads; an old folder's covered bases become unknown rather than migrated; the master BED's cache key is unchanged (the union makes a stale file harmless); the test venv needed `networkx` and `scikit-learn==1.8.0` (declared dependencies) for the master BED lookup to work.
