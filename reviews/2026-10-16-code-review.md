@@ -10,7 +10,8 @@
 **Updated:** 2026-10-31. Two follow-ups from batch 3's own review are fixed in our fork: `robin add-panel` reads BED files wider than 6 columns (BED12 was saved garbled), and the variant panel's "Hide Results" keeps pointing at the file it showed.\
 **Updated:** 2026-10-31. Five findings from a review of the fix series (`reviews/2026-10-31-fix-series-review.md`) are fixed in our fork: stale CNV breakpoints after a flat run, an older LGA results file hiding a newer one, an LGA status timer that never stopped, SNV sites with no usable bases read as "None Detected", and `{file}` quoting inside `$(...)`. ClinVar sites no read covers now need review too, and that batch's own review led to two more fixes (a failed CNV detection, a "(legacy location)" caption). Six more bugs found along the way are fixed too; see the fork table.\
 **Updated:** 2026-10-31. Step 4 is fixed in our fork: CNV-1 (the control profile comes from the control's own counts, which also ends a 16-bit wrap found while fixing it), with CNV-3 (a batch's last BAM counted twice) in the same code.\
-**Updated:** 2026-11-01. Step 5, the methylation maths, is fixed in our fork except METH-7 (left for later): METH-1 to METH-6, METH-13 and METH-14, checked against `modkit pileup --combine-strands` on synthetic reads, and part of METH-12.
+**Updated:** 2026-11-01. Step 5, the methylation maths, is fixed in our fork except METH-7 (left for later): METH-1 to METH-6, METH-13 and METH-14, checked against `modkit pileup --combine-strands` on synthetic reads, and part of METH-12.\
+**Updated:** 2026-11-01. Step 6, target input and coverage, is fixed in our fork: TGT-1 to TGT-5, checked against samtools run once on all of a sample's reads (split into 1, 2 and 4 BAMs, in five ways of running, two workers at once among them). Per-base panel depth (D4) is noted as later work under "Suggested order of work".
 
 ## This fork and the original ROBIN
 
@@ -64,6 +65,12 @@ This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [g
 | matkit counts each call as modkit does | METH-3, METH-13, METH-14 | `d304ded`, `b70d6a5` | Unsure calls leave coverage; implicit-mode Cs count as unmethylated; supplementary alignments no longer count; MGMT's input changes too |
 | The CpG panel is read as 0-based, and its cache can't go stale | METH-6, METH-5, part of METH-12 | `dfd909f` | The base before each CpG is no longer pulled in |
 | A test against modkit pins step 5 | Step 5 | `dfe9f29`, `1c6c65f`, `5bcd583` | Nothing |
+| Target coverage adds up exactly across BAMs | TGT-3 | `d6c87ff`, `d752ce6` | "Global coverage" is mean depth (it was covered bases over genome length); target depths shift a little (length end − start; deletions don't count); covered bases per chromosome are exact, or "not available" in a folder written before |
+| One locked step adds a batch to the totals | TGT-4 | `d6c87ff` | Two workers at once no longer lose a batch's coverage |
+| Every BAM's panel reads reach target.bam, and a second finalize keeps the first | TGT-1, found while fixing it | `d6c87ff`, `24ebbc8` | SNP calls and IGV see the reads the coverage counts. `target.bam` holds the records overlapping the panel (`samtools view -L`), no longer the off-panel pieces of panel reads |
+| The panel always reaches target.bam's regions | TGT-2 | `063398d`, `d6c87ff` | Panel reads are kept even when the master BED was written without the panel |
+| Read counts count primary records | TGT-5 | `7773e2f` | Mapped reads, bases and yield drop for split reads; the 50,000-read gate counts reads |
+| A test against samtools pins step 6 | Step 6 | `7b31e53`, `dd802d4`, `ee2fdd8` | Nothing |
 
 Every change has a regression test in `tests/`. The details are in `CHANGELOG.md` under `[Unreleased]`. Add a row here each time a fix lands.
 
@@ -124,7 +131,7 @@ Only two tests exist (added after this review), and no CI runs them.
 | 7 | GUI-1 *(fixed in our fork)* | Classification panel freezes if any classifier is disabled | GUI keeps showing the first result for the rest of the run | `gui/components/classification.py:1003-1021` | Small (two loops) |
 | 8 | GUI-2 *(fixed in our fork)* | Refresh timers are switched off on any brief reconnect | An open page shows hours-old results, with no sign that they are stale | 8 GUI components | Small |
 | 9 | VAR-8 *(fixed in our fork)*, VAR-1, VAR-2, VAR-3 *(fixed in our fork)* | Variant summaries and ClinVar handling | Reference-only sites reported as pathogenic; IDH1 R132H-type alleles lost; "conflicting" shown as pathogenic; a stale index returns nothing | `lightweight_gene_analysis.py`, `snp_processing.py`, `clinvar_manager.py`, `reporting/sections/variants.py` | Small to medium |
-| 10 | TGT-1, TGT-2 | Early BAMs never reach the SNP input; the master BED can drop the panel | SNP calls and IGV miss reads that the coverage numbers include | `analysis/target_analysis.py`, `cnv_analysis.py`, `master_bed_generator.py` | Medium |
+| 10 | TGT-1, TGT-2 *(fixed in our fork)* | Early BAMs never reach the SNP input; the master BED can drop the panel | SNP calls and IGV miss reads that the coverage numbers include | `analysis/target_analysis.py`, `cnv_analysis.py`, `master_bed_generator.py` | Medium |
 | 11 | JOB-6 *(partly fixed in our fork)* | 60-second idle timeout (a test value) left in | A sample is marked Complete and finalised too early; SNP calls cover only part of the data | `gui_launcher.py:420` | One line |
 | 12 | METH-3, METH-4 *(fixed in our fork)* | matkit counts failed calls in coverage; NanoDX drops minus-strand calls | Methylation pushed down; about half the reads never reach NanoDX | `utilities/matkit.py`, `nanodx_analysis.py` | Medium |
 | 13 | ERR-1 | Failed jobs counted as "completed"; errors never sent to the GUI | Stale or empty results look current | `workflow_ray.py`, the handlers | Medium |
@@ -400,12 +407,14 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
 - **What's wrong:** Filtered batch BAMs are only made once some panel target passes `callthreshold`. Until then, coverage is still added up and the staged source BAM references are deleted. When a later batch passes the threshold, only that batch's BAMs are filtered, and the earlier ones are never revisited.
 - **Reproduced:** three BAMs with one read each, where the third crosses the threshold. Coverage includes all three reads, but the batch BAM holds only the third. This needs only one worker, with no restart or timeout.
 - **Fix:** filter and keep each BAM's panel reads when it arrives. Apply the threshold at calling time.
+- **Status:** fixed in our fork (`d6c87ff`, `24ebbc8`): every BAM's records in the panel (plus the master BED's regions) go to a batch BAM when it arrives, with `samtools view -L`; the call threshold still decides when SNP calling may run. The final merge keeps what `target.bam` already holds, and its header lists the batch BAMs merged in, so a crash can't merge one twice. Found while fixing it: a second finalize deleted every new batch BAM unmerged. `target.bam` now holds the records overlapping the regions, not every record of a read whose primary overlaps. Still open in the original ROBIN.
 
 **TGT-2 · high · Confirmed (reproduced)**: The CNV-generated master BED can replace the panel with breakpoint-only targets. *(IR-10)*
 - **Where:** `analysis/cnv_analysis.py:1028-1039, 1730-1743`, `master_bed_generator.py:950-974, 1102-1129, 1187-1207`, `target_analysis.py:1860-1864`
 - **What's wrong:** `cnv_handler` receives the panel, but the CNV save path looks it up only from fusion metadata. With fusion disabled, or before its metadata exists, it passes `target_panel=None`. The master BED is then written with CNV breakpoints but without the panel, and target extraction prefers it over the configured panel. A later call with the right panel reuses the incomplete file, because the file already exists for that counter.
 - **Reproduced:** a `demo` panel on chr1 with breakpoints on chr2: the master BED holds only chr2, and a panel read filters to zero reads.
 - **Fix:** pass the panel explicitly from the handler. Always include the configured panel in extraction targets, and include the panel's identity in the cache key.
+- **Status:** fixed in our fork (`063398d`, `d6c87ff`): `cnv_handler` passes its panel down to the master BED, and target extraction always reads the panel plus the master BED's regions. The cache key is unchanged: with the panel always included, a master BED written without it no longer costs reads. Still open in the original ROBIN.
 
 **TGT-3 · medium · Confirmed (reproduced; spot-checked)**: "Global coverage" adds up breadth across BAMs instead of measuring depth. *(IR-03)*
 - **Where:** `analysis/target_analysis.py:1146-1148, 1817-1819`, `gui/components/coverage.py:6654-6679`, `reporting/sections/coverage.py:70-85`
@@ -413,18 +422,21 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
 - **Reproduced:** 10 reads over one of two 100-base contigs, so the true depth is 5×. As one BAM it reports 0.5×; as two BAMs, 1.0×.
 - **How much it matters:** small early in a run, when reads in one BAM rarely overlap. Larger where they do.
 - **Fix:** add up aligned bases (or length-weighted `meandepth`) for depth, and track breadth separately.
+- **Status:** fixed in our fork (`d6c87ff`, `d752ce6`): each BAM gives its aligned bases per contig and per target (`bedcov -j`: deletions don't count, as in `samtools coverage`), and covered bases come from a union of covered stretches kept per sample. The GUI and the report show mean depth, and a target's length is end − start. Equal to samtools on all reads together, however they are split (`ee2fdd8`). A folder written before shows covered bases as not available. Known limit: the single "target coverage" number sums bases and lengths over panel rows, so where rows overlap (the AML panel has 270 overlapping rows, rCNS2 none) the overlap counts twice, as before; each target's own depth is exact. Still open in the original ROBIN.
 
 **TGT-4 · medium · Confirmed (reproduced)**: Two target accumulations at the same time overwrite each other's coverage. *(IR-04)*
 - **Where:** `analysis/target_analysis.py:1792-1814, 1906-1934, 1999-2010`
 - **What's wrong:** The lock is released between reading the old totals and writing the new ones. Two workers can read the same totals, and the second write replaces the first. Both report success and delete their staged files.
 - **Reproduced:** two one-read BAMs in parallel give a total of 100 bases instead of 200. A single target worker avoids this.
 - **Fix:** read, update and write the totals inside one locked step, and track which batches have been committed.
+- **Status:** fixed in our fork (`d6c87ff`): one locked step reads the totals, adds the batch and writes every file atomically, and a staged BAM is claimed only once all its files exist. Two processes at once now give samtools' numbers. Committed batches aren't tracked: a batch whose worker dies after claiming it is lost, not counted twice (recovering it is left for later). Still open in the original ROBIN.
 
 **TGT-5 · medium · Confirmed (reproduced)**: Supplementary alignments are counted as extra reads. *(IR-07)*
 - **Where:** `analysis/bam_preprocessor.py:352-386, 809-838`, `master_csv_manager.py:172-211`
 - **What's wrong:** The "primary alignments only" check excludes secondary records but not supplementary ones. So read counts, yield and length summaries are inflated for split reads. The same counts feed the 50,000-read gate, so a BAM can be skipped as "too large" too early (traced in code, not reproduced).
 - **Reproduced:** one 4-base read with one supplementary alignment is counted as 2 mapped reads and 8 bases.
 - **Fix:** count reads and yield on primary records only, and keep a separate counter for supplementary alignments.
+- **Status:** fixed in our fork (`7773e2f`): mapped and unmapped reads, bases, the pass/fail splits and yield count primary records only, and equal `samtools view -c -F 0x904` and `samtools stats`; `supplementary_reads` still counts the rest. The "has MGMT reads" flag also looks at primary records only. Still open in the original ROBIN.
 
 ---
 
@@ -813,7 +825,7 @@ Make each step below its own change, with its own regression test. The scripts i
    - METH-4: combine strands
    - METH-7: pass coverage through
    - METH-13, METH-14: honour MM skip modes, and decide the QS filter per read before counting. Add MM-mode and primary/supplementary test files.
-6. **Target input and coverage:**
+6. **Target input and coverage:** *(done in our fork)*
    - TGT-1: keep every BAM's panel reads when it arrives
    - TGT-2: pass the panel explicitly to the master BED
    - TGT-4: one locked read-update-write step
@@ -830,5 +842,6 @@ Make each step below its own change, with its own regression test. The scripts i
    - JOB-3, JOB-4, JOB-5, JOB-7
 9. **Security hardening:** SEC-2 to SEC-7.
 10. **Pin and record versions** (PKG-1), **add CI with a test suite** (PKG-2), then start on the architecture items. Delete dead code first (ARCH-4), because it is cheap and stops fixes from landing in the wrong copy.
+11. **Later, a feature rather than a fix:** per-base depth for the panel (a D4 file from `mosdepth`), to report the share of each gene's bases at ≥20× and to find low-coverage holes in panel genes. Today "above 30×/20×/10×" counts whole targets by their average depth.
 
-Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9), the version pins, step 2 (VAR-9, VAR-8, VAR-10) and step 3's quick wins (GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3, VAR-7) are done too; see "This fork and the original ROBIN". Of step 3, only JOB-6 is partial: the timeout constant and its configurability are done, the merge-skip and the batch-BAM deletion that follow from the timeout firing are not, and they overlap JOB-7. The follow-ups batch 3's own review asked for soon are done as well, and so are the five findings of the 2026-10-31 review of the fix series. Step 4 (CNV-1) is done, with CNV-3, which sits in the same loop. Step 5 (the methylation maths) is done except METH-7, with a test against modkit.
+Already done: the original "Error processing file … ['Chromosome', 'Start']" log noise is fixed on `main` (commit `d02add2`), with a test. Commit `5be9e04` adds a traceback and safe diagnostics to that log line, because one clinical server still logs it after the fix. Step 1 (SEC-1, SEC-8, SEC-9), the version pins, step 2 (VAR-9, VAR-8, VAR-10) and step 3's quick wins (GUI-1, REP-1, JOB-6, GUI-4, CNV-5, GUI-2, VAR-3, VAR-7) are done too; see "This fork and the original ROBIN". Of step 3, only JOB-6 is partial: the timeout constant and its configurability are done, the merge-skip and the batch-BAM deletion that follow from the timeout firing are not, and they overlap JOB-7. The follow-ups batch 3's own review asked for soon are done as well, and so are the five findings of the 2026-10-31 review of the fix series. Step 4 (CNV-1) is done, with CNV-3, which sits in the same loop. Step 5 (the methylation maths) is done except METH-7, with a test against modkit. Step 6 (target input and coverage, TGT-1 to TGT-5) is done, with a test against samtools.

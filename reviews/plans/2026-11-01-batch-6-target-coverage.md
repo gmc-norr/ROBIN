@@ -6,6 +6,8 @@
 
 **Architecture:** each BAM yields exact integer totals (aligned bases per contig and per target, read counts) and its covered stretches; the accumulation adds them to the sample's totals in one locked read-add-write step and unions the stretches; every BAM's panel reads go to a batch BAM when it arrives, and the final merge keeps everything already in `target.bam`. Consumers read depth from shared helpers.
 
+**Outcome:** supported (see Result). Built in `7b31e53` (Task 1), `7773e2f` (Task 2), `d6c87ff` (Tasks 3-4), `24ebbc8` (Task 5), `063398d` (Task 6), `d752ce6` (Task 7), `dd802d4` (stronger controls); result `ee2fdd8`; suite 229 → 279. Differences from the plan: the Result's last paragraph.
+
 **Tech Stack:** Python 3.12, pysam 0.24.1 (bundles samtools 1.24: `coverage`, `bedcov -j`, `view -L`, `stats`, `merge`), pandas, numpy.
 
 **Spec:** `reviews/2026-10-16-code-review.md` section 3, "Target coverage, read counts and SNP input" (TGT-1 to TGT-5), and the user's answers on 2026-11-01 (Gate A): the principle above ("Same as one samtools run"); exact covered bases from a list of covered stretches (not D4; D4 per-base panel depth goes on the later list as a separate feature).
@@ -131,3 +133,5 @@ Gate D:
 4. *Fresh output:* in this commit's message.
 
 Differences from the plan, each ledgered: Tasks 3 and 4 in one commit (the staged format and its reader change together); `target.bam` follows `samtools view -L` (records overlapping the panel and the master BED's regions), not "every record of a read whose primary overlaps", so it no longer carries off-panel pieces of panel reads and gains in-panel pieces of off-panel reads; an old folder's covered bases become unknown rather than migrated; the master BED's cache key is unchanged (the union makes a stale file harmless); the test venv needed `networkx` and `scikit-learn==1.8.0` (declared dependencies) for the master BED lookup to work.
+
+Known limit, found by `trail check` after the result: the single target-coverage number (rule 5's reference too) is bases / length summed over panel rows, so where rows overlap the overlap counts twice. The AML panel has 270 overlapping rows, rCNS2 none. samtools over the merged panel would count it once. It was the same before this batch; each target's own numbers (rule 1) are exact. Left as it is.
