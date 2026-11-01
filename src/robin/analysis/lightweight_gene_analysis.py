@@ -65,6 +65,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pysam
+from robin.analysis.clinvar_significance import clinvar_label_text, is_clinvar_pathogenic
 from robin.logging_config import get_job_logger
 
 # Evidence levels from _analyze_variant_evidence. A ClinVar site counts as a
@@ -251,8 +252,9 @@ class LightweightGeneAnalysis:
                     pathogenic_count += 1
                     variant_info = self._extract_variant_info(record)
 
-                    # Store by position for fast lookup
-                    key = (record.chrom, record.pos)
+                    # One entry per allele: several ClinVar records share a position
+                    # (IDH1 R132C/S/G, KRAS G12), and each is checked (VAR-1)
+                    key = (record.chrom, record.pos, record.ref, alt)
                     self.clinvar_variants[key] = variant_info
 
                     # Store by gene for gene-specific analysis
@@ -276,38 +278,8 @@ class LightweightGeneAnalysis:
         )
 
     def _is_pathogenic(self, record) -> bool:
-        """Check if a ClinVar variant is pathogenic."""
-        try:
-            # Check clinical significance
-            if "CLNSIG" in record.info:
-                clnsig = record.info["CLNSIG"]
-                if isinstance(clnsig, (list, tuple)):
-                    clnsig = "|".join(clnsig)
-
-                pathogenic_terms = [
-                    "pathogenic",
-                    "likely_pathogenic",
-                    "pathogenic/likely_pathogenic",
-                ]
-                return any(term in clnsig.lower() for term in pathogenic_terms)
-
-            # Check oncogenicity for cancer variants
-            if "ONC" in record.info:
-                onc = record.info["ONC"]
-                if isinstance(onc, (list, tuple)):
-                    onc = "|".join(onc)
-
-                oncogenic_terms = [
-                    "oncogenic",
-                    "likely_oncogenic",
-                    "oncogenic/likely_oncogenic",
-                ]
-                return any(term in onc.lower() for term in oncogenic_terms)
-
-            return False
-
-        except Exception:
-            return False
+        """Whether ClinVar calls this record pathogenic, in CLNSIG, ONC or SCI (VAR-2)."""
+        return is_clinvar_pathogenic(record.info)
 
     def _extract_variant_info(self, record) -> Dict[str, Any]:
         """Extract relevant information from a ClinVar variant record."""
@@ -317,7 +289,9 @@ class LightweightGeneAnalysis:
             "reference": record.ref,
             "alternate": record.alts[0] if record.alts else None,
             "variant_id": record.id,
-            "clinical_significance": record.info.get("CLNSIG", "unknown"),
+            # CLNSIG, plus the oncogenicity and somatic labels: a record can count by
+            # those while its CLNSIG says "Conflicting" or "other"
+            "clinical_significance": clinvar_label_text(record.info),
             "disease_name": record.info.get("CLNDN", "unknown"),
             "gene_info": record.info.get("GENEINFO", "unknown"),
             "molecular_consequence": record.info.get("MC", "unknown"),
@@ -583,7 +557,7 @@ class LightweightGeneAnalysis:
         print("   🧬 Sample ClinVar variants:")
         variant_samples = list(self.clinvar_variants.items())[:3]
         for i, (variant_key, variant_info) in enumerate(variant_samples):
-            chrom, pos = variant_key
+            chrom, pos = variant_key[:2]
             print(
                 f"      Variant {i+1}: {chrom}:{pos:,} ({variant_info.get('gene_info', 'unknown')})"
             )
@@ -593,7 +567,7 @@ class LightweightGeneAnalysis:
         for i, (variant_key, variant_info) in enumerate(
             self.clinvar_variants.items(), 1
         ):
-            chrom, pos = variant_key
+            chrom, pos = variant_key[:2]
 
             # Show progress every 1000 variants
             if i % 1000 == 0:
@@ -656,7 +630,7 @@ class LightweightGeneAnalysis:
 
             # Show coordinate system analysis
             bed_chroms = set(region["chromosome"] for region in bed_regions)
-            clinvar_chroms = set(chrom for chrom, _ in self.clinvar_variants.keys())
+            clinvar_chroms = set(key[0] for key in self.clinvar_variants.keys())
 
             print("   Coordinate system analysis:")
             print(f"      BED chromosomes: {sorted(list(bed_chroms))[:10]}...")

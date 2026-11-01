@@ -7,6 +7,7 @@ import logging
 import numpy as np
 import pandas as pd
 
+from robin.analysis.clinvar_significance import is_clinvar_pathogenic
 from robin.analysis.clinvar_status import clinvar_status
 
 
@@ -14,15 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 def _is_pathogenic(info_str: str) -> bool:
-    """Determine if a variant is pathogenic based on the CLNSIG field."""
-    if "CLNSIG=" not in info_str:
-        return False
-
-    for field in info_str.split(";"):
-        if field.startswith("CLNSIG="):
-            clnsig_value = field.split("=")[1]
-            return "PATHOGENIC" in clnsig_value.upper()
-    return False
+    """Whether ClinVar calls this record pathogenic, in CLNSIG, ONC or SCI (VAR-2)."""
+    return is_clinvar_pathogenic(info_str)
 
 
 def _process_annotations(record: Dict[str, Any]) -> Tuple[Dict[int, Dict[str, Any]], Dict[str, Any]]:
@@ -131,8 +125,9 @@ def parse_vcf(vcf_path: Path) -> Optional[pd.DataFrame]:
         non_shared_columns = [col for col in vcf_df.columns if col not in shared_columns]
         vcf_df = vcf_df.replace({np.nan: None})
 
+        # dropna=False: a record without ANN has no "Allele", and must stay (VAR-2)
         aggregated = (
-            vcf_df.groupby(shared_columns)[non_shared_columns]
+            vcf_df.groupby(shared_columns, dropna=False)[non_shared_columns]
             .agg(lambda series: ", ".join(sorted({str(item) for item in series.dropna()})) or None)
             .reset_index()
         )

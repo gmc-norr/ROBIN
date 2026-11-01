@@ -15,6 +15,7 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.colors import HexColor
 from ..sections.base import ReportSection
 from robin import resources
+from robin.analysis.clinvar_significance import is_clinvar_pathogenic
 from robin.analysis.clinvar_status import (
     ANNOTATED,
     clinvar_status,
@@ -58,66 +59,11 @@ class VariantAnalysis:
             logger.debug("Exception details:", exc_info=True)
 
     def _is_pathogenic(self, info_str):
-        """Check if a variant is pathogenic based on CLNSIG and CLNSIGCONF fields."""
-        logger.debug("Checking pathogenicity for variant with info: %s", info_str)
+        """Whether ClinVar calls this record pathogenic, in CLNSIG, ONC or SCI (VAR-2).
 
-        if "CLNSIG=" not in info_str:
-            logger.debug("No CLNSIG field found in variant")
-            return False
-
-        pathogenic_terms = [
-            "pathogenic",
-            "likely_pathogenic",
-            "pathogenic/likely_pathogenic",
-            "likely pathogenic",
-            "pathogenic/likely pathogenic",
-        ]
-
-        # First check CLNSIG field
-        for field in info_str.split(";"):
-            if field.startswith("CLNSIG="):
-                clnsig_value = field.split("=")[1].lower()
-                logger.debug("Found CLNSIG value: %s", clnsig_value)
-
-                # Direct pathogenic classification
-                if any(term in clnsig_value for term in pathogenic_terms):
-                    logger.debug("Direct pathogenic classification found")
-                    return True
-
-                # Handle conflicting classifications
-                if "conflicting_classifications_of_pathogenicity" in clnsig_value:
-                    logger.debug(
-                        "Found conflicting classifications, checking CLNSIGCONF"
-                    )
-                    # Look for CLNSIGCONF field
-                    for conf_field in info_str.split(";"):
-                        if conf_field.startswith("CLNSIGCONF="):
-                            conf_value = conf_field.split("=")[1].lower()
-                            logger.debug("Found CLNSIGCONF value: %s", conf_value)
-
-                            # Count pathogenic vs benign classifications
-                            pathogenic_count = sum(
-                                int(count.strip("()"))
-                                for term in pathogenic_terms
-                                for count in conf_value.split("|")
-                                if term in count.lower()
-                            )
-                            benign_count = sum(
-                                int(count.strip("()"))
-                                for count in conf_value.split("|")
-                                if "benign" in count.lower()
-                            )
-                            logger.debug(
-                                "Pathogenic count: %d, Benign count: %d",
-                                pathogenic_count,
-                                benign_count,
-                            )
-
-                            # Return true if there are more pathogenic classifications
-                            return pathogenic_count > benign_count
-
-        logger.debug("No pathogenic classification found")
-        return False
+        "Conflicting classifications" alone does not count: no vote over CLNSIGCONF.
+        """
+        return is_clinvar_pathogenic(info_str)
 
     def process_vcf(self, vcf_file, variant_type, result):
         """Process a VCF file and extract pathological variants."""
@@ -558,7 +504,9 @@ class VariantsSection(ReportSection):
                 leading=10,
             )
             note_text = (
-                "Note: Variants are classified as pathogenic based on ClinVar annotations. "
+                "Note: A variant is listed when ClinVar's own label calls it pathogenic or "
+                "likely pathogenic (germline), oncogenic or likely oncogenic, or somatic "
+                "Tier I or II. \"Conflicting classifications\" alone does not count. "
                 "Disease associations are derived from ClinVar's CLNDN field where available."
             )
             self.elements.append(Paragraph(note_text, note_style))

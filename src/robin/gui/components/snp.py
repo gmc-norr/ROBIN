@@ -178,6 +178,9 @@ def add_snp_section(launcher: Any, sample_dir: Path) -> None:
         "Annotation",
         "Annotation_Impact",
         "CLNSIG",
+        # A row can be flagged by these while CLNSIG says "Conflicting" (VAR-2)
+        "ONC",
+        "SCI",
         "FILTER",
         "QUAL",
         "GT",
