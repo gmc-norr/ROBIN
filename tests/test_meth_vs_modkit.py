@@ -10,6 +10,9 @@ The reads hold every trap from the code review: both strands (METH-4), unsure
 calls (METH-3), a 5mC/5hmC split, implicit MM modes (METH-13), low-QS reads
 with supplementary alignments before and after the primary (METH-14), and a
 panel with a duplicate row, a CGCG pair and a negative start (METH-5, METH-6).
+Added after the final review (the locked rules are unchanged): a record with
+MM but no ML, which modkit drops, and a panel row on a non-CpG C covered by
+implicit-mode reads, which modkit --cpg never reports.
 """
 
 import os
@@ -20,7 +23,7 @@ import pytest
 
 from meth_fixtures import (
     CANON, CHROM, FAIL, MOD, ReadSpec, filter_bam, modkit_available, modkit_pileup,
-    write_meth_bam, write_panel, write_reference,
+    read_reference, write_meth_bam, write_panel, write_reference,
 )
 
 pytestmark = pytest.mark.skipif(not modkit_available(), reason="modkit is not installed")
@@ -46,6 +49,7 @@ def fixture_reads() -> List[ReadSpec]:
         ReadSpec("imp", "+", S, E, m={500: MOD}, mode="."),  # skipped Cs are canonical
         ReadSpec("nomark", "-", S, E, m={1700: MOD}, mode=""),  # no marker means implicit
         ReadSpec("empty", "+", S, E, m={}, mode="."),  # every C canonical
+        ReadSpec("noml", "+", S, E, m={500: MOD, 900: MOD}, drop_ml=True),  # MM, no ML
         # qs 5: supplementary first in coordinate order, then primary first.
         ReadSpec("X", "+", 1600, E, m={1700: MOD, 2100: MOD, 2500: MOD, 2502: MOD}, qs=5),
         ReadSpec("X", "+", S, 1000, m={500: MOD, 900: MOD}, qs=None, supplementary=True),
@@ -66,7 +70,9 @@ def world(tmp_path_factory):
     kept = filter_bam(union, os.path.join(d, "kept.bam"), LOW_QS)
     combined = modkit_pileup(kept, ref, d, combine_strands=True)
     stranded = modkit_pileup(kept, ref, d, combine_strands=False)
-    panel_rows = [(p, p + 2, f"cg{p}") for p in PANEL] + [(900, 902, "cg900dup"), (-1, 0, "cgneg")]
+    seq = read_reference(ref)
+    ch = next(i for i in range(600, 800) if seq[i] == "C" and seq[i + 1] != "G")  # a non-CpG C
+    panel_rows = [(p, p + 2, f"cg{p}") for p in PANEL] + [(900, 902, "cg900dup"), (-1, 0, "cgneg"), (ch, ch + 1, "ch")]
     panel = write_panel(os.path.join(d, "parquet_filter.txt"), panel_rows)
     return {
         "dir": d, "ref": ref, "union": union, "panel": panel,

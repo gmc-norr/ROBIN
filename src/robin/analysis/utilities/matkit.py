@@ -15,6 +15,7 @@ import logging
 import subprocess
 import time
 import pickle
+import re
 from datetime import datetime
 from pathlib import Path
 import pandas as pd
@@ -1178,7 +1179,7 @@ def write_counts_to_parquet(counts: dict, mod_sites: set, output_path: str) -> N
     pq.write_table(table, output_path)
 
 
-_COMPLEMENT = {"A": "T", "C": "G", "G": "C", "T": "A", "N": "N"}
+_CPG = re.compile("CG")
 
 
 def _mm_groups(mm: str):
@@ -1204,6 +1205,12 @@ def _with_implicit_canonical_calls(read, mods: dict) -> dict:
     is unmodified; pysam's ``modified_bases`` lists only the explicit calls, so
     each skipped base is added here with probability 0 for each of the group's
     codes. ``?`` mode is left alone: there a skipped base is no call.
+
+    Only C groups, and only Cs the read reads as CpG: modkit pileup --cpg
+    reports CpGs only, and a basecaller in ``?`` mode calls only there. Adding
+    every C made a site of every C on every read. modkit takes CpG from the
+    reference, so where a read misreads a CpG's G (or, on a reverse read, its
+    C) a skipped C counts in modkit and not here: the same as ``?`` mode data.
     """
     tag = "MM" if read.has_tag("MM") else "Mm" if read.has_tag("Mm") else None
     if tag is None:
@@ -1213,13 +1220,13 @@ def _with_implicit_canonical_calls(read, mods: dict) -> dict:
         return mods
     added = None
     for base, mm_strand, codes, mode in _mm_groups(read.get_tag(tag)):
-        if mode == "?" or mm_strand != "+":
+        if mode == "?" or mm_strand != "+" or base != "C":
             continue
-        # The tag counts bases on the read as sequenced; pysam reports
-        # positions on SEQ, where a reverse read's C is a G.
-        target = _COMPLEMENT.get(base, "N") if read.is_reverse else base
+        # pysam reports positions on SEQ, where a reverse read's CpG C is the
+        # G of a "CG" (CG reads the same on both strands).
         strand_flag = 1 if read.is_reverse else 0
-        candidates = [i for i, b in enumerate(seq) if b == target]
+        offset = 1 if read.is_reverse else 0
+        candidates = [m.start() + offset for m in _CPG.finditer(seq)]
         for code in codes:
             key = (base, strand_flag, code)
             listed = {pos for pos, _ in mods.get(key, ())}
@@ -1340,6 +1347,10 @@ def process_bam_counts_improved(
             if read.has_tag("qs") and read.get_tag("qs") < MIN_PRIMARY_QS:
                 primary_qs_excluded.add(read.query_name)
                 continue
+
+        # MM without ML has no probabilities; modkit drops such a record.
+        if not (read.has_tag("ML") or read.has_tag("Ml")):
+            continue
 
         try:
             # Extract modification data from MM/ML tags

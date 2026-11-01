@@ -69,6 +69,7 @@ class ReadSpec:
     mode: str = "?"  # "?" explicit, "." implicit, "" implicit (no marker)
     qs: Optional[int] = 20
     supplementary: bool = False
+    drop_ml: bool = False  # MM without ML: no probabilities at all
 
 
 def _mm_ml(spec: ReadSpec, seg: str) -> Tuple[str, List[int]]:
@@ -115,7 +116,8 @@ def write_meth_bam(path: str, ref_path: str, reads: List[ReadSpec]) -> str:
             rec.cigarstring = f"{len(seg)}M"
             rec.query_qualities = pysam.qualitystring_to_array("I" * len(seg))
             rec.set_tag("MM", mm, "Z")
-            rec.set_tag("ML", array.array("B", ml))
+            if not spec.drop_ml:
+                rec.set_tag("ML", array.array("B", ml))
             if spec.qs is not None:
                 rec.set_tag("qs", spec.qs, "i")
             out.write(rec)
