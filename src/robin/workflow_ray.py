@@ -1641,7 +1641,11 @@ class Coordinator:
         q = job_queue_of(job.job_type)
         # Per-queue inflight cap
         if int(self.inflight_by_queue.get(q, 0)) >= self._queue_inflight_cap(q):
-            await self._wait_for_queue_capacity(q)
+            # A job already accepted (from_waiting) joins the queue's waiting list even when
+            # that list is full. It is dispatched from inside a finish step, which must not
+            # wait for room that only a later finish can make.
+            if not from_waiting:
+                await self._wait_for_queue_capacity(q)
             if self._debug_backpressure:
                 now = time.time()
                 if (now - self._last_backpressure_log_ts) >= self._debug_backpressure_interval_s:
@@ -1836,13 +1840,18 @@ class Coordinator:
         
         # Process jobs through batcher if batching is enabled
         if self.enable_batching and self.sample_batcher:
-            # Separate preprocessing jobs from other jobs
-            preprocessing_jobs = [job for job in jobs if job.job_type == "preprocessing"]
-            other_jobs = [job for job in jobs if job.job_type != "preprocessing"]
-            
-            # Submit preprocessing jobs directly (no batching)
-            if preprocessing_jobs:
-                await self._submit_jobs_internal(preprocessing_jobs)
+            # Preprocessing jobs, and requests of the per-sample types (DEDUP_TYPES), are
+            # submitted directly (no batching). A batch runs with its first request's
+            # settings, and a request still in the batcher misses the waiting slot, so each
+            # request must meet the one-running / one-waiting rule as sent (JOB-5).
+            def _direct(job: Job) -> bool:
+                return job.job_type == "preprocessing" or job.job_type in DEDUP_TYPES
+
+            direct_jobs = [job for job in jobs if _direct(job)]
+            other_jobs = [job for job in jobs if not _direct(job)]
+
+            if direct_jobs:
+                await self._submit_jobs_internal(direct_jobs)
             
             # Process other jobs through batcher
             for job in other_jobs:
@@ -3061,7 +3070,9 @@ class Coordinator:
                 nxt_dedup = self.dedup_waiting.pop(key, None)
                 if nxt_dedup is not None:
                     self.dedup_running[key] = nxt_dedup.job_id
-                    await self._dispatch_ready_job(nxt_dedup, key[0])
+                    # Already accepted, so it waits for no room here: a pool keeps this
+                    # job's slot busy until this finish step returns.
+                    await self._dispatch_ready_job(nxt_dedup, key[0], from_waiting=True)
         if job.job_type in CLASSIFICATION_TYPES:
             # decrement pending for this type
             if self.classif_pending_by_type.get(job.job_type, 0) > 0:

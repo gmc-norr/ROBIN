@@ -175,8 +175,9 @@ def test_snp_requests_while_one_runs_give_one_more_run(snp_harness_standard):
     runs = h.ended("snp_analysis", "S")
     assert len(runs) == 2
     assert runs[-1]["start"] > sent
-    if not h.batching:  # the batcher re-wraps jobs under new ids
-        assert runs[-1]["job_id"] == newest
+    # With batching on too: a per-sample request skips the batcher, which ran a batch with
+    # its first request's settings (batch 10a's external review)
+    assert runs[-1]["job_id"] == newest
 
 
 def test_guard_snp_requests_for_two_samples_both_run(snp_harness):
