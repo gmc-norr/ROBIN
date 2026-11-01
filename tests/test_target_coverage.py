@@ -128,3 +128,27 @@ def test_a_bam_before_the_threshold_still_reaches_target_bam(tmp_path, panel):
     target_bam = work / SAMPLE / "target.bam"
     assert target_bam.exists()
     assert bam_records(str(target_bam)) == samtools_reference(merged, panel)["target_bam"]
+
+
+def test_a_batch_bam_left_by_a_crash_is_not_merged_twice(tmp_path, panel):
+    """A guard for Task 5's design (target.bam is an input of every merge). On db7269c's
+    code it fails only on which records target.bam holds (measured); its crash case
+    can't fail there, since that code deletes every leftover batch BAM (read, not run)."""
+    bams, merged = write_bams(str(tmp_path), 2)
+    work = tmp_path / "work"
+    ta = _analysis(work)
+    for bam in bams:
+        ta.process_file_with_staging(bam, {"sample_id": SAMPLE})
+        ta.accumulate_staged_files(SAMPLE, force=True)
+    sd = work / SAMPLE
+    kept = tmp_path / "kept"
+    kept.mkdir()
+    for f in os.listdir(sd):
+        if f.startswith("batch_"):
+            shutil.copy2(sd / f, kept / f)
+    finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+    for f in os.listdir(kept):  # the crash: the merged batch BAMs were never deleted
+        shutil.copy2(kept / f, sd / f)
+    finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+    assert bam_records(str(sd / "target.bam")) == samtools_reference(merged, panel)["target_bam"]
+    assert not [f for f in os.listdir(sd) if f.startswith("batch_")]
