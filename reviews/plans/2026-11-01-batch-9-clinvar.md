@@ -172,7 +172,7 @@ Every pass condition holds. The commands and outputs follow.
 **IDH1 probe on `502fd72`** (`probe_var1.py`):
 - All 3 records are kept. G>A has 20 alternate reads and reads high_frequency, so the gene is present_with_good_coverage.
 - Measured side effect: G>C and G>T read `reference_mismatch` (needs review) there, because every read carries A, which is neither allele.
-  - In a sample whose reads show G as well, they read `no_support`.
+  - In a sample whose reads show G as well, they read `no_support`. Measured at the records step (`probe_mixed.py`, 10 G + 10 A reads): G>A has 10 alternate reads and is supported; G>C and G>T read `no_support`, are not supported and need no review; the gene reads present_with_good_coverage.
   - The gene's status follows the supported site, so it is unchanged. It is recorded, not changed: a sibling allele's evidence is still judged on its own two alleles.
 
 Gate D:
