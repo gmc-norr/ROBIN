@@ -381,3 +381,18 @@ def test_a_failed_build_is_rebuilt_on_the_next_run_without_double_counting(tmp_p
     assert len(pd.read_csv(d / "fusion_candidates_master.csv")) == csv_rows
     body, summary = _report_text(d)
     assert "GENEA" in summary
+
+
+def test_a_step_inside_the_real_preprocessing_that_raises_fails_the_job(tmp_path, monkeypatch):
+    # Pins preprocess_fusion_data_standalone's own re-raise: the heavy step it calls raises,
+    # the function itself is real.
+    def boom(df):
+        raise RuntimeError("synthetic annotate crash")
+
+    monkeypatch.setattr(fusion_work, "_annotate_results", boom)
+    _, filed, outcome = _run_handler(tmp_path, monkeypatch)
+    assert [e["job_type"] for e in filed] == ["fusion_analysis"]
+    assert "synthetic annotate crash" in filed[0]["error"]
+    assert outcome["status"] == "failed"
+    body, _ = _report_text(tmp_path / "work" / SAMPLE)
+    assert UNREADABLE in body
