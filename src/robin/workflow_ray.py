@@ -653,7 +653,8 @@ def publish_failures(stats: Dict[str, Any], state: Dict[str, Any], send: Callabl
             GUI_EVENT_PRIORITY,
             "the lost-messages line",
         )
-    new_failure = False
+    # A lost event may have been a failure: refresh the counts (they come from stats, complete).
+    new_failure = lost > 0
     for e in events:
         state["last_seq"] = e["seq"]
         if e.get("kind") == "gui_message":

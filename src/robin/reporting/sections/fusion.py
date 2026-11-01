@@ -29,6 +29,10 @@ NOT_RUN_TEXT = "Fusion analysis has not been run for this sample."
 UNREADABLE_TEXT = "The fusion results could not be read."
 NONE_FOUND_TEXT = "No fusion candidates were identified."
 NONE_FOUND_SUMMARY_TEXT = "No fusion networks identified within the target panel."
+TARGET_EARLIER_NONE_SUMMARY_TEXT = (
+    "The latest target-panel fusion build failed; "
+    "an earlier run identified no fusion networks within the target panel."
+)
 # When only one candidate type's results are missing and the other's hold candidates.
 TARGET_UNREADABLE_SUMMARY_TEXT = "The target-panel fusion results could not be read."
 TARGET_NOT_RUN_SUMMARY_TEXT = "Fusion analysis has not been run for the target panel."
@@ -445,6 +449,9 @@ class FusionSection(ReportSection):
             )
             for network in master_networks:
                 summary_text.append(f"• {' - '.join(network)}")
+        elif fusion_data.get("master_note"):
+            # The latest build failed; the earlier run's candidates hold no validated network.
+            summary_text.append(TARGET_EARLIER_NONE_SUMMARY_TEXT)
         elif master_state in (STATE_FOUND, STATE_NONE):
             summary_text.append(NONE_FOUND_SUMMARY_TEXT)
         elif fusion_data["state"] in (STATE_FOUND, STATE_NONE):
@@ -459,7 +466,7 @@ class FusionSection(ReportSection):
         else:
             summary_text.append(NOT_RUN_TEXT)
         # Candidates from an earlier run, the latest build having failed: say so.
-        if fusion_data.get("master_note"):
+        if fusion_data.get("master_note") and master_networks:
             summary_text.append(f"<br/>{fusion_data['master_note']}")
 
         if all_networks and len(all_networks) > len(master_networks):

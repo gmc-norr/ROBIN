@@ -753,3 +753,132 @@ def test_a_step_inside_the_real_preprocessing_that_raises_fails_the_job(tmp_path
     assert outcome["status"] == "failed"
     body, _ = _report_text(tmp_path / "work" / SAMPLE)
     assert UNREADABLE in body
+
+
+# ------------------------------------------------------------------ second review: C1 and m-1
+_TYPE_PICKLE = {
+    "master": "fusion_candidates_master_processed.pkl",
+    "all": "fusion_candidates_all_processed.pkl",
+}
+_TYPE_CSV = {"master": "fusion_candidates_master.csv", "all": "fusion_candidates_all.csv"}
+
+
+def _good_pair_tags(pkl):
+    data = _load(pkl)
+    ad = data["annotated_data"]
+    return sorted(set(ad[data["goodpairs"]]["tag"])) if not ad.empty else []
+
+
+def _csv_tags(csv):
+    return sorted(set(pd.read_csv(csv)["tag"]))
+
+
+def _good_then_failed_build(tmp_path, monkeypatch, kind):
+    """Build 1: GENEA-GENEB, good. Build 2: new valid reads GENEC-GENED, and that type's
+    preprocessing raises after its CSV was appended. Returns (real preprocessing, sample dir)."""
+    from robin import fusion_status as fs
+
+    monkeypatch.setattr(fusion_work, "_ensure_gene_regions_loaded", lambda panel: None)
+    real = fusion_work.preprocess_fusion_data_standalone
+
+    def raises_for_kind(df, output_file):
+        if os.path.basename(output_file) == _TYPE_PICKLE[kind]:
+            raise RuntimeError(f"synthetic {kind} preprocess crash")
+        return real(df, output_file)
+
+    _stage(tmp_path, _rows(4))
+    assert _accumulate(tmp_path)["status"] == "success"
+    monkeypatch.setattr(fusion_work, "preprocess_fusion_data_standalone", raises_for_kind)
+    _stage(tmp_path, _rows(4, "GENEC", "GENED", prefix="c"), n=2)
+    assert _accumulate(tmp_path)["status"] == "error"
+    d = tmp_path / SAMPLE
+    pkl = d / _TYPE_PICKLE[kind]
+    assert os.path.exists(fs.failed_build_marker(str(pkl)))
+    assert _good_pair_tags(pkl) == ["GENEA,GENEB"]  # still the earlier build's
+    assert _csv_tags(d / _TYPE_CSV[kind]) == ["GENEA,GENEB", "GENEC,GENED"]
+    return real, d
+
+
+@pytest.mark.parametrize("kind", ["master", "all"])
+def test_a_quiet_build_after_a_failed_one_rebuilds_from_the_csv(tmp_path, monkeypatch, kind):
+    # Second review C1: the next build brings no new valid read (one read, below support).
+    # It must not clear the failure while leaving the earlier build's pickle in place.
+    from robin import fusion_status as fs
+
+    real, d = _good_then_failed_build(tmp_path, monkeypatch, kind)
+    monkeypatch.setattr(fusion_work, "preprocess_fusion_data_standalone", real)
+    _stage(tmp_path, _rows(1, "GENEE", "GENEF", prefix="e"), n=3)
+    assert _accumulate(tmp_path)["status"] == "success"
+    pkl = d / _TYPE_PICKLE[kind]
+    assert _good_pair_tags(pkl) == _csv_tags(d / _TYPE_CSV[kind]) == ["GENEA,GENEB", "GENEC,GENED"]
+    assert not os.path.exists(fs.failed_build_marker(str(pkl)))
+    assert fs.fusion_states(str(d))[f"{kind}_note"] is None
+    if kind == "master":
+        _, summary = _report_text(d)
+        assert "Found 2 fusion networks within the target panel" in summary, summary
+
+
+@pytest.mark.parametrize("kind", ["master", "all"])
+def test_a_quiet_build_while_the_build_still_fails_keeps_the_failure_shown(
+    tmp_path, monkeypatch, kind
+):
+    # Second review C1, the other way: the preprocessing still raises on the quiet build.
+    from robin import fusion_status as fs
+
+    _good_then_failed_build(tmp_path, monkeypatch, kind)
+    d = tmp_path / SAMPLE
+    _stage(tmp_path, _rows(1, "GENEE", "GENEF", prefix="e"), n=3)
+    assert _accumulate(tmp_path)["status"] == "error"
+    assert os.path.exists(fs.failed_build_marker(str(d / _TYPE_PICKLE[kind])))
+    note = TARGET_EARLIER if kind == "master" else GENOME_EARLIER
+    assert fs.fusion_states(str(d))[f"{kind}_note"] == note
+
+
+def test_a_quiet_build_with_no_failure_record_does_not_rebuild(tmp_path, monkeypatch):
+    # Control for C1: with no failed build behind it, a quiet build leaves the pickles alone.
+    monkeypatch.setattr(fusion_work, "_ensure_gene_regions_loaded", lambda panel: None)
+    real = fusion_work.preprocess_fusion_data_standalone
+    _stage(tmp_path, _rows(4))
+    assert _accumulate(tmp_path)["status"] == "success"
+    d = tmp_path / SAMPLE
+    before = {k: (d / n).read_bytes() for k, n in _TYPE_PICKLE.items()}
+    calls = []
+
+    def counting(df, output_file):
+        calls.append(os.path.basename(output_file))
+        return real(df, output_file)
+
+    monkeypatch.setattr(fusion_work, "preprocess_fusion_data_standalone", counting)
+    _stage(tmp_path, _rows(1, "GENEE", "GENEF", prefix="e"), n=2)
+    assert _accumulate(tmp_path)["status"] == "success"
+    assert calls == []
+    assert {k: (d / n).read_bytes() for k, n in _TYPE_PICKLE.items()} == before
+
+
+M1_SENTENCE = (
+    "The latest target-panel fusion build failed; "
+    "an earlier run identified no fusion networks within the target panel."
+)
+
+
+def test_a_failed_build_over_an_earlier_result_with_no_network_says_so(tmp_path):
+    # Second review m-1: candidates (3 reads) but no validated network, latest build failed.
+    from robin import fusion_status as fs
+
+    d = _sample_dir(tmp_path)
+    _write_pickles(d, _rows(3), names=("master",))
+    marker = fs.failed_build_marker(str(d / "fusion_candidates_master_processed.pkl"))
+    Path(marker).write_text("RuntimeError: x\n")
+    _, summary = _report_text(d)
+    assert M1_SENTENCE in summary, summary
+    assert NONE_FOUND_SUMMARY not in summary
+    assert TARGET_EARLIER not in summary
+
+
+def test_an_earlier_result_with_no_network_and_no_failed_build_says_none_found(tmp_path):
+    # Control for m-1: the same pickle with no failed build still reads "none found".
+    d = _sample_dir(tmp_path)
+    _write_pickles(d, _rows(3), names=("master",))
+    _, summary = _report_text(d)
+    assert NONE_FOUND_SUMMARY in summary
+    assert M1_SENTENCE not in summary and TARGET_EARLIER not in summary

@@ -2600,10 +2600,12 @@ def _generate_output_files(
         pickle_path = os.path.join(work_dir, sample_id, output_pickle_name)
 
         def _rebuild_missing() -> None:
-            # An earlier build failed after its CSV was written: the pickle is missing while
-            # the CSV has rows. Rebuild it even when no new read passes this time.
+            # An earlier build failed after its CSV was written: the pickle is missing, or its
+            # .failed record says it is older than the CSV. Rebuild it even when no new read
+            # passes this time, so a quiet build does not clear the record over a stale pickle.
             csv_path = os.path.join(work_dir, sample_id, output_csv_name)
-            if os.path.exists(pickle_path) or not os.path.exists(csv_path):
+            stale = os.path.exists(failed_build_marker(pickle_path))
+            if (os.path.exists(pickle_path) and not stale) or not os.path.exists(csv_path):
                 return
             try:
                 df = pd.read_csv(csv_path)

@@ -274,3 +274,51 @@ def test_events_dropped_from_the_log_between_two_polls_are_reported(caplog):
     # what the log still holds goes out as before
     assert len([d for t, d, _ in sent if t == "warning_notification"]) == 199
     assert [t for t, _, _ in sent].count("error_update") == 1
+
+
+# ------------------------------------------------------------------ second review, I-1
+def _coordinator_stats_failure_first(n_messages=230):
+    """A real Coordinator event log: one failure, then n_messages worker messages."""
+
+    class FakeJob:
+        job_type = "mgmt"
+        context = workflow_ray.WorkflowContext(
+            filepath="x_pass_0.bam", metadata={"bam_metadata": {"sample_id": "s"}}
+        )
+
+    coord = object.__new__(workflow_ray.Coordinator.__ray_metadata__.modified_class)
+    coord._events = workflow_ray.deque(maxlen=workflow_ray.EVENT_LOG_MAX)
+    coord._event_seq = 0
+    coord._record_events(FakeJob, False, FakeJob.context, "the failure", "returned_error", False)
+    for i in range(n_messages):
+        ctx = workflow_ray.WorkflowContext(filepath="x_pass_0.bam", metadata={
+            "bam_metadata": {"sample_id": f"s{i}"},
+            "gui_messages": [{"update_type": "warning_notification",
+                              "data": {"message": f"warn {i}"}, "priority": 5}],
+        })
+        coord._record_events(FakeJob, True, ctx, None, None, False)
+    return {"recent_events": list(coord._events),
+            "failures_by_category": {"preprocessing": 0, "classification": 0, "analysis": 1}}
+
+
+def test_a_failure_that_left_the_log_still_refreshes_the_failure_counts():
+    # Second review I-1: the failure first, then 230 worker messages, all between two polls.
+    # The failure leaves the 200-event log; its count must still reach the GUI.
+    stats = _coordinator_stats_failure_first()
+    kinds = {e.get("kind") for e in stats["recent_events"]}
+    assert not kinds & set(workflow_ray._FAILURE_KINDS)  # the failure has left the log
+    sent = []
+    workflow_ray.publish_failures(
+        stats, {"last_seq": 0}, lambda t, d, p=0: sent.append((t.value, d, p))
+    )
+    updates = [d for t, d, _ in sent if t == "error_update"]
+    assert len(updates) == 1, [t for t, _, _ in sent if t != "warning_notification"]
+    assert updates[0]["analysis_errors"] == 1
+
+
+def test_a_poll_with_no_lost_event_and_no_failure_sends_no_error_update():
+    # Control for I-1: nothing lost, nothing failed -> no ERROR_UPDATE.
+    msgs = [_msg(i, f"note {i}", update_type="log_message", priority=0) for i in (1, 2, 3)]
+    sent = []
+    workflow_ray.publish_failures(_stats(msgs), {"last_seq": 0}, lambda t, d, p=0: sent.append(t.value))
+    assert sent == ["log_message"] * 3
