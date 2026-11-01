@@ -267,3 +267,15 @@ The external review of round 4 (Codex, `/home/parlar_ai/robin-batch3-run/review-
 - Each test fails on `1f64cf9` and passes after; controls pass on both.
 - One mutant per fix is caught, and the no-op control survives.
 - The full suite passes.
+
+## The external review's fixes: result (2026-11-01, on `6a01732`): supported
+
+- **On `1f64cf9`'s code:** the 8 new fix tests failed and the 4 controls passed.
+  - Finding 1: 6 failed (each type × each CSV state); build 3 returned "success".
+  - Finding 3: 1 failed; the body read "No fusion candidates were identified.".
+  - Finding 4: 1 failed; the summary stayed "No errors detected.".
+- **After the fix:** all pass.
+- **Mutation check:** F1, F3 and F4 caught; the no-op control survived (344 passed).
+- **Full suite:** 627 passed. `robin.yml` and `pyproject.toml` are unchanged.
+- **One existing test changed (ruling):** `test_update_errors_without_recent_leaves_the_summary_alone`, written in this batch (`ee7e3dd`, unmerged). It pinned "No errors detected." beside a count of 4, the behaviour finding 4 fixes. It now expects "4 failures recorded; the details are no longer available.". Its other intent, that details already shown stay, is the new control `test_shown_failure_details_are_kept_when_an_update_has_none`.
+  - Cost if wrong: one batch-7 test's expectation changed. Undo it by dropping finding 4's fix.
