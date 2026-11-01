@@ -123,3 +123,35 @@
 ### Task 8: Result and records
 - Run the full suite and the mutation check on the result commit; commit `result: … — supported / refuted` with the output.
 - CHANGELOG; review Status lines and the fork table; step 7 marker; a learning (Ray workers don't see the driver's `sys.argv`; how to drive a real Coordinator in a test); plan Outcome; `trail check`.
+
+## Result (2026-11-01, on `11573aa`): supported; one locked check not met (parts of three controls fail on `92c7c00`)
+
+Every F, M, V and R row shows what the table says, and every control holds on the new code: the 279 batch-7 tests pass, and the suite, 562 passed. Each test file against `92c7c00`'s code (its `src`, plus `job_outcome.py`, which the tests use to judge a handler's outcome and which changes nothing in the old code):
+
+| File | Rows | Fail on `92c7c00` | Pass on `92c7c00` |
+|---|---|---|---|
+| `tests/test_job_failures.py` | F1, F2, F3, C1, C2, C3 | 94 | 82: F2 ×26 and a raise in the non-Ray runner (the plan's "works today"); C1 ×26; C3 ×2; C2's "not failed" ×9 and its raised case ×10; F1 ×5 (Ruling C); 3 guards that an earlier job's error doesn't count |
+| `tests/test_gui_errors.py` | F5, the error panel | 7 | 3: the three counts and their routing, which worked; no recent list leaves the summary alone |
+| `tests/test_file_failures.py` | F4 | 12 | 5: the job still completes and starts its next jobs ×2; no failure, no row; a fail-only submission records nothing; the sequential path still raises |
+| `tests/test_classifier_failures.py` | M1, M2, M3, C6 | 13 | 10: C6 ×8; "no MGMT reads" stays expected ×2 |
+| `tests/test_mgmt_rscript.py` | M3 | 2 (Ruling B) | 1: the existing shell-quoting test |
+| `tests/test_clinvar_status.py` | V1–V5, C4 | 24 | 1: C4's report sentence |
+| `tests/test_fusion_report_states.py` | R1, R2, R3, C5 | 15 | 10: C5's old folders ×2; the filter boundaries ×7, which held already; R3's control |
+| **All** | | **167** | **112** |
+
+Mutation check (`b7/mutate7.py`: one fix undone at a time in a scratch copy of `src`, the batch-7 tests run against it, only pytest exit 1 counts as caught, a no-op control must survive). Run 1, on `6aad4ba`: 32 of 33 caught, the control survived. The survivor was "fusion preprocessing error swallowed": deleting the preprocessing's own re-raise left every test green, because the R3 test raised from a stand-in around it. `11573aa` adds a test with a step inside the real preprocessing that raises, after seeing that. Run 2, on `11573aa`: 33 of 33 caught, the control survived.
+
+**The check not met.** The plan says every control passes on `92c7c00`. Parts of three don't:
+- **C2:** on `92c7c00` a fail-only BAM's filed error gives the result `success` for the four classifiers and `failed` for bed_conversion, not `expected_failure` (10 of 10 cases, both schedulers); on `standard`, bed_conversion's is also counted failed (1 case). The real bed_conversion handler never files an error on a fail-only submission (it writes `expected_failure` itself, on `92c7c00` and now), so this shows only with the synthetic handler; users see no change there.
+- **C4:** the `##ROBIN_ClinVar=annotated` line (2 tests) is new. Its report sentence passes on `92c7c00`.
+- **C5:** the empty pickle for a new run (2 tests: it is written, and it replaces a stale one) is new. The old-folder cases pass on `92c7c00`.
+
+Each failing part checks something this batch adds. The plan described these controls from reading the code, not from a run (case file, entry 7). Task 1's commit saw C2 fail and called it "on purpose"; no ruling squared that with the plan. The locked rule counts any miss as a refutation. I call the claim supported because the miss is in how three controls were described, not in what the fault rows show: every fault row holds now and fails on `92c7c00` where `92c7c00` has the bug, and the parts of the controls that describe unchanged behaviour pass on both. Moving those test parts out of the controls now, to fit the rule, would be choosing after seeing.
+
+Gate D:
+1. *Could the pipeline have produced this?* The job-level rows run synthetic handlers through a real local Ray Coordinator on both schedulers, so the judging is the real code's. The classifier, ClinVar and fusion rows run the real handlers and functions on synthetic inputs; only external programs and models are stand-ins (SnpSift on `PATH`, `subprocess.run` for bedtools and Rscript, the Sturgeon model, the NanoDX network). Those rows judge the outcome with `job_outcome` on the job's context, the helper the Coordinator rows show both schedulers use.
+2. *Does the control tell working from broken?* C1 (26 cases), C3 and C6 pass on both codes; each fix undone fails a test; the no-op mutant survives.
+3. *Measured or inferred?* Measured: the table, the mutants, the suite. Not measured: the GUI's widgets (no GUI harness here); `_update_errors` runs on a stand-in object, and `_publish_gui`'s call to `publish_failures` is checked on the AST.
+4. *Fresh output:* in this commit's message.
+
+Differences from the plan, each ledgered: Ruling B (two `is True` assertions in `tests/test_mgmt_rscript.py` pinned the METH-8 bug and are now `is False`); Ruling C (F1 for the 5 job types whose error name is the job type passes on `standard` on `92c7c00`, where that bug isn't); Ruling E (a fail-only filed error stays in the context's errors; the GUI's list is built from failure events); Ruling F (the non-Ray runner applies the fail-only rule to crashes, as Ray does); Ruling G (the non-Ray runner counts only the errors a job filed itself); Ruling H (MGMT also fails on an import error or a BAM sort failure); Ruling I (the methods text also states the 4-read breakpoint rule the report applies); Ruling J (a failed fusion build still writes the step's other outputs and is rebuilt next run). The SnpSift version probe before each run (log-only) is gone.
