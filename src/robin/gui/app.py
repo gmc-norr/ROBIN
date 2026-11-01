@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Optional, Dict
+import threading
+from collections import deque
+from typing import Any, Optional, Dict, List, Tuple
 from pathlib import Path
 
 try:
@@ -61,7 +63,27 @@ def get_gui_launcher() -> Optional[GUILauncher]:
     return _current_gui_launcher
 
 
+# In a process with no GUI (a Ray worker) updates are kept here instead of being dropped; the job
+# wrapper moves them into the job's context so they travel back with the finished job. Bounded:
+# only the newest OUTBOX_MAX are kept.
+OUTBOX_MAX = 100
+_outbox: "deque[Tuple[Any, Dict[str, Any], int]]" = deque(maxlen=OUTBOX_MAX)
+_outbox_lock = threading.Lock()
+
+
 def send_gui_update(update_type: Any, data: Dict[str, Any], priority: int = 0) -> None:
     launcher = get_gui_launcher()
     if launcher:
         launcher.send_update(update_type, data, priority)
+        return
+    # No GUI here: keep the update (as plain values, safe to pickle) for the job to carry back.
+    with _outbox_lock:
+        _outbox.append((getattr(update_type, "value", update_type), data, priority))
+
+
+def drain_gui_outbox() -> List[Tuple[Any, Dict[str, Any], int]]:
+    """Return and clear the updates kept in this process, oldest first."""
+    with _outbox_lock:
+        items = list(_outbox)
+        _outbox.clear()
+    return items

@@ -1808,6 +1808,20 @@ class GUILauncher:
                     str(data.get("classification_errors", 0))
                 )
 
+            # "Recent errors": the newest failures, one line each (job type, sample, message).
+            recent = data.get("recent") or []
+            if recent and hasattr(self, "error_summary_label"):
+                lines = []
+                for r in recent[:5]:
+                    try:
+                        hhmmss = time.strftime("%H:%M:%S", time.localtime(float(r.get("time"))))
+                    except Exception:
+                        hhmmss = "--:--:--"
+                    lines.append(
+                        f"{hhmmss} {r.get('sample_id', '')} {r.get('job_type', '')}: {r.get('error', '')}"
+                    )
+                self.error_summary_label.set_text("\n".join(lines))
+
         except Exception as e:
             logging.debug(f"Error updating error information: {e}")
 

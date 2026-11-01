@@ -67,7 +67,7 @@ POOL_OF = {
 # Types the wrapper treats as "expected failure" on a fail-only BAM submission.
 FAIL_ONLY_TYPES = tuple(sorted(wr.CLASSIFICATION_TYPES | {"bed_conversion"}))
 
-FAULTS = ("ok", "raise", "file_error", "skip")
+FAULTS = ("ok", "raise", "file_error", "skip", "warn")
 
 
 def _synthetic_handler(job):
@@ -80,6 +80,13 @@ def _synthetic_handler(job):
         job.context.add_error(name, f"synthetic {job.job_type} failure")
     elif fault == "skip":
         job.context.add_metadata("skip_downstream", True)
+    elif fault == "warn":
+        # What the real BAM preprocessor sends from inside a worker (no GUI in this process).
+        from robin.analysis.bam_preprocessor import _send_alignment_warning_notification
+
+        _send_alignment_warning_notification(
+            job.context.metadata["warn_msg"], job.context.get_sample_id(), "x.bam"
+        )
 
 
 def _make_remote(job_type: str):
@@ -193,6 +200,7 @@ class Harness:
                 "target_panel": "rCNS2",
                 "original_workflow": steps,
                 "fault": fault,
+                "warn_msg": f"alignment warning for {sample}",
                 "fail_only_bam_submission": bool(fail_only),
             },
         )
@@ -246,6 +254,10 @@ class Harness:
             if n or time.time() - t0 >= timeout:
                 return n
             time.sleep(0.2)
+
+    def stats(self) -> Dict[str, Any]:
+        """The Coordinator's stats now (what the GUI's publisher gets)."""
+        return ray.get(self.coord.stats.remote())
 
     def close(self) -> List[Dict[str, str]]:
         """Shut the Coordinator down (this writes failed_jobs.csv) and return its rows."""

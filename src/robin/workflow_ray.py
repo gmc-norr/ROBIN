@@ -580,6 +580,63 @@ class SampleJobBatcher:
 _job_id_counter = itertools.count(1000)
 
 
+EVENT_LOG_MAX = 200
+EVENT_ERROR_CHARS = 300
+_PREPROCESSING_TYPES = {"preprocessing", "bed_conversion"}
+_CLASSIFICATION_FAILURE_TYPES = {"sturgeon", "nanodx", "pannanodx", "random_forest"}
+
+
+def failures_by_category(failed_by_type: Dict[str, int]) -> Dict[str, int]:
+    """Failure counts for the GUI's three error counters."""
+    out = {"preprocessing": 0, "classification": 0, "analysis": 0}
+    for jt, n in (failed_by_type or {}).items():
+        if jt in _PREPROCESSING_TYPES:
+            out["preprocessing"] += n
+        elif jt in _CLASSIFICATION_FAILURE_TYPES:
+            out["classification"] += n
+        else:
+            out["analysis"] += n
+    return out
+
+
+def publish_failures(stats: Dict[str, Any], state: Dict[str, Any], send: Callable[..., Any]) -> None:
+    """Send the events in ``stats`` newer than ``state["last_seq"]`` to the GUI, once each.
+
+    Each ``gui_message`` goes out as its own update type with its own data. If any new ``failure``
+    event arrived, one ``ERROR_UPDATE`` follows with the three category counts and ``recent``
+    (newest first: time, sample_id, job_type, error). ``send(update_type, data, priority)``.
+    """
+    last = int(state.get("last_seq", 0) or 0)
+    all_events = stats.get("recent_events") or []
+    events = [e for e in all_events if e.get("seq", 0) > last]
+    if not events:
+        return
+    new_failure = False
+    for e in sorted(events, key=lambda e: e["seq"]):
+        if e.get("kind") == "gui_message":
+            send(_GUIUpdateType(e["update_type"]), e.get("data") or {}, e.get("priority", 0))
+        elif e.get("kind") == "failure":
+            new_failure = True
+    state["last_seq"] = max(e["seq"] for e in events)
+    if new_failure:
+        cats = stats.get("failures_by_category") or {}
+        failures = [e for e in all_events if e.get("kind") == "failure"]
+        recent = [
+            {k: e.get(k) for k in ("time", "sample_id", "job_type", "error")}
+            for e in sorted(failures, key=lambda e: e["seq"], reverse=True)
+        ]
+        send(
+            _GUIUpdateType.ERROR_UPDATE,
+            {
+                "preprocessing_errors": cats.get("preprocessing", 0),
+                "analysis_errors": cats.get("analysis", 0),
+                "classification_errors": cats.get("classification", 0),
+                "recent": recent,
+            },
+            1,
+        )
+
+
 def job_queue_of(job_type: str) -> str:
     for q, types in QUEUE_TO_TYPES.items():
         if job_type in types:
@@ -636,6 +693,20 @@ def _notify_coordinator_handler_started(job_id: int) -> None:
     """Tell Coordinator the Ray worker has begun running the handler (not queued in Pool)."""
     try:
         ray.get_actor("robin_coordinator").mark_handler_started.remote(job_id)
+    except Exception:
+        pass
+
+
+def _carry_gui_messages(context: WorkflowContext) -> None:
+    """Move the GUI updates kept in this worker process into the job's context."""
+    try:
+        from robin.gui.app import drain_gui_outbox
+
+        msgs = drain_gui_outbox()
+        if msgs:
+            context.metadata.setdefault("gui_messages", []).extend(
+                {"update_type": t, "data": d, "priority": p} for t, d, p in msgs
+            )
     except Exception:
         pass
 
@@ -840,6 +911,9 @@ def _wrap_real_handler(
                     # Silently continue if memory management fails
                     pass
         
+        # Normal return: updates the handler sent from this process go back with the job. (When the
+        # handler raised we never get here; they stay in the outbox for the next job.)
+        _carry_gui_messages(job.context)
         return job.context
 
     return _impl
@@ -1117,6 +1191,9 @@ class Coordinator:
         self.work_dir: Optional[str] = None
         # Bounded log of failed job details for tracking and OOM diagnosis (last 5000)
         self._failed_jobs_log: deque = deque(maxlen=5000)
+        # Recent failure / worker-message events for the GUI, with a running number (bounded).
+        self._events: deque = deque(maxlen=EVENT_LOG_MAX)
+        self._event_seq: int = 0
         # Per-job timeout: cancel jobs running longer than this (0 = disabled)
         self.job_timeout_seconds: int = max(0, int(job_timeout_seconds))
     
@@ -2350,6 +2427,39 @@ class Coordinator:
             except Exception:
                 pass  # Silently continue on write errors
 
+    def _add_event(self, kind: str, **fields: Any) -> None:
+        self._event_seq += 1
+        self._events.append({"seq": self._event_seq, "kind": kind, "time": time.time(), **fields})
+
+    def _record_events(
+        self, job: Job, ok: bool, ctx: WorkflowContext, err: Optional[str],
+        failure_kind: Optional[str], is_skipped: bool,
+    ) -> None:
+        """One ``gui_message`` event per message the job carried, one ``failure`` per failed job.
+
+        The failure comes from the judged outcome (ok / err), not from scanning ctx.errors.
+        """
+        msgs: List[Any] = []
+        for c in (ctx, job.context):
+            try:
+                msgs += c.metadata.pop("gui_messages", None) or []  # popped: each is sent once
+            except Exception:
+                pass
+        for m in msgs:
+            self._add_event("gui_message", **m)
+        if not ok and not is_skipped:
+            try:
+                sid = job.context.get_sample_id()
+            except Exception:
+                sid = "unknown"
+            self._add_event(
+                "failure",
+                sample_id=sid,
+                job_type=job.job_type,
+                error=(err or "")[:EVENT_ERROR_CHARS],
+                failure_kind=failure_kind or "",
+            )
+
     async def _on_finish(
         self,
         job: Job,
@@ -2400,6 +2510,11 @@ class Coordinator:
             if (ok and not is_skipped)
             else ("skipped" if is_skipped else "failed")
         )
+
+        try:
+            self._record_events(job, ok, ctx, err, failure_kind, is_skipped)
+        except Exception:
+            pass
 
         # Append per-job duration entry to buffer (for batched writes)
         try:
@@ -3277,6 +3392,8 @@ class Coordinator:
             # Failed job tracking: last 500 entries for inspection / OOM diagnosis
             "failed_jobs_list": list(self._failed_jobs_log)[-500:],
             "oom_count": sum(1 for e in self._failed_jobs_log if e.get("is_oom")),
+            "recent_events": list(self._events),
+            "failures_by_category": failures_by_category(self.failed_by_type),
         }
         if result["active_count"] == 0 and runtime_active_count_by_queue:
             result["active_count"] = int(sum(runtime_active_count_by_queue.values()))
@@ -4740,10 +4857,16 @@ async def run(
                 _print_styled("GUI launched successfully", level="success")
 
             # Start GUI update publishing task immediately
+            failure_state = {"last_seq": 0}
+
             async def _publish_gui():
                 while True:
                     try:
                         s = await coord.stats.remote()
+                        try:
+                            publish_failures(s, failure_state, _gui_send_update)
+                        except Exception:
+                            pass
                         # Basic workflow status & progress
                         total = int(
                             (s.get("total_enqueued", 0) - s.get("total_skipped", 0))
