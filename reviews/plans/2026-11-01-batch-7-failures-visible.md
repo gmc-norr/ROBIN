@@ -214,3 +214,36 @@ A scoped re-review of the three fix rounds (`11eb191..97b34ee`) found 1 Critical
 - One mutant per fix is caught, and the no-op control survives.
 - The mutation check of rounds 1–3, running on `97b34ee` at lock time, catches every mutant.
 - The full suite passes.
+
+## Fix rounds' result (2026-11-01, on `4ab371b`): supported
+
+All four locked fix lists pass their locked checks. Every number below was re-run by the controller, not taken from a report.
+
+**Each round's new tests on the code before that round.** The round's tests from `4ab371b` were run on the `src/` of its base:
+
+| Round | Base | Code | Failed on the base | Passed on the base (controls and guards) |
+|---|---|---|---|---|
+| 1: the final review's fixes | `11eb191` | `2052fe3` | 13 | 8 (M10 ×4: 3 guards and a control; the I1 control; C5 zero-byte; M11 ×2 guards) |
+| 2: existing bugs | `01437de` | `7a14955` | 12 (5 of them by ImportError: new shared modules) | 8 (JOB-3 controls ×6, a non-Ray control, the Ray watcher guard) |
+| 3: earlier-result note | `2497021` | `97b34ee` | 3 | 0 |
+| 4: the second review's fixes | `7b73c23` | `4ab371b` | 6 | 3 (the three controls) |
+
+The splits match the implementer's reports for rounds 1–3.
+
+**Mutation checks** (a scratch copy of `src/`; only pytest exit 1 counts):
+- On `97b34ee`: 59 of 59 caught (the 33 batch-7 mutants, 2 of them re-anchored, and 26 for rounds 1–3); the no-op control survived (323 passed).
+- On `4ab371b`: the C1, I-1 and m-1 mutants and the round-3 note mutant (re-anchored where m-1 moved its line) caught; the control survived (332 passed).
+
+**Full suite:** 606 passed on `97b34ee`, 615 on `4ab371b`.
+
+**`robin.yml` and `pyproject.toml`:** `git diff 92c7c00..4ab371b` is empty.
+
+**The second review (scoped, `11eb191..97b34ee`)** found 1 Critical (C1), 1 Important (I-1) and 7 Minor.
+- C1 came from round 3. Its test pinned "the note goes away after the next good build" on a build that happened to need no rebuild, and it never compared the pickle with its CSV (case file entry 8).
+- C1, I-1 and m-1 are fixed in round 4; the rest are records only, as locked.
+
+**Rulings made without the user** (each with its cost if wrong):
+- "Fix also existing bugs" read as the three pre-existing bugs the final review found (JOB-3, the GUI fusion panel, `--no-use-ray` fail-only). Cost: another pre-existing bug the user meant waits for its step.
+- A candidate CSV with rows, no pickle and no `sv_count.txt` now reads "could not be read" (it read "not run"). Cost: an old folder in that shape says "could not be read" where nothing ran; there are rows, so something did.
+- m-3 and the genome-wide half of m-1 are kept, because existing tests pin their text. Cost: one body sentence reads redundantly.
+- Round 4 was done by the controller, not an agent, to save tokens. Cost: the implementer and the checker are the same. An external review (Sol 6.1 / Astra) was requested to make up for that.
