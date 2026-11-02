@@ -239,3 +239,66 @@ Measured in this session's scratchpad folder.
 - **Q5, pins:** `git diff 54fe364 -- robin.yml pyproject.toml` is empty.
 
 Not changed, noticed while fixing: the coverage panel's own SNP fallback (`coverage.py:4691`) runs through `snp_analysis_handler`, so it gets the same merge, checks and record.
+
+## Round 3: fixes from the second external review (locked before code, 2026-11-02)
+
+Codex reviewed `e139331` (`/home/parlar_ai/robin-batch3-run/review-requests/batch10b-r2-report-codex.md`) and found two gaps, both rated P2. Both were confirmed by reading the code at `75c9e7f`. The user chose to fix both, then merge and push ("1", 2026-11-02). Codex found no fault in the claim locks or the kept folders.
+
+### Gate A
+
+1. **Principle (unchanged):** an SNP run calls on every read the sample has when it starts, and shows calls as current only if they came from exactly those reads. When it can't, it fails and says why.
+2. **What would kill it:**
+   - A run that takes a VCF this run did not write (D).
+   - An SNP run that goes ahead while a staged set with a missing part sits in `_staging/` (E).
+3. **Refuted before here?**
+   - The 2 s allowance in round 2 was for "file-system time rounding" that was never measured. It opened the gap Codex found: a file from a run that ended less than 2 s earlier passes.
+   - `no_files` means "no complete staged set", not "no staged reads" (`_complete_staged_counters`, `target_analysis.py:806-813`). That is the same mistake as case 12: an upstream value taken for what it seemed to mean.
+4. **Simplest thing:**
+   - D: each calling run writes Clair3's output into its own new folder `clair3/run_<8 hex>/`, so a file there can only be this run's, and the time check goes. Earlier `run_*` folders are deleted when possible (the container writes as root, so some files may stay).
+   - E: finalize lists the staged sets whose coverage file exists but a part is missing (`incomplete_staged`), and the SNP job's check fails on them.
+5. **Inputs (read in code at `75c9e7f`):**
+   - **Staging order:** staging writes the coverage file last, by rename (`:1086-1101`), so a coverage file with a missing part is broken, not still being written.
+   - **Moves:** a claim moves a set's files one at a time, under the accumulation lock (`:2082-2089`). Listing broken sets under the same lock never sees a set half moved.
+   - **Readers:** nothing outside `run_snp_analysis` reads Clair3's raw `snv.vcf.gz`, `indel.vcf.gz` or `region_*` files (grep of `src/`).
+   - **Output folders:** in split mode the container makes each `region_<i>` folder inside the output folder it is given. In single-pass mode it writes into a folder that exists. The new run folder is made by ROBIN, so both patterns stay the same.
+
+### Gate B: measured on `75c9e7f` before this lock
+
+The 5 tests below: **5 failed** (`before_r3.txt`, in this session's scratchpad folder), each with the message it was written for. The 19 round-2 tests passed.
+- D1 depends on timing at `75c9e7f`: it fails there because the second run starts less than 2 s after the first. After the fix it does not depend on timing.
+
+### Fixes
+
+1. **D:** `run_snp_analysis` makes `clair3/run_<8 hex>/` before its region loop, after deleting earlier `run_*` folders (errors ignored).
+   - Region outputs go to `run_<id>/region_<i>/` (split) or `run_<id>/` (single pass).
+   - The merged VCFs go to `run_<id>/`.
+   - Each region must exit 0 and leave both VCFs there. The time check is removed.
+   - `output_done.vcf.gz` and `output_indel_done.vcf.gz` are still copied from this run's files, as before.
+2. **E:**
+   - `_incomplete_staged_sets(staging_dir)`: the coverage files whose set is not complete, read under the accumulation lock.
+   - Finalize puts them in its result as `incomplete_staged`.
+   - `_merge_missed_reads` fails on them, naming the files.
+   - The files are left in place.
+3. **Wording:** the claim that any rewrite changes `target.bam`'s identity is too strong. Every way ROBIN writes `target.bam` changes it; a replacement from outside that keeps the old size and modification time would not be noticed (Codex's note). The docstring says so. Round 2's learning, which says otherwise, is not edited; a new note corrects it.
+
+### Tests (added to `tests/test_snp_every_read.py`)
+
+| # | Test | Before (`75c9e7f`) |
+|---|------|------|
+| D1 | a quick retry does not take the previous run's INDEL file | fail: the previous run's file used |
+| D2 | old run folders are removed | fail: no run folder |
+| E1 | finalize reports a staged set missing a part | fail: not reported |
+| E2 | an SNP run fails on a staged set missing a part (alone; beside a complete set) | fail ×2: variants called |
+
+### Pass rules (locked)
+
+- **R1:** on `75c9e7f`, the 5 fail for the reason shown (measured).
+- **R2:** after the fixes, the whole file passes (24), and round 1's 18 pass.
+- **R3:** the full suite passes: 794 + 5 = 799.
+- **R4:** each mutant below, applied alone to the fixed code, makes the file fail (pytest exit 1). The control N0 leaves it passing (exit 0).
+  - L1: region outputs go back to `clair3/region_<i>/`, with no time check → D1.
+  - L2: earlier run folders are not deleted → D2.
+  - L3: finalize does not list broken staged sets → E1.
+  - L4: the SNP job's check ignores `incomplete_staged` → E2.
+  - N0: a no-op change → nothing fails.
+- **R5:** `robin.yml` and `pyproject.toml` unchanged.
