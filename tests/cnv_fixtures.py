@@ -59,3 +59,45 @@ def bam_metadata(sample_id: str, bam_path: str) -> SimpleNamespace:
         file_path=bam_path,
         file_size=os.path.getsize(bam_path),
     )
+
+
+def cnv_worker(conn, contigs: Dict[str, int], control_per_bin: int, pause_seconds: float = 0.0) -> None:
+    """A stand-in for a long-lived Ray worker process (run it in its own process).
+
+    It runs the CNV jobs sent over ``conn`` as ``(kind, bams, sample_id, work_dir)``
+    tuples, ``kind`` being "single" or "multiple", and keeps its module state between
+    them, as a Ray worker does. It answers each with the job's error_message (None when
+    it worked). ``None`` stops it. A pause after each BAM's analysis, before anything is
+    saved, makes two workers overlap.
+    """
+    import logging
+    import time
+
+    from robin.analysis import cnv_analysis
+
+    control = flat_control(contigs, control_per_bin)
+    cnv_analysis.get_cached_ref_cnv_dict = lambda path, logger: control
+    if pause_seconds:
+        analyse = cnv_analysis.run_cnv_analysis_direct
+
+        def slow(*args, **kwargs):
+            result = analyse(*args, **kwargs)
+            time.sleep(pause_seconds)
+            return result
+
+        cnv_analysis.run_cnv_analysis_direct = slow
+    log = logging.getLogger("cnv_worker")
+    while True:
+        message = conn.recv()
+        if message is None:
+            return
+        kind, bams, sample_id, work_dir = message
+        if kind == "single":
+            result = cnv_analysis.process_single_bam(
+                bams[0], bam_metadata(sample_id, bams[0]), work_dir, log, threads=1
+            )
+        else:
+            result = cnv_analysis.process_multiple_bams(
+                bams, [bam_metadata(sample_id, b) for b in bams], work_dir, log, threads=1
+            )
+        conn.send(result.get("error_message"))

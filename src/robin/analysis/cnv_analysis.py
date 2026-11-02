@@ -112,9 +112,9 @@ USE_CNV_SUBPROCESS = False
 _ref_cnv_dict_cache = None
 _ref_cnv_dict_path_cache = None
 
-# Global cache for per-sample data to avoid reloading across BAM files for the same sample
-_sample_cache = {}
-_current_sample_id = None
+# A sample's CNV read counts are read from disk by every run, never cached: another
+# worker may have added to them (CNV-2). A per-sample lock keeps two runs apart.
+_CNV_LOCK_WAIT_SECONDS = 3 * 3600
 
 
 def _read_only_control(control) -> Mapping[str, np.ndarray]:
@@ -170,122 +170,70 @@ def clear_ref_cnv_dict_cache():
     _ref_cnv_dict_cache = None
     _ref_cnv_dict_path_cache = None
 
-def get_sample_cache(sample_id: str) -> dict:
-    """
-    Get the cache for a specific sample, creating it if it doesn't exist.
-    
-    Args:
-        sample_id: Sample identifier
-        
-    Returns:
-        Dictionary containing cached data for the sample
-    """
-    global _sample_cache
-    if sample_id not in _sample_cache:
-        _sample_cache[sample_id] = {
-            'copy_numbers': None,
-            'copy_numbers_path': None,
-            'analysis_counter': None,
-            'last_accessed': time.time(),
-            'bam_count': 0
-        }
-    _sample_cache[sample_id]['last_accessed'] = time.time()
-    return _sample_cache[sample_id]
+def _counts_path(sample_output_dir: str, sample_id: str) -> str:
+    return os.path.join(sample_output_dir, f"{sample_id}_copy_numbers.pkl")
 
-def update_sample_cache(sample_id: str, **kwargs):
-    """
-    Update the cache for a specific sample.
-    
-    Args:
-        sample_id: Sample identifier
-        **kwargs: Key-value pairs to update in the cache
-    """
-    cache = get_sample_cache(sample_id)
-    cache.update(kwargs)
 
-def clear_sample_cache(sample_id: str = None):
-    """
-    Clear the cache for a specific sample or all samples.
-    
-    Args:
-        sample_id: Sample identifier to clear, or None to clear all
-    """
-    global _sample_cache, _current_sample_id
-    if sample_id is None:
-        _sample_cache.clear()
-        _current_sample_id = None
-    else:
-        _sample_cache.pop(sample_id, None)
-        if _current_sample_id == sample_id:
-            _current_sample_id = None
+def _load_copy_numbers(sample_output_dir: str, sample_id: str, logger) -> dict:
+    """The sample's read counts so far, read from disk: no file means none yet. Counts
+    that can't be read raise, so the run fails and the file is kept as it is."""
+    path = _counts_path(sample_output_dir, sample_id)
+    # Backward compatibility: migrate from the old multi-sample dict to the per-sample file
+    legacy_dict_path = os.path.join(sample_output_dir, "update_cnv_dict.pkl")
+    if not os.path.exists(path) and os.path.exists(legacy_dict_path):
+        logger.info("Migrating from legacy multi-sample dict to per-sample file...")
+        try:
+            with open(legacy_dict_path, "rb") as f:
+                update_cnv_dict = pickle.load(f)
+            if sample_id in update_cnv_dict:
+                _save_copy_numbers(path, update_cnv_dict[sample_id])
+                logger.info(f"Migrated copy_numbers for {sample_id} to per-sample file")
+        except Exception as e:
+            logger.warning(f"Could not migrate legacy copy_numbers: {e}")
+    if not os.path.exists(path):
+        logger.debug("No previous copy_numbers found, starting fresh")
+        return {}
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not read the sample's CNV read counts ({path}): {e}. The file is kept; "
+            "no BAM was added"
+        ) from e
 
-def set_current_sample(sample_id: str, logger) -> bool:
-    """
-    Set the current sample being processed and manage cache transitions.
-    
-    Args:
-        sample_id: Sample identifier
-        logger: Logger instance
-        
-    Returns:
-        True if this is a new sample (cache was cleared), False if same sample
-    """
-    global _current_sample_id
-    
-    if _current_sample_id != sample_id:
-        logger.info(f"Switching from sample '{_current_sample_id}' to '{sample_id}' - managing cache")
-        _current_sample_id = sample_id
-        
-        # Update BAM count for the new sample
-        cache = get_sample_cache(sample_id)
-        cache['bam_count'] += 1
-        
-        return True  # New sample
-    else:
-        # Same sample, just increment BAM count
-        cache = get_sample_cache(sample_id)
-        cache['bam_count'] += 1
-        logger.debug(f"Processing BAM file {cache['bam_count']} for sample '{sample_id}'")
-        return False  # Same sample
 
-def cleanup_sample_cache_on_completion(sample_id: str, logger) -> None:
-    """
-    Clean up sample cache when all BAM files for a sample are complete.
-    This should be called by the workflow system when a sample is fully processed.
-    
-    Args:
-        sample_id: Sample identifier
-        logger: Logger instance
-    """
-    cache = get_sample_cache(sample_id)
-    bam_count = cache.get('bam_count', 0)
-    logger.info(f"Sample '{sample_id}' completed processing {bam_count} BAM files - cache can be cleaned up")
-    
-    # Note: We don't actually clear the cache here as it might be needed for other operations
-    # The workflow system should call clear_sample_cache() when appropriate
+def _save_copy_numbers(path: str, copy_numbers) -> None:
+    """Write the counts whole or not at all: a write that fails keeps the last good ones."""
+    from robin.utils.atomic_files import atomic_open
 
-def get_sample_cache_stats() -> dict:
-    """
-    Get statistics about the current sample cache for monitoring purposes.
-    
-    Returns:
-        Dictionary with cache statistics
-    """
-    global _sample_cache, _current_sample_id
-    return {
-        'current_sample': _current_sample_id,
-        'cached_samples': list(_sample_cache.keys()),
-        'cache_size': len(_sample_cache),
-        'sample_details': {
-            sid: {
-                'bam_count': cache.get('bam_count', 0),
-                'last_accessed': cache.get('last_accessed', 0),
-                'has_copy_numbers': cache.get('copy_numbers') is not None,
-                'analysis_counter': cache.get('analysis_counter')
-            }
-            for sid, cache in _sample_cache.items()
-        }
-    }
+    with atomic_open(path, "wb") as f:
+        pickle.dump(copy_numbers, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def _locked_cnv_run(work_dir: str, sample_id: str, logger, run, failed: dict) -> dict:
+    """Run ``run()`` under the sample's CNV lock, so two runs never read and save the
+    same counts at once. If the lock isn't free in time, return ``failed`` with an
+    error_message: the run's BAMs are not added."""
+    from robin.analysis.master_bed_generator import FileLock
+
+    lock = FileLock(
+        os.path.join(work_dir, sample_id, "_locks", "cnv.lock"), timeout=_CNV_LOCK_WAIT_SECONDS
+    )
+    try:
+        lock.acquire()
+    except TimeoutError:
+        msg = (
+            f"Another CNV run for {sample_id} did not finish within {_CNV_LOCK_WAIT_SECONDS:.0f} s; "
+            "this run's BAMs were not added"
+        )
+        logger.error(msg)
+        return dict(failed, error_message=msg, processing_steps=["cnv_lock_timeout"])
+    try:
+        return run()
+    finally:
+        lock.release()
+
 
 def run_cnv_analysis_direct(
     bam_path,
@@ -811,14 +759,7 @@ def calculate_chromosome_stats_from_cnv(cnv_data: Dict, logger) -> Dict:
 
 
 def load_analysis_counter(sample_id: str, work_dir: str, logger) -> int:
-    """Load the analysis counter for a sample from disk with caching"""
-    # Check cache first
-    cache = get_sample_cache(sample_id)
-    if cache['analysis_counter'] is not None:
-        logger.debug(f"Using cached analysis counter for {sample_id}: {cache['analysis_counter']}")
-        return cache['analysis_counter']
-    
-    # Load from disk
+    """Load the analysis counter for a sample from disk (never cached: CNV-2)"""
     counter_file = os.path.join(work_dir, sample_id, "cnv_analysis_counter.txt")
     result = 0
     if os.path.exists(counter_file):
@@ -828,24 +769,19 @@ def load_analysis_counter(sample_id: str, work_dir: str, logger) -> int:
         except (ValueError, IOError) as e:
             logger.warning(f"Error loading counter for {sample_id}: {e}")
     
-    # Cache the result
-    cache['analysis_counter'] = result
-    logger.debug(f"Loaded and cached analysis counter for {sample_id}: {result}")
+    logger.debug(f"Loaded analysis counter for {sample_id}: {result}")
     return result
 
 
 def save_analysis_counter(sample_id: str, counter: int, work_dir: str, logger) -> None:
-    """Save the analysis counter for a sample to disk and update cache"""
+    """Save the analysis counter for a sample to disk"""
     counter_file = os.path.join(work_dir, sample_id, "cnv_analysis_counter.txt")
     try:
         # Create sample directory if it doesn't exist
         os.makedirs(os.path.dirname(counter_file), exist_ok=True)
         with open(counter_file, "w") as f:
             f.write(str(counter))
-        
-        # Update cache
-        update_sample_cache(sample_id, analysis_counter=counter)
-        logger.debug(f"Saved and cached analysis counter for {sample_id}: {counter}")
+        logger.debug(f"Saved analysis counter for {sample_id}: {counter}")
     except IOError as e:
         logger.error(f"Error saving counter for {sample_id}: {e}")
 
@@ -1108,6 +1044,16 @@ def save_cnv_files(
 
 
 def process_single_bam(bam_path, metadata, work_dir, logger, threads=2, reference: Optional[str] = None):
+    """Process one BAM for CNV analysis, under the sample's CNV lock (CNV-2)."""
+    sample_id = metadata.extracted_data.get("sample_id", "unknown")
+    return _locked_cnv_run(
+        work_dir, sample_id, logger,
+        lambda: _process_single_bam(bam_path, metadata, work_dir, logger, threads, reference),
+        {"sample_id": sample_id, "bam_path": bam_path},
+    )
+
+
+def _process_single_bam(bam_path, metadata, work_dir, logger, threads=2, reference: Optional[str] = None):
     """
     Process a single BAM file for CNV analysis using the complete pipeline.
 
@@ -1123,13 +1069,7 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2, referenc
     """
     sample_id = metadata.extracted_data.get("sample_id", "unknown")
     
-    # Set current sample and check if this is a new sample
-    is_new_sample = set_current_sample(sample_id, logger)
-    
-    if is_new_sample:
-        logger.info(f"🧬 Starting CNV analysis for NEW sample: {sample_id}")
-    else:
-        logger.info(f"🧬 Continuing CNV analysis for sample: {sample_id}")
+    logger.info(f"🧬 CNV analysis for sample: {sample_id}")
 
     # Log essential metadata only
     logger.debug(f"BAM file: {metadata.file_path} ({metadata.file_size:,} bytes)")
@@ -1191,48 +1131,8 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2, referenc
         # This eliminates the multi-sample dictionary bottleneck
         copy_numbers_path = os.path.join(sample_output_dir, f"{sample_id}_copy_numbers.pkl")
         
-        # Check cache first for copy_numbers
-        cache = get_sample_cache(sample_id)
-        if cache['copy_numbers'] is not None and cache['copy_numbers_path'] == copy_numbers_path:
-            logger.debug(f"Using cached copy_numbers for {sample_id}")
-            copy_numbers = cache['copy_numbers']
-        else:
-            # Load from disk or start fresh
-            copy_numbers = None
-            
-            # Backward compatibility: Migrate from old multi-sample dict to per-sample file
-            legacy_dict_path = os.path.join(sample_output_dir, "update_cnv_dict.pkl")
-            if not os.path.exists(copy_numbers_path) and os.path.exists(legacy_dict_path):
-                logger.info("Migrating from legacy multi-sample dict to per-sample file...")
-                try:
-                    with open(legacy_dict_path, "rb") as f:
-                        update_cnv_dict = pickle.load(f)
-                    if sample_id in update_cnv_dict:
-                        # Extract this sample's data and save to per-sample file
-                        with open(copy_numbers_path, "wb") as f:
-                            pickle.dump(update_cnv_dict[sample_id], f, protocol=pickle.HIGHEST_PROTOCOL)
-                        logger.info(f"Migrated copy_numbers for {sample_id} to per-sample file")
-                        
-                        # Optionally remove legacy file after migration (commented out for safety)
-                        # os.remove(legacy_dict_path)
-                except Exception as e:
-                    logger.warning(f"Could not migrate legacy copy_numbers: {e}")
-            
-            if os.path.exists(copy_numbers_path):
-                logger.debug(f"Loading copy_numbers from disk: {copy_numbers_path}")
-                try:
-                    with open(copy_numbers_path, "rb") as f:
-                        copy_numbers = pickle.load(f)
-                    logger.debug(f"Loaded copy_numbers for {sample_id}")
-                except Exception as e:
-                    logger.warning(f"Error loading copy_numbers for {sample_id}: {e}")
-                    copy_numbers = {}
-            else:
-                logger.debug("No previous copy_numbers found, starting fresh")
-                copy_numbers = {}
-            
-            # Cache the loaded copy_numbers
-            update_sample_cache(sample_id, copy_numbers=copy_numbers, copy_numbers_path=copy_numbers_path)
+        # Read from disk every time: another worker may have added to them (CNV-2).
+        copy_numbers = _load_copy_numbers(sample_output_dir, sample_id, logger)
 
         # Load reference CNV dict once (cached for subsequent samples)
         ref_cnv_path = os.path.join(
@@ -1299,14 +1199,10 @@ def process_single_bam(bam_path, metadata, work_dir, logger, threads=2, referenc
 
             # Save updated copy_numbers back to per-sample file (OPTIMIZED)
             save_start = time.time()
-            with open(copy_numbers_path, "wb") as f:
-                pickle.dump(updated_copy_numbers, f, protocol=pickle.HIGHEST_PROTOCOL)
+            _save_copy_numbers(copy_numbers_path, updated_copy_numbers)
             save_time = time.time() - save_start
             logger.debug(f"Saved updated copy_numbers to {copy_numbers_path} in {save_time:.3f}s")
-            
-            # Update cache with the saved copy_numbers
-            update_sample_cache(sample_id, copy_numbers=updated_copy_numbers)
-            
+
             # Update the local copy_numbers variable for subsequent processing
             copy_numbers = updated_copy_numbers
 
@@ -1411,6 +1307,23 @@ def process_multiple_bams(
     bam_paths, metadata_list, work_dir, logger, threads=2, reference: Optional[str] = None,
     target_panel: Optional[str] = None,
 ):
+    """Process a sample's BAMs for CNV analysis, under the sample's CNV lock (CNV-2)."""
+    if not bam_paths or not metadata_list:
+        raise ValueError("bam_paths and metadata_list must not be empty")
+    sample_id = metadata_list[0].extracted_data.get("sample_id", "unknown")
+    return _locked_cnv_run(
+        work_dir, sample_id, logger,
+        lambda: _process_multiple_bams(
+            bam_paths, metadata_list, work_dir, logger, threads, reference, target_panel
+        ),
+        {"sample_id": sample_id, "bam_paths": bam_paths, "files_processed": 0, "total_files": len(bam_paths)},
+    )
+
+
+def _process_multiple_bams(
+    bam_paths, metadata_list, work_dir, logger, threads=2, reference: Optional[str] = None,
+    target_panel: Optional[str] = None,
+):
     """
     Process multiple BAM files for CNV analysis using aggregated CNV data.
     
@@ -1438,13 +1351,7 @@ def process_multiple_bams(
     # Get sample ID from first metadata (assuming all BAMs are from same sample)
     sample_id = metadata_list[0].extracted_data.get("sample_id", "unknown")
     
-    # Set current sample and check if this is a new sample
-    is_new_sample = set_current_sample(sample_id, logger)
-    
-    if is_new_sample:
-        logger.info(f"🧬 Starting multi-BAM CNV analysis for NEW sample: {sample_id}")
-    else:
-        logger.info(f"🧬 Continuing multi-BAM CNV analysis for sample: {sample_id}")
+    logger.info(f"🧬 Multi-BAM CNV analysis for sample: {sample_id}")
 
     logger.info(f"Processing {len(bam_paths)} BAM files for sample {sample_id}")
     
@@ -1506,45 +1413,8 @@ def process_multiple_bams(
         # Use per-sample copy_numbers file (OPTIMIZED APPROACH)
         copy_numbers_path = os.path.join(sample_output_dir, f"{sample_id}_copy_numbers.pkl")
         
-        # Check cache first for copy_numbers
-        cache = get_sample_cache(sample_id)
-        if cache['copy_numbers'] is not None and cache['copy_numbers_path'] == copy_numbers_path:
-            logger.debug(f"Using cached copy_numbers for {sample_id}")
-            copy_numbers = cache['copy_numbers']
-        else:
-            # Load from disk or start fresh
-            copy_numbers = None
-            
-            # Backward compatibility: Migrate from old multi-sample dict to per-sample file
-            legacy_dict_path = os.path.join(sample_output_dir, "update_cnv_dict.pkl")
-            if not os.path.exists(copy_numbers_path) and os.path.exists(legacy_dict_path):
-                logger.info("Migrating from legacy multi-sample dict to per-sample file...")
-                try:
-                    with open(legacy_dict_path, "rb") as f:
-                        update_cnv_dict = pickle.load(f)
-                    if sample_id in update_cnv_dict:
-                        # Extract this sample's data and save to per-sample file
-                        with open(copy_numbers_path, "wb") as f:
-                            pickle.dump(update_cnv_dict[sample_id], f, protocol=pickle.HIGHEST_PROTOCOL)
-                        logger.info(f"Migrated copy_numbers for {sample_id} to per-sample file")
-                except Exception as e:
-                    logger.warning(f"Could not migrate legacy copy_numbers: {e}")
-            
-            if os.path.exists(copy_numbers_path):
-                logger.debug(f"Loading copy_numbers from disk: {copy_numbers_path}")
-                try:
-                    with open(copy_numbers_path, "rb") as f:
-                        copy_numbers = pickle.load(f)
-                    logger.debug(f"Loaded copy_numbers for {sample_id}")
-                except Exception as e:
-                    logger.warning(f"Error loading copy_numbers for {sample_id}: {e}")
-                    copy_numbers = {}
-            else:
-                logger.debug("No previous copy_numbers found, starting fresh")
-                copy_numbers = {}
-            
-            # Cache the loaded copy_numbers
-            update_sample_cache(sample_id, copy_numbers=copy_numbers, copy_numbers_path=copy_numbers_path)
+        # Read from disk every time: another worker may have added to them (CNV-2).
+        copy_numbers = _load_copy_numbers(sample_output_dir, sample_id, logger)
 
         # Load reference CNV dict once (cached for subsequent samples)
         ref_cnv_path = os.path.join(
@@ -1644,13 +1514,9 @@ def process_multiple_bams(
 
             # Save updated copy_numbers back to per-sample file (OPTIMIZED)
             save_start = time.time()
-            with open(copy_numbers_path, "wb") as f:
-                pickle.dump(final_copy_numbers, f, protocol=pickle.HIGHEST_PROTOCOL)
-            update_sample_cache(sample_id, copy_numbers=final_copy_numbers)
+            _save_copy_numbers(copy_numbers_path, final_copy_numbers)
             copy_numbers = final_copy_numbers
-            logger.info(
-                f"[cnv] Save copy_numbers + cache update completed in {time.time() - save_start:.2f}s"
-            )
+            logger.info(f"[cnv] Save copy_numbers completed in {time.time() - save_start:.2f}s")
 
             analysis_result["processing_steps"].append("cnv_data_extracted")
             logger.debug("Aggregated CNV data extracted successfully")

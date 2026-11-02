@@ -75,9 +75,7 @@ def cached_control(monkeypatch):
     """Patch the cached control to a synthetic one; return a setter."""
     holder = {}
     monkeypatch.setattr(cnv_analysis, "get_cached_ref_cnv_dict", lambda path, logger: holder["control"])
-    cnv_analysis.clear_sample_cache()
     yield holder
-    cnv_analysis.clear_sample_cache()
 
 
 def _single(bam, sample_id, work_dir):
@@ -96,7 +94,6 @@ def test_a_normal_sample_after_an_abnormal_one_is_unchanged(tmp_path, cached_con
     _single(bam_a, "A", tmp_path / "run")
     after_a = _single(bam_b, "B", tmp_path / "run")
 
-    cnv_analysis.clear_sample_cache()
     cached_control["control"] = flat_control(CONTIGS, 1)
     fresh = _single(bam_b, "B", tmp_path / "fresh")
 
