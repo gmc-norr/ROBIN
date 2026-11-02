@@ -452,3 +452,48 @@ def test_calls_are_not_reused_after_target_bam_changes_without_a_new_batch(sampl
     assert not ta_mod.snp_calls_are_current(str(sample["dir"])), (
         "calls from the old target.bam count as current"
     )
+
+
+# Round 3 (second external review) ------------------------------------------------------
+
+
+def test_a_quick_retry_does_not_take_the_previous_runs_indel_file(caller):
+    first, _ = caller([{}])
+    assert first, "the first run should succeed"
+    out, _ = caller([{"indel": False}])
+    assert out == "", "the previous run's INDEL file was shown as this run's"
+
+
+def test_old_run_folders_are_removed(caller, sample):
+    caller([{}])
+    caller([{}])
+    assert len(list((sample["dir"] / "clair3").glob("run_*"))) == 1
+
+
+def _drop_a_part(sample):
+    """Remove a part of the newest staged set; its coverage file (written last) stays."""
+    staging = sample["dir"] / "_staging"
+    cov = sorted(staging.glob("coverage_*.parquet"))[-1]
+    n = cov.name[len("coverage_"):-len(".parquet")]
+    (staging / f"source_bam_{n}.txt").unlink()
+    return cov.name
+
+
+def test_finalize_reports_a_staged_set_missing_a_part(sample):
+    _stage(sample, 1)
+    name = _drop_a_part(sample)
+    result = finalize_accumulation_for_sample(SAMPLE, str(sample["work"]), PANEL_NAME)
+    assert result.get("incomplete_staged") == [name]
+    assert (sample["dir"] / "_staging" / name).exists(), "the broken set was deleted"
+
+
+@pytest.mark.parametrize("with_complete_set", [False, True], ids=["alone", "beside_a_complete_set"])
+def test_an_snp_run_fails_on_a_staged_set_missing_a_part(sample, monkeypatch, with_complete_set):
+    _stage(sample, 1)
+    name = _drop_a_part(sample)
+    if with_complete_set:
+        _stage(sample, 2)
+    seen = _record_snp_runs(monkeypatch)
+    job = _run_handler(sample)
+    assert seen == [], "variants were called without the broken set's reads"
+    assert name in job.context.errors.get("snp_analysis", "")

@@ -2791,6 +2791,17 @@ def _claims_left(sample_dir: str) -> List[str]:
     return left
 
 
+def _incomplete_staged_sets(staging_dir: str) -> List[str]:
+    """Staged coverage files whose set misses a part. Staging writes the coverage file
+    last, so such a set is broken, not still being written; no claim takes it."""
+    complete = set(_complete_staged_counters(staging_dir))
+    return [
+        os.path.basename(path)
+        for path in sorted(glob.glob(os.path.join(staging_dir, "coverage_*.parquet")))
+        if os.path.basename(path)[len("coverage_"):-len(".parquet")] not in complete
+    ]
+
+
 def _merge_missed_reads(result: Dict[str, Any]) -> Optional[str]:
     """What kept reads out of target.bam in a finalize result; None when nothing did."""
     status = result.get("status")
@@ -2802,6 +2813,11 @@ def _merge_missed_reads(result: Dict[str, Any]) -> Optional[str]:
     if result.get("claims_left"):
         folders = ", ".join(f"_staging/{name}" for name in result["claims_left"])
         return f"staged reads in {folders} were not added (a worker is still adding them, or it stopped)"
+    if result.get("incomplete_staged"):
+        return (
+            "staged sets in _staging/ miss a part, so their reads were not added: "
+            + ", ".join(result["incomplete_staged"])
+        )
     return None
 
 
@@ -2814,8 +2830,9 @@ def _snp_source_path(sample_dir: str) -> str:
 
 
 def _target_bam_identity(target_bam: str) -> Dict[str, Any]:
-    """Which target.bam this is: its merged batches, size and modification time. A merge,
-    or any other rewrite, changes it."""
+    """Which target.bam this is: its merged batches, size and modification time. Every
+    way ROBIN writes target.bam changes it. A replacement from outside ROBIN that keeps
+    the old size and modification time would not be noticed."""
     st = os.stat(target_bam)
     return {
         "batches": sorted(_merged_batch_names(target_bam)),
@@ -2982,6 +2999,13 @@ def finalize_accumulation_for_sample(
         if left:
             logger.warning(f"Staged reads in {left} for {sample_id} are not in target.bam")
             result["claims_left"] = left
+        # A staged set with a missing part is never claimed: list it. Under the
+        # accumulation lock, so a claim moving a set's files is never seen half done.
+        with FileLock(target_analysis._get_lock_file(sample_id, "accumulation"), timeout=60.0):
+            broken = _incomplete_staged_sets(target_analysis._get_staging_dir(sample_id))
+        if broken:
+            logger.warning(f"Staged sets missing a part for {sample_id}: {broken}")
+            result["incomplete_staged"] = broken
 
         # Merge every new batch BAM into target.bam, keeping the reads already in it
         # (TGT-1). target.bam's header lists the batch BAMs merged into it, so one left
@@ -3845,10 +3869,14 @@ def run_snp_analysis(
             except ImportError:
                 logger.info("psutil not available, skipping resource logging")
 
-            # A region's VCFs count only when written by this run: files from an earlier
-            # run stay in clair3/ (the container writes them as root). 2 s allows for
-            # file-system time rounding.
-            run_started = time.time() - 2
+            # Each run writes Clair3's output into its own new folder, so a VCF there can
+            # only be this run's: files from an earlier run are never taken as new. Earlier
+            # run folders are deleted when possible (the container writes as root).
+            for old_run in glob.glob(os.path.join(clair_dir, "run_*")):
+                shutil.rmtree(old_run, ignore_errors=True)
+            run_name = f"run_{uuid.uuid4().hex[:8]}"
+            run_dir = os.path.join(clair_dir, run_name)
+            os.makedirs(run_dir)
 
             # Process each region
             for i, region_spec in enumerate(regions):
@@ -3860,9 +3888,9 @@ def run_snp_analysis(
 
                 # Create region-specific output directory
                 if region_spec["is_split"]:
-                    region_output = f"{container_output}/region_{i+1}"
+                    region_output = f"{container_output}/{run_name}/region_{i+1}"
                 else:
-                    region_output = container_output
+                    region_output = f"{container_output}/{run_name}"
 
                 # Build Clair3 command for this region
                 command = (
@@ -3964,20 +3992,20 @@ def run_snp_analysis(
 
                 # Check if output files were created for this region/pass
                 if region_spec["is_split"]:
-                    region_snv = f"{clair_dir}/region_{i+1}/snv.vcf.gz"
-                    region_indel = f"{clair_dir}/region_{i+1}/indel.vcf.gz"
+                    region_snv = f"{run_dir}/region_{i+1}/snv.vcf.gz"
+                    region_indel = f"{run_dir}/region_{i+1}/indel.vcf.gz"
                 else:
-                    region_snv = f"{clair_dir}/snv.vcf.gz"
-                    region_indel = f"{clair_dir}/indel.vcf.gz"
+                    region_snv = f"{run_dir}/snv.vcf.gz"
+                    region_indel = f"{run_dir}/indel.vcf.gz"
 
                 for kind, path, found in (
                     ("SNV", region_snv, all_snv_vcfs),
                     ("INDEL", region_indel, all_indel_vcfs),
                 ):
-                    if not (os.path.exists(path) and os.stat(path).st_mtime >= run_started):
+                    if not os.path.exists(path):
                         logger.error(
-                            f"Region {i+1} ({region_label}) {kind} output was not written by "
-                            f"this run: {path}; SNP calling failed"
+                            f"Region {i+1} ({region_label}) wrote no {kind} output: {path}; "
+                            "SNP calling failed"
                         )
                         return ""
                     found.append(path)
@@ -3990,7 +4018,7 @@ def run_snp_analysis(
                 )
 
                 if all_snv_vcfs:
-                    merged_snv = f"{clair_dir}/merged_snv.vcf.gz"
+                    merged_snv = f"{run_dir}/merged_snv.vcf.gz"
                     if not merge_vcf_files(all_snv_vcfs, merged_snv, "SNV"):
                         return ""
                     shutil.copy2(merged_snv, f"{clair_dir}/output_done.vcf.gz")
@@ -4000,7 +4028,7 @@ def run_snp_analysis(
                     return ""
 
                 if all_indel_vcfs:
-                    merged_indel = f"{clair_dir}/merged_indel.vcf.gz"
+                    merged_indel = f"{run_dir}/merged_indel.vcf.gz"
                     if not merge_vcf_files(all_indel_vcfs, merged_indel, "INDEL"):
                         return ""
                     shutil.copy2(merged_indel, f"{clair_dir}/output_indel_done.vcf.gz")
@@ -4012,8 +4040,8 @@ def run_snp_analysis(
                 logger.info("Clair3 pipeline completed successfully for all regions")
             else:
                 # Single-pass output normalization (no merge step needed).
-                single_snv = f"{clair_dir}/snv.vcf.gz"
-                single_indel = f"{clair_dir}/indel.vcf.gz"
+                single_snv = f"{run_dir}/snv.vcf.gz"
+                single_indel = f"{run_dir}/indel.vcf.gz"
                 if not os.path.exists(single_snv):
                     logger.error(f"Single-pass SNV output not found: {single_snv}")
                     return ""
