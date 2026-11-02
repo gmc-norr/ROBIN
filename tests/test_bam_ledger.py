@@ -663,3 +663,43 @@ def test_a_non_ray_preprocessing_told_its_steps_starts_only_those():
     ctx = ws.WorkflowContext(filepath="/data/S_pass_0.bam", metadata={"original_workflow": PLAN, "only_steps": ["cnv"]})
     job = ws.Job(1, "preprocessing", ctx, "fast", PLAN)
     assert _types(job.can_trigger_jobs()) == ["cnv"]
+
+
+# Batch 10e part 1, round 2: a failure found by another job is recorded for its own BAM ----------
+
+
+def _ledger_lines(work, *records):
+    from robin.file_ledger import FileLedger
+
+    FileLedger(str(work)).append(list(records))
+
+
+def test_a_failure_line_survives_a_later_end_of_the_same_step(tmp_path):
+    # The race: another job records the BAM's failure before the BAM's own step has ended.
+    from robin.file_ledger import FileLedger
+
+    _ledger_lines(
+        tmp_path,
+        {"e": "take", "key": "k1", "file": "/data/A.bam"},
+        {"e": "start", "key": "k1", "step": "target", "sample": "S", "file": "/data/A.bam"},
+        {"e": "file_failed", "key": "k1", "step": "target", "error": "staged coverage unreadable"},
+        {"e": "end", "key": "k1", "step": "target", "status": "success", "outcome": "success"},
+    )
+    step = FileLedger(str(tmp_path)).load()["k1"].steps["target"]
+    assert step.ended and step.file_failed == "staged coverage unreadable"
+
+
+def test_a_step_with_only_a_failure_line_is_reported_at_the_next_start(tmp_path):
+    from robin.bam_identity import bam_key
+    from robin.file_ledger import BamIntake
+
+    bam = _bam(tmp_path / "run")
+    key = bam_key(str(bam))
+    _ledger_lines(
+        tmp_path / "work",
+        {"e": "take", "key": key, "file": str(bam)},
+        {"e": "file_failed", "key": key, "step": "target", "error": "staged coverage unreadable"},
+    )
+    rows = BamIntake(str(tmp_path / "work"), PLAN).decide(str(bam)).cut_short
+    assert [(r["job_type"], r["failure_kind"]) for r in rows] == [("target", "failed_before")]
+    assert "staged coverage unreadable" in rows[0]["error"]

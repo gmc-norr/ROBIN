@@ -9,6 +9,9 @@ One append-only file per work folder, ``robin_bam_ledger.jsonl``, one JSON objec
   (after the handler). ``o`` is the job's outcome (success, failed or expected_failure), with
   ``"error"`` when it failed; ``"file_failed"`` when this BAM failed inside a job that went
   on; ``"downstream"`` for preprocessing: whether its steps follow.
+- ``{"e": "file_failed", "key": K, "step": S, "error": text}``: another job found that step S
+  failed for this BAM (a later accumulation left its staged coverage out). A later ``end`` of
+  the step keeps it; only a ``start`` resets the step.
 
 K is the BAM's key (``robin.bam_identity.bam_key``): a BAM is known by its bytes. Only the
 per-BAM steps are recorded (preprocessing and the five it starts); the per-sample ones
@@ -201,7 +204,11 @@ class FileLedger:
             step.downstream = rec.get("downstream")
             step.outcome = rec.get("outcome")
             step.error = str(rec.get("error") or "")
-            step.file_failed = rec.get("file_failed")
+            # A failure another job recorded first is kept (batch 10e)
+            step.file_failed = rec.get("file_failed") or step.file_failed
+        elif kind == "file_failed":
+            step = bam.steps.setdefault(rec["step"], StepState())
+            step.file_failed = str(rec.get("error") or "no error text")
         else:
             raise ValueError(f"unknown record kind {kind!r}")
 
@@ -287,7 +294,8 @@ class BamIntake:
         rows = []
         for s in PER_BAM_STEPS:
             step = bam.steps.get(s)
-            found = _earlier_failure(s, step) if step is not None and step.ended else None
+            # A failure another job recorded counts even if the step never ended
+            found = _earlier_failure(s, step) if step is not None and (step.ended or step.file_failed) else None
             if found is None:
                 continue
             kind, text = found
@@ -438,3 +446,27 @@ def record_step_end(
         ledger.append(records)
     except Exception as e:
         _log.error(f"Could not record the end of {job_type} in the BAM ledger: {e}")
+
+
+def record_bam_failure(work_dir: Optional[str], key: str, step: str, error: str) -> bool:
+    """Record that ``step`` failed for the BAM ``key``, found by another job (a later
+    accumulation that left its staged coverage out), so that every start reports it.
+
+    Written only where the work folder has a ledger that has taken the BAM in: a failure line
+    alone would make the next start skip that step, which never ran. Anything it can't do is
+    logged, not raised. Returns whether the line was written."""
+    if not work_dir:
+        return False
+    ledger = FileLedger(work_dir)
+    if not os.path.exists(ledger.path):
+        _log.info(f"No BAM ledger in {work_dir}: the {step} failure of BAM {key} is only logged")
+        return False
+    try:
+        if key not in ledger.load():
+            _log.warning(f"The BAM ledger in {work_dir} has not taken BAM {key} in: its {step} failure is only logged")
+            return False
+        ledger.append([{"e": "file_failed", "key": key, "step": step, "error": str(error or "")[:500]}])
+        return True
+    except Exception as e:
+        _log.error(f"Could not record the {step} failure of BAM {key} in the BAM ledger: {e}")
+        return False

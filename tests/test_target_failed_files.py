@@ -173,6 +173,112 @@ def test_finalize_shows_a_bam_its_accumulation_could_not_add(tmp_path, panel):
     assert _failures(job) == [(bams[0], STEP)]
 
 
+# --- round 2 (the external review): whose failure, and when a set is taken -----------------------
+
+
+def _ledger_with_ended_target_steps(work, bams):
+    """A work folder whose ledger says each BAM's target step ended well (as after its job)."""
+    from robin.bam_identity import bam_key
+    from robin.file_ledger import FileLedger
+
+    records = []
+    for bam in bams:
+        k = bam_key(bam)
+        records += [
+            {"e": "take", "key": k, "file": bam},
+            {"e": "start", "key": k, "step": "preprocessing", "sample": SAMPLE, "file": bam},
+            {"e": "end", "key": k, "step": "preprocessing", "status": "success", "outcome": "success",
+             "downstream": True},
+            {"e": "start", "key": k, "step": "target", "sample": SAMPLE, "file": bam},
+            {"e": "end", "key": k, "step": "target", "status": "success", "outcome": "success"},
+        ]
+    os.makedirs(str(work), exist_ok=True)
+    FileLedger(str(work)).append(records)
+
+
+def _rows_at_next_start(work, bam):
+    from robin.file_ledger import BamIntake
+
+    return [
+        (r["job_type"], r["failure_kind"])
+        for r in BamIntake(str(work), ["fast:preprocessing", "fast:target"]).decide(bam).cut_short
+    ]
+
+
+@pytest.mark.parametrize("found_by", ["the_next_target_job", "finalize"])
+def test_an_earlier_jobs_bam_left_out_is_reported_at_every_start(tmp_path, panel, monkeypatch, found_by):
+    bams, _ = write_bams(str(tmp_path), 2)
+    work = tmp_path / "work"
+    _ledger_with_ended_target_steps(work, bams)
+    with open(_stage(work, bams[0]), "wb") as f:  # BAM 0's job staged it and ended well
+        f.write(b"not a parquet file")
+    if found_by == "finalize":
+        ta_mod.finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+    else:
+        _batch_size_one(monkeypatch)
+        job = _one_bam_job(bams[1])
+        target_handler(job, work_dir=str(work), target_panel=PANEL_NAME)
+        assert _failures(job) == [(bams[0], STEP)]
+    for _ in range(2):  # at every start
+        assert _rows_at_next_start(work, bams[0]) == [("target", "failed_before")]
+    assert _rows_at_next_start(work, bams[1]) == []
+
+
+@pytest.mark.parametrize("case", ["no_ledger", "bam_not_in_ledger"])
+def test_no_ledger_line_is_written_where_the_ledger_has_no_such_bam(tmp_path, panel, case):
+    """A failure line alone would make the next start skip a target step that never ran."""
+    from robin.bam_identity import bam_key
+
+    bams, _ = write_bams(str(tmp_path), 2)
+    work = tmp_path / "work"
+    if case == "bam_not_in_ledger":
+        _ledger_with_ended_target_steps(work, bams[1:])
+    with open(_stage(work, bams[0]), "wb") as f:
+        f.write(b"not a parquet file")
+    ta = TargetAnalysis(work_dir=str(work), target_panel=PANEL_NAME, batch_size=1, use_staging=True)
+    assert ta.accumulate_staged_files(SAMPLE, force=True)["status"] == "load_failed"
+    ledger = work / "robin_bam_ledger.jsonl"
+    if case == "no_ledger":
+        assert not ledger.exists()
+    else:
+        assert bam_key(bams[0]) not in ledger.read_text(), "a line for a BAM the ledger never took in"
+
+
+def test_a_bam_renamed_after_staging_is_reported_under_its_new_name(tmp_path, panel):
+    """The plan check's case: the staged set names the old path, which is gone by the time
+    its coverage fails. The key saved at staging still ties the failure to the BAM."""
+    bams, _ = write_bams(str(tmp_path), 1)
+    work = tmp_path / "work"
+    _ledger_with_ended_target_steps(work, bams)
+    with open(_stage(work, bams[0]), "wb") as f:  # BAM 0's job staged it and ended well
+        f.write(b"not a parquet file")
+    moved = str(tmp_path / "renamed.bam")
+    os.rename(bams[0], moved)  # the same bytes, so the same key
+    ta_mod.finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+    assert _rows_at_next_start(work, moved) == [("target", "failed_before")]
+
+
+def test_a_failed_first_move_leaves_the_set_staged_and_reports_nothing(tmp_path, panel, monkeypatch):
+    bams, _ = write_bams(str(tmp_path), 1)
+    work = tmp_path / "work"
+    staged = _stage(work, bams[0])
+    real_move = ta_mod.shutil.move
+
+    def move(src, dst, *args, **kwargs):
+        raise OSError("synthetic: the first move fails")
+
+    monkeypatch.setattr(ta_mod.shutil, "move", move)
+    ta = TargetAnalysis(work_dir=str(work), target_panel=PANEL_NAME, batch_size=1, use_staging=True)
+    result = ta.accumulate_staged_files(SAMPLE, force=True)
+    assert result["status"] == "error"
+    assert not result.get("file_failures")
+    assert os.path.exists(staged)
+    assert glob.glob(os.path.join(str(work), SAMPLE, "_staging", "_batch_*")) == [], "an empty claim folder was kept"
+    monkeypatch.setattr(ta_mod.shutil, "move", real_move)
+    again = ta.accumulate_staged_files(SAMPLE, force=True)
+    assert again["status"] == "success" and again["files_processed"] == 1
+
+
 # --- guards: no failed file where nothing failed -------------------------------------------------
 
 

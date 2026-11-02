@@ -33,6 +33,8 @@ import numpy as np
 import pandas as pd
 import pysam
 from robin.logging_config import get_job_logger
+from robin.bam_identity import bam_key
+from robin.file_ledger import record_bam_failure
 from robin.analysis.snp_processing import build_snp_display_data
 from robin.analysis.target_coverage import (
     UNION_FILE,
@@ -1097,6 +1099,10 @@ class TargetAnalysis:
                 f.write(str(current_timestamp))
             with open(os.path.join(staging_dir, f"source_bam_{n}.txt"), "w") as f:
                 f.write(file_path)
+            # The BAM's key, read now while the BAM is here: a failure found later is then
+            # recorded for this BAM even if it was renamed by then (batch 10e)
+            with open(os.path.join(staging_dir, f"bam_key_{n}.txt"), "w") as f:
+                f.write(bam_key(file_path))
             with atomic_open(coverage_staging, "wb") as f:
                 newcovdf.to_parquet(f, index=False)
 
@@ -2064,7 +2070,7 @@ class TargetAnalysis:
         start_time = time.time()
         claim = None
         claimed, batch_dir, committed = [], None, False
-        taken = []  # the claimed sets whose files began to move into the claim folder
+        taken = []  # the claimed sets with a file moved into the claim folder
         # A BAM whose coverage was not added, or whose reads are not in target.bam: one
         # failed-file entry each, which the handler shows (batch 10e)
         file_failures: List[Dict[str, str]] = []
@@ -2072,11 +2078,10 @@ class TargetAnalysis:
 
         def failed(n: str, text: str) -> None:
             listed.add(n)
-            file_failures.append({
-                "file": _staged_set_bam(batch_dir, n),
-                "error": f"{text} Its files are kept in _staging/{os.path.basename(batch_dir)}.",
-                "step": _COVERAGE_STEP,
-            })
+            error = f"{text} Its files are kept in _staging/{os.path.basename(batch_dir)}."
+            file_failures.append({"file": _staged_set_bam(batch_dir, n), "error": error, "step": _COVERAGE_STEP})
+            # In the ledger too, so every start reports it, whichever job found it
+            _record_left_out(self.work_dir, batch_dir, n, error)
 
         def not_added(result: Dict[str, Any]) -> Dict[str, Any]:
             # After the claim and before the commit, no claimed set's coverage was added; the
@@ -2086,6 +2091,11 @@ class TargetAnalysis:
                 for n in taken:
                     if n not in listed:
                         failed(n, f"Its coverage was not added ({result['status']}: {result['error']}).")
+            if batch_dir and not taken:
+                try:  # nothing moved into it: no claim folder for finalize to list
+                    os.rmdir(batch_dir)
+                except OSError:
+                    pass
             if file_failures:
                 result["file_failures"] = file_failures
             return result
@@ -2110,14 +2120,16 @@ class TargetAnalysis:
                 claim.acquire()
                 os.makedirs(batch_dir)
                 for n in claimed:
-                    taken.append(n)
-                    for kind, ext in _STAGED_KINDS:
+                    for i, (kind, ext) in enumerate(_STAGED_KINDS):
                         name = f"{kind}_{n}.{ext}"
                         shutil.move(os.path.join(staging_dir, name), os.path.join(batch_dir, name))
-                    # The merged-panel part is optional: a BAM staged before batch 8 has none.
-                    union_name = f"union_{n}.parquet"
-                    if os.path.exists(os.path.join(staging_dir, union_name)):
-                        shutil.move(os.path.join(staging_dir, union_name), os.path.join(batch_dir, union_name))
+                        if i == 0:
+                            taken.append(n)  # its first file moved: no longer complete in staging
+                    # Optional parts: a BAM staged before batch 8 has no merged-panel part, and
+                    # one staged before batch 10e no key.
+                    for name in (f"union_{n}.parquet", f"bam_key_{n}.txt"):
+                        if os.path.exists(os.path.join(staging_dir, name)):
+                            shutil.move(os.path.join(staging_dir, name), os.path.join(batch_dir, name))
 
             # --- Not locked: load the batch, count reads, write its batch BAM ---
             contigs, targets, stretch_frames, timestamps, source_bams = [], [], [], [], []
@@ -2824,6 +2836,35 @@ def _staged_set_bam(set_dir: str, n: str) -> str:
     except OSError:
         pass
     return os.path.join(set_dir, f"coverage_{n}.parquet")
+
+
+def _staged_set_key(set_dir: str, n: str) -> Optional[str]:
+    """The key of the BAM a staged set came from: the one saved at staging, or for a set
+    staged before batch 10e, read from the BAM's path while that still works. None if neither."""
+    try:
+        with open(os.path.join(set_dir, f"bam_key_{n}.txt")) as f:
+            key = f.read().strip()
+        if key:
+            return key
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(set_dir, f"source_bam_{n}.txt")) as f:
+            return bam_key(f.read().strip())
+    except OSError:
+        return None
+
+
+def _record_left_out(work_dir: str, set_dir: str, n: str, error: str) -> None:
+    """Record in the work folder's ledger that the target step left this staged set's BAM
+    out, so every start reports it, whichever job found it (batch 10e)."""
+    key = _staged_set_key(set_dir, n)
+    if key is None:
+        logging.getLogger("robin.target").warning(
+            f"The BAM of staged set {n} in {set_dir} can't be identified: its failure is only logged"
+        )
+        return
+    record_bam_failure(work_dir, key, "target", error)
 
 
 def _install_batch_bam(batch_bam: str, final: str) -> None:
