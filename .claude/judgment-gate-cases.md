@@ -152,3 +152,24 @@ whenever a claim is withdrawn or a finding turns out to be an artifact. Concrete
 - **Gate:** A.5 again, as in case 12. List every way the input gets in (here, both files the
   loader reads), and check every `except` on those paths against the rule ("a failure says
   failed"), not just the lines being changed.
+
+## 15. "Each BAM's data is added once", with a step's batch and Ray's retries as other ways in (batch 10d, 2026-11-02)
+- **Claimed:** in the locked plan (`aad9b4e`) and its result (`41b5c64`): with the ledger, a
+  BAM's data is added to its sample's totals once, and a step cut short is reported once.
+- **Rested on:**
+  - "Which BAMs a step works on" was read from the job's batch list. That list lives in the
+    first BAM's job details, which all of that BAM's steps share, so a later batch could
+    overwrite an earlier one's before it ran. Older code, but the ledger trusted it.
+  - "A step runs once per start record" ignored Ray's own retry of a task whose worker died
+    (default 3).
+  - The `master.csv` key list was tested with a handful of BAMs, not with a run's worth
+    (3,641 keys break Python's `csv`).
+  - "Reported once" was enforced by writing the end record before the report was delivered,
+    and an ended failure made no report at all.
+  - Codex found all four, each through the real batcher, worker or Ray task.
+  - Claude found a fifth while writing the brief: the claimed-safe torn-line case broke the
+    file one restart later.
+- **Gate:** A.5 (inputs verified, not assumed). List every way a step can run, and every
+  layer that runs it: the batcher, the runner and Ray itself. Size any growing record at a
+  real run's scale, not a test's. And a record that says "reported" must come after the
+  report, not before.
