@@ -82,9 +82,19 @@ class MasterCSVManager:
         lock_path = self._get_master_csv_lock_path(sample_id)
 
         with FileLock(lock_path, timeout=10.0):
+            had_master = os.path.exists(master_csv_path)
             existing_data = self._load_existing_data(master_csv_path)
             listed = self._read_counted_keys(list_path)
             last = str(existing_data.get("last_bam_added") or "")
+            if listed and (not had_master or not last):
+                # The list says BAMs are counted, but their counts are gone (master.csv deleted,
+                # or written again from nothing by another writer): don't count from zero
+                why = "master.csv is missing" if not had_master else "master.csv holds none of their counts"
+                raise RuntimeError(
+                    f"{list_path} lists {len(listed)} BAM(s) as counted, but {why}: their counts "
+                    "are lost. Nothing was added. Restore master.csv, or move the list away to "
+                    "count from zero (the BAMs counted before will then be missing)"
+                )
             if last and last not in listed:
                 # The last update wrote master.csv and stopped before its list: finish it
                 logger.warning(f"master.csv for {sample_id} counts a BAM its list misses; adding it to {list_path}")

@@ -210,6 +210,29 @@ def test_a_stop_between_master_csv_and_its_list_counts_the_bam_once(tmp_path, mo
     assert int(float(_master(tmp_path)["counter_mapped_count"])) == 12
 
 
+def test_a_missing_master_csv_with_a_surviving_list_stops_the_update(tmp_path):
+    # Round 3, finding 1: the list says A is counted, but the counts are gone.
+    manager = MasterCSVManager(str(tmp_path))
+    _add(manager, "a" * 32, 5)
+    master = os.path.join(str(tmp_path), SAMPLE, "master.csv")
+    os.remove(master)
+    for key in ("a" * 32, "b" * 32):
+        with pytest.raises(RuntimeError, match="master_csv_bams.txt"):
+            _add(manager, key, 7)
+    assert not os.path.exists(master), "the counts were started again from zero"
+    with open(os.path.join(str(tmp_path), SAMPLE, "master_csv_bams.txt")) as fh:
+        assert fh.read().split() == ["a" * 32]
+
+
+def test_a_master_csv_remade_empty_by_another_writer_with_a_surviving_list_stops_the_update(tmp_path):
+    manager = MasterCSVManager(str(tmp_path))
+    _add(manager, "a" * 32, 5)
+    os.remove(os.path.join(str(tmp_path), SAMPLE, "master.csv"))
+    manager.update_analysis_panel(SAMPLE, "AML")  # writes a fresh master.csv, with no counts
+    with pytest.raises(RuntimeError, match="master_csv_bams.txt"):
+        _add(manager, "b" * 32, 7)
+
+
 def test_a_list_cut_off_mid_key_is_repaired(tmp_path):
     manager = MasterCSVManager(str(tmp_path))
     _add(manager, "a" * 32, 5)

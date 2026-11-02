@@ -524,6 +524,83 @@ def test_the_coordinator_keeps_the_kind_of_an_earlier_failure(tmp_path):
     assert [(r["job_type"], r["failure_kind"]) for r in c._failed_jobs_log] == [("cnv", "failed_before")]
 
 
+# Round 3: the second external review's findings ---------------------------------------------
+
+
+def test_a_steps_own_failed_file_counts_when_it_replaces_the_list(tmp_path):
+    # Finding 2: the BED step replaces the list of failed files; an earlier step's entry was in it.
+    from robin.file_ledger import FileLedger
+
+    work = str(tmp_path)
+    ctx = wr.WorkflowContext(filepath="/data/S_pass_1.bam", metadata={
+        "bam_key": "k1", "work_dir": work, "bam_metadata": {"sample_id": "S"},
+        "file_failures": [{"file": "/data/S_pass_0.bam", "error": "synthetic: an earlier step's failure", "step": "master_csv"}],
+    })
+
+    def replaces(job):  # as bed_conversion does: its own failures, in place of the list
+        job.context.add_metadata("file_failures", [
+            {"file": "/data/S_pass_1.bam", "error": "synthetic merge failure", "step": "merge"},
+        ])
+
+    q = wr.job_queue_of("bed_conversion")
+    wr._wrap_real_handler(replaces, "bed_conversion")(wr.Job(next(_ids), "bed_conversion", q, [f"{q}:bed_conversion"], 0, ctx))
+    state = FileLedger(work).load()
+    assert state["k1"].steps["bed_conversion"].file_failed == "synthetic merge failure", "the step's own failed file was lost"
+
+
+def test_a_non_ray_step_is_not_failed_by_its_siblings_failed_file(tmp_path):
+    # Finding 2: with batching off, sibling steps run at once on one shared context.
+    from robin.file_ledger import FileLedger
+
+    work = str(tmp_path)
+    ctx = ws.WorkflowContext(filepath="/data/S_pass_0.bam", metadata={
+        "bam_key": "k0", "work_dir": work, "bam_metadata": {"sample_id": "S"},
+    })
+    bed_done = threading.Event()
+
+    def cnv(job):  # starts first, ends after BED has reported its failed file
+        if not bed_done.wait(5):
+            raise RuntimeError("synthetic: BED never ran")
+
+    def bed(job):
+        job.context.add_metadata("file_failures", [
+            {"file": "/data/S_pass_0.bam", "error": "synthetic BED-only merge failure", "step": "merge"},
+        ])
+        bed_done.set()
+
+    mgr = ws.WorkflowManager(enable_batching=False)
+    mgr.enqueue_jobs = lambda jobs: None
+    queues, threads = [], []
+    for step, handler in [("cnv", cnv), ("bed_conversion", bed)]:
+        q = queue.Queue()
+        q.put(ws.Job(next(_ids), step, ctx, "fast", [f"fast:{step}"]))
+        t = threading.Thread(target=mgr.worker, args=(step, q, {step: handler}), daemon=True)
+        t.start()
+        queues.append(q)
+        threads.append(t)
+    for q in queues:
+        q.join()
+    mgr.running = False
+    for t in threads:
+        t.join(timeout=5)
+    steps = FileLedger(work).load()["k0"].steps
+    assert steps["bed_conversion"].file_failed == "synthetic BED-only merge failure"
+    assert steps["cnv"].file_failed is None, "a step that worked was marked failed by its sibling's failed file"
+
+
+def test_the_coordinator_records_a_repeated_row_once(tmp_path):
+    # Finding 3: a row sent again (its first answer lost) is not a second failure.
+    c = CoordinatorClass(target_panel="rCNS2", preset="standard", enable_batching=False)
+    c.set_work_dir(str(tmp_path))
+    row = {
+        "sample_id": "unknown", "filepath": "/data/S_pass_0.bam", "job_type": "preprocessing",
+        "error": "S_pass_0.bam has no BAM end-of-file block", "failure_kind": "incomplete",
+    }
+    c.record_cut_short_steps([row])
+    c.record_cut_short_steps([dict(row)])
+    assert len(c._failed_jobs_log) == 1 and c.file_failed_by_type == {"preprocessing": 1}
+
+
 # The non-Ray runner ------------------------------------------------------------------------
 
 

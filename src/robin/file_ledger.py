@@ -23,6 +23,7 @@ start (``only_steps``). At every start, each step that failed or may be incomple
 BAM is reported as a failed file (none is run again).
 """
 
+import contextvars
 import fcntl
 import json
 import logging
@@ -41,6 +42,34 @@ AFTER_PREPROCESSING = PER_BAM_STEPS[1:]
 _BGZF_EOF = bytes.fromhex("1f8b08040000000000ff0600424302001b0003000000000000000000")
 
 _log = logging.getLogger("robin.file_ledger")
+
+# The step a worker is running now ("<job id>:<job type>"), set by both runners around the
+# handler call. Each entry a step adds to its context's failed-file list is tagged with it, so
+# the ledger records a step's own failed files: sibling steps can share one context (non-Ray),
+# and a step can replace the list (bed_conversion).
+CURRENT_STEP: contextvars.ContextVar = contextvars.ContextVar("robin_current_step", default=None)
+
+
+def enter_step(owner: str):
+    """Set the step this worker runs now; returns the token for ``leave_step``. (The runners
+    call these, not ``CURRENT_STEP`` itself: Ray pickles the runner's code with the names it
+    uses, and a ContextVar can't be pickled.)"""
+    return CURRENT_STEP.set(owner)
+
+
+def leave_step(token) -> None:
+    CURRENT_STEP.reset(token)
+
+
+def tag_file_failures(value):
+    """Tag each new entry of a failed-file list with ``CURRENT_STEP`` (an entry that has an
+    owner keeps it). Called by ``WorkflowContext.add_metadata`` for ``file_failures``."""
+    owner = CURRENT_STEP.get()
+    if owner is not None and isinstance(value, list):
+        for f in value:
+            if isinstance(f, dict) and "owner" not in f:
+                f["owner"] = owner
+    return value
 
 
 class LedgerError(RuntimeError):
@@ -369,19 +398,14 @@ def record_step_start(job, job_type: str) -> None:
         ) from e
 
 
-def file_failure_count(job) -> int:
-    """How many files the job's context lists as failed so far (taken before the handler, so
-    that only the files this job adds count: sibling jobs can share a context)."""
-    return len((getattr(job.context, "metadata", None) or {}).get("file_failures") or [])
-
-
 def record_step_end(
-    job, job_type: str, outcome: Optional[dict] = None, failures_before: int = 0
+    job, job_type: str, outcome: Optional[dict] = None, owner: Optional[str] = None
 ) -> None:
     """Record that ``job_type`` ended for each of the job's BAMs: the result's status, the
     job's outcome (``job_outcome``: success, failed or expected_failure) with its error, and
-    for each BAM among the files the job reported as failed while it went on, that failure.
-    A failure to write is logged: after a restart the step then shows as cut short."""
+    for each BAM among the files this job reported as failed while it went on (the entries
+    tagged with ``owner``), that failure. A failure to write is logged: after a restart the
+    step then shows as cut short."""
     if job_type not in PER_BAM_STEPS:
         return
     bams, ledger = _job_bams(job), _ledger_of(job)
@@ -400,9 +424,8 @@ def record_step_end(
         skipped = bool((job.context.metadata or {}).get("skip_downstream"))
         extra["downstream"] = status == "success" and not skipped
     failed_files: Dict[str, str] = {}
-    added = ((job.context.metadata or {}).get("file_failures") or [])[failures_before:]
-    for f in added:
-        if isinstance(f, dict) and f.get("file"):
+    for f in (job.context.metadata or {}).get("file_failures") or []:
+        if isinstance(f, dict) and f.get("file") and owner is not None and f.get("owner") == owner:
             failed_files[os.path.realpath(str(f["file"]))] = str(f.get("error") or "")[:500]
     records = []
     for k, c in bams:

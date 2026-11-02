@@ -74,9 +74,11 @@ from robin.bam_submission import (
 from robin.file_ledger import (
     BamIntake,
     Decision,
-    file_failure_count,
+    enter_step,
+    leave_step,
     record_step_end,
     record_step_start,
+    tag_file_failures,
 )
 
 try:
@@ -276,6 +278,8 @@ class WorkflowContext:
     batch_index: Optional[int] = None
 
     def add_metadata(self, key: str, value: Any) -> None:
+        if key == "file_failures":
+            value = tag_file_failures(value)  # each entry: the step that wrote it (the ledger)
         self.metadata[key] = value
 
     def add_result(self, job_type: str, result: Any) -> None:
@@ -851,7 +855,9 @@ def _wrap_real_handler(
         record_step_start(job, job_type)
         outcome = None
         errors_before = len(job.context.errors or [])
-        failures_before = file_failure_count(job)  # files this job reports as failed (ledger)
+        # The failed files this step reports are tagged with it (the ledger records its own)
+        step_owner = f"{getattr(job, 'job_id', '')}:{job_type}"
+        step_token = enter_step(step_owner)
         try:
             if py_handler is None:
                 import_reason = _HANDLER_IMPORT_ERRORS.get(job_type)
@@ -963,7 +969,8 @@ def _wrap_real_handler(
                 fallback_result = {"status": "failed"} if had_error else {"status": "success"}
                 job.context.add_result(job_type, fallback_result)
             # The BAM ledger (JOB-2): the result's status, the job's outcome, files that failed
-            record_step_end(job, job_type, outcome, failures_before)
+            record_step_end(job, job_type, outcome, step_owner)
+            leave_step(step_token)
             if outcome is not None:
                 # Stored in the context so the judges (another process) read the same outcome.
                 try:
@@ -2523,6 +2530,11 @@ class Coordinator:
             text = str(r.get("error", ""))
             sid = str(r.get("sample_id", "") or "unknown")
             kind = str(r.get("failure_kind") or "cut_short")
+            # A row sent again (its first answer lost) is not a second failure
+            seen = self.__dict__.setdefault("_ledger_rows_seen", set())
+            if (kind, path, job_type) in seen:
+                continue
+            seen.add((kind, path, job_type))
             self.file_failed_by_type[job_type] = self.file_failed_by_type.get(job_type, 0) + 1
             self._failed_jobs_log.append({
                 "sample_id": sid,
@@ -4341,6 +4353,9 @@ class RayFileWatcher(FileSystemEventHandler):
         self._timer: Optional[threading.Thread] = None
         self._stopped = False
         self._send_failed_logged: set = set()
+        # Failed-file rows (earlier failures, incomplete BAMs) kept until the Coordinator has them
+        self._pending_rows: List[Dict[str, Any]] = []
+        self._report_failed_logged: set = set()
         # Track whether this watch session has seen any "pass" BAMs.
         # If a pass BAM is present, we want fail-BAM errors to remain visible.
         # (The rule is shared with the non-Ray runner: robin.bam_submission.)
@@ -4432,23 +4447,58 @@ class RayFileWatcher(FileSystemEventHandler):
             } for p in stale]
             for r in rows:
                 logging.getLogger("robin.workflow").error(r["error"])
-            try:
-                ray.get(self.coord.record_cut_short_steps.remote(rows))
-            except Exception as e:
-                logging.getLogger("robin.workflow").error(f"Could not report {len(rows)} incomplete BAM(s): {e}")
+            self._report(rows)
         with self._lock:
+            self._deliver_rows()
             self._send_waiting()
             self._last_flush = time.time()
 
+    def _report(self, rows: List[Dict[str, Any]]) -> None:
+        """Queue failed-file rows for the Coordinator and send the queue now."""
+        with self._lock:
+            self._pending_rows.extend(rows)
+            self._deliver_rows()
+
+    def _deliver_rows(self) -> bool:
+        """Send the queued rows. They stay queued until the Coordinator has them (it ignores
+        a row it already holds, so sending one again is safe); each row's first failure is
+        logged. True when the queue is empty."""
+        with self._lock:
+            if not self._pending_rows:
+                return True
+            rows = list(self._pending_rows)
+            try:
+                ray.get(self.coord.record_cut_short_steps.remote(rows))
+            except Exception as e:
+                new = [r for r in rows if id(r) not in self._report_failed_logged]
+                if new:
+                    self._report_failed_logged.update(id(r) for r in new)
+                    logging.getLogger("robin.workflow").error(
+                        f"Could not report {len(new)} failed file(s) to the Coordinator ({e}); trying again: "
+                        + ", ".join(f"{os.path.basename(str(r.get('filepath', '')))} ({r.get('job_type')})" for r in new)
+                    )
+                return False
+            del self._pending_rows[: len(rows)]
+            return True
+
     def stop(self) -> List[Job]:
-        """Stop the timer, then send what waits (one pass). Returns the jobs still unsent,
-        which are logged by name. Does nothing the second time."""
+        """Stop the timer, then send the queued failed-file rows and what waits (one pass).
+        Returns the jobs still unsent; they and any rows left are logged by name. Does
+        nothing the second time."""
         if self._stopped:
             return []
         self._stopped = True
         self._stop_event.set()
         if self._timer is not None:
             self._timer.join(timeout=60)
+        if not self._deliver_rows():
+            with self._lock:
+                left = ", ".join(
+                    f"{os.path.basename(str(r.get('filepath', '')))} ({r.get('job_type')})" for r in self._pending_rows
+                )
+            logging.getLogger("robin.workflow").error(
+                f"Failed file(s) not reported to the Coordinator: {left}; the next start shows them again"
+            )
         return self.flush_remaining()
 
     def _get_reference(self) -> Optional[str]:
@@ -4484,12 +4534,7 @@ class RayFileWatcher(FileSystemEventHandler):
         fail_only = self._fail_only_watch.is_fail_only(fp)
         if decision is not None:
             if decision.cut_short:
-                try:
-                    ray.get(self.coord.record_cut_short_steps.remote(decision.cut_short))
-                except Exception as e:
-                    logging.getLogger("robin.workflow").error(
-                        f"Could not report step(s) cut short by the last stop for {fp}: {e}"
-                    )
+                self._report(decision.cut_short)  # kept until the Coordinator has them
             if not decision.run:
                 return
         # Tag fail-only BAM submissions for this watch session.

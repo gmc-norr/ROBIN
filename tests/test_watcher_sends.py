@@ -20,7 +20,7 @@ import pytest
 
 pytest.importorskip("pysam")
 
-from test_bam_ledger import PLAN, FakeCoord, _bam, _Done, _Remote, _scan  # noqa: E402
+from test_bam_ledger import PLAN, FakeCoord, _bam, _Done, _Remote, _scan, _step_job, _work_through  # noqa: E402
 from robin import workflow_ray as wr  # noqa: E402
 
 
@@ -67,6 +67,22 @@ class _SendFails(FakeCoord):
             self.jobs.extend(jobs)
 
         self.submit_jobs = _Remote(submit)
+
+
+class _ReportFails(FakeCoord):
+    """A Coordinator whose first ``fails`` failed-file reports raise (it was briefly away)."""
+
+    def __init__(self, fails):
+        super().__init__()
+        self.fails = fails
+
+        def record(rows):
+            if self.fails > 0:
+                self.fails -= 1
+                raise RuntimeError("synthetic: the Coordinator was briefly unavailable")
+            self.cut_short.extend(rows)
+
+        self.record_cut_short_steps = _Remote(record)
 
 
 def test_the_last_bam_is_sent_without_another_file_event(tmp_path):
@@ -198,6 +214,44 @@ def test_a_bam_still_growing_is_not_shown_as_incomplete(tmp_path):
     finally:
         w.stop()
     assert coord.cut_short == [], "a BAM still being written was shown as incomplete"
+
+
+def test_a_failed_report_of_an_incomplete_bam_is_tried_again(tmp_path):
+    # Round 3, finding 3: the report is kept until the Coordinator has it.
+    whole = _bam(tmp_path / "made")
+    (tmp_path / "run").mkdir()
+    path = str(tmp_path / "run" / "S_pass_0.bam")
+    _half(whole, path)
+    coord = _ReportFails(1)
+    w = _watcher(coord, tmp_path / "work")
+    w._incomplete_after_s = 0.2
+    w.start()
+    try:
+        w._handle(path)
+        assert _until(lambda: coord.cut_short), "the report was lost when the Coordinator was briefly away"
+        time.sleep(0.3)
+    finally:
+        w.stop()
+    assert [(r["filepath"], r["failure_kind"]) for r in coord.cut_short] == [(path, "incomplete")]
+
+
+def test_a_failed_report_of_an_earlier_failure_is_tried_again(tmp_path):
+    from robin.file_ledger import record_step_start
+
+    bam = _bam(tmp_path / "run")
+    first = _scan(FakeCoord(), tmp_path / "run", tmp_path / "work")
+    _work_through(first[0], steps=["bed_conversion", "mgmt", "target", "fusion"])
+    record_step_start(_step_job(first[0], "cnv"), "cnv")  # ROBIN stopped while CNV ran
+    coord = _ReportFails(1)
+    w = _watcher(coord, tmp_path / "work")  # the next session: the watcher sees the BAM
+    w.start()
+    try:
+        w._handle(bam)
+        assert _until(lambda: coord.cut_short), "the report was lost when the Coordinator was briefly away"
+        time.sleep(0.3)
+    finally:
+        w.stop()
+    assert [(r["job_type"], r["failure_kind"]) for r in coord.cut_short] == [("cnv", "cut_short")]
 
 
 def test_a_bam_taken_in_is_sent_once_however_many_ticks_pass(tmp_path):

@@ -30,7 +30,14 @@ except Exception:
     _RICH_AVAILABLE = False
 from robin.logging_config import get_job_logger
 from robin.job_outcome import JobReportedFailure, job_outcome
-from robin.file_ledger import BamIntake, file_failure_count, record_step_end, record_step_start
+from robin.file_ledger import (
+    BamIntake,
+    enter_step,
+    leave_step,
+    record_step_end,
+    record_step_start,
+    tag_file_failures,
+)
 from robin.bam_submission import (
     FailOnlyWatchSession,
     detect_fail_only_bam_submission,
@@ -81,6 +88,8 @@ class WorkflowContext:
 
     def add_metadata(self, key: str, value: Any) -> None:
         """Add metadata to the context."""
+        if key == "file_failures":
+            value = tag_file_failures(value)  # each entry: the step that wrote it (the ledger)
         self.metadata[key] = value
 
     def add_result(self, job_type: str, result: Any) -> None:
@@ -921,9 +930,11 @@ class WorkflowManager:
                     # The BAM ledger (JOB-2): the step's start is on record before it runs;
                     # if it can't be, the step doesn't run (raises), as a restart would run it again.
                     record_step_start(job, job.job_type)
-                    failures_before = file_failure_count(job)
                     owner = f"{job.job_id}:{job.job_type}"
                     _running_job.key = owner
+                    # The failed files this job reports are tagged with it (the ledger records
+                    # its own; sibling jobs share the context)
+                    step_token = enter_step(owner)
                     outcome = None
                     try:
                         handlers[job.job_type](job)
@@ -938,7 +949,8 @@ class WorkflowManager:
                             raise
                     finally:
                         _running_job.key = None
-                        record_step_end(job, job.job_type, outcome, failures_before)
+                        record_step_end(job, job.job_type, outcome, owner)
+                        leave_step(step_token)
                     if outcome["status"] == "expected_failure":
                         job.context.add_result(
                             job.job_type,
