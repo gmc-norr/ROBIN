@@ -29,6 +29,7 @@ except Exception:
     _RICH_AVAILABLE = False
 from robin.logging_config import get_job_logger
 from robin.job_outcome import JobReportedFailure, job_outcome
+from robin.file_ledger import BamIntake, record_step_end, record_step_start
 from robin.bam_submission import (
     FailOnlyWatchSession,
     detect_fail_only_bam_submission,
@@ -218,8 +219,13 @@ class Job:
                     queue_type, job_type = step.split(":", 1)
                     original_workflow.append(job_type)
 
+        # A BAM resumed after a restart starts only the steps it never started (JOB-2)
+        only = self.context.metadata.get("only_steps") if self.job_type == "preprocessing" else None
+
         # Check if this job can trigger other jobs
         for job_type, dependencies in job_dependencies.items():
+            if only is not None and job_type not in only:
+                continue
             if self.job_type in dependencies:
                 # This job completion can trigger the dependent job
                 # Check if all dependencies are met
@@ -911,8 +917,12 @@ class WorkflowManager:
                     # their name (same rule as the Ray wrapper).
                     # Sibling jobs share a context, so only errors this job filed count.
                     errors_before = len(job.context.errors or [])
+                    # The BAM ledger (JOB-2): the step's start is on record before it runs;
+                    # if it can't be, the step doesn't run (raises), as a restart would run it again.
+                    record_step_start(job, job.job_type)
                     owner = f"{job.job_id}:{job.job_type}"
                     _running_job.key = owner
+                    outcome = None
                     try:
                         handlers[job.job_type](job)
                         outcome = job_outcome(
@@ -926,6 +936,9 @@ class WorkflowManager:
                             raise
                     finally:
                         _running_job.key = None
+                        record_step_end(
+                            job, job.job_type, outcome["status"] if outcome else "failed"
+                        )
                     if outcome["status"] == "expected_failure":
                         job.context.add_result(
                             job.job_type,
@@ -1529,6 +1542,21 @@ class FileWatcher(FileSystemEventHandler):
         # Fail-only BAM submissions, by the Ray runner's rules (robin.bam_submission): for
         # watched files, a "fail" BAM before any "pass" BAM in this session.
         self._fail_only_watch = FailOnlyWatchSession()
+        # One intake per work folder for the session (JOB-2), shared by the scan and the watcher
+        self._intakes: Dict[str, BamIntake] = {}
+        self._intakes_lock = threading.Lock()
+
+    def _intake_for(self, jobs: List[Job]) -> BamIntake:
+        """The session's intake for the jobs' work folder and plan (the CLI's job builder sets
+        ``work_dir``). A ledger that can't be read raises."""
+        metadata = jobs[0].context.metadata or {}
+        work_dir = metadata.get("work_dir")
+        with self._intakes_lock:
+            intake = self._intakes.get(work_dir or "")
+            if intake is None:
+                intake = BamIntake(work_dir, metadata.get("original_workflow") or [])
+                self._intakes[work_dir or ""] = intake
+            return intake
 
     def _should_process_file(self, filepath: str) -> bool:
         """Check if a file should be processed based on patterns."""
@@ -1555,15 +1583,10 @@ class FileWatcher(FileSystemEventHandler):
         if filepath in self.processed_files:
             return
 
-        self.processed_files.add(filepath)
-        if fail_only is None:
-            fail_only = self._fail_only_watch.is_fail_only(filepath)
-
         # Use logger for file watcher events
         import logging
 
         logger = logging.getLogger("robin.filewatcher")
-        logger.info(f"Detected new file: {filepath}")
 
         try:
             # Check if preprocessor function accepts target_panel parameter
@@ -1573,6 +1596,35 @@ class FileWatcher(FileSystemEventHandler):
                 jobs = self.preprocessor_func(filepath, target_panel=self.target_panel)
             else:
                 jobs = self.preprocessor_func(filepath)
+        except Exception as e:
+            self.processed_files.add(filepath)
+            logger.error(f"Error processing {filepath}: {e}")
+            return
+
+        if jobs and is_bam_path(Path(filepath)):
+            # The intake for the jobs' work folder (JOB-2): taken in once, only once complete;
+            # a BAM the ledger knows gets only its unstarted steps.
+            try:
+                decision = self._intake_for(jobs).decide(filepath)
+            except Exception as e:
+                logger.error(f"Could not take {filepath} in (the BAM ledger could not record it): {e}")
+                return  # tried again on the file's next event
+            if decision.reason == "incomplete":
+                return  # still being written: decided on a later event
+            if not decision.run:
+                self.processed_files.add(filepath)
+                return  # cut-short steps are logged by the intake (no failure channel here)
+            for j in jobs:
+                j.context.add_metadata("bam_key", decision.key)
+                if decision.only_steps is not None:
+                    j.context.add_metadata("only_steps", list(decision.only_steps))
+
+        self.processed_files.add(filepath)
+        if fail_only is None:
+            fail_only = self._fail_only_watch.is_fail_only(filepath)
+        logger.info(f"Detected new file: {filepath}")
+
+        try:
             # A fail-only BAM's expected downstream failures are not counted as failed.
             if fail_only and is_bam_path(Path(filepath)):
                 for j in jobs:
@@ -1598,12 +1650,13 @@ class FileWatcher(FileSystemEventHandler):
             self.handle_file(event.dest_path)  # Use dest_path for the final location
 
     def start(self, process_existing: bool = True) -> None:
-        """Start watching the directory."""
-        if process_existing:
-            self._process_existing_files()
-
+        """Start watching the directory, then process the files already there: a file that
+        lands during the scan is not missed, and the intake takes a BAM both see in once."""
         self.observer.schedule(self, self.watch_dir, recursive=self.recursive)
         self.observer.start()
+
+        if process_existing:
+            self._process_existing_files()
 
         # Use logger for file watcher events
         import logging

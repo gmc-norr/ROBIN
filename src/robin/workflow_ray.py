@@ -70,6 +70,7 @@ from robin.bam_submission import (
     matches_any_pattern as _matches_any_pattern,
     matches_no_ignores as _matches_no_ignores,
 )
+from robin.file_ledger import BamIntake, Decision, record_step_end, record_step_start
 
 try:
     from rich.progress import (
@@ -838,6 +839,9 @@ def _wrap_real_handler(
                 _notify_coordinator_handler_started(int(jid))
         except Exception:
             pass
+        # The BAM ledger (JOB-2): the step's start is on record before it runs; if it can't
+        # be, the step doesn't run (raises), since a restart would run it again.
+        record_step_start(job, job_type)
         outcome = None
         errors_before = len(job.context.errors or [])
         try:
@@ -950,6 +954,7 @@ def _wrap_real_handler(
                 had_error = outcome is not None and outcome["status"] == "failed"
                 fallback_result = {"status": "failed"} if had_error else {"status": "success"}
                 job.context.add_result(job_type, fallback_result)
+            record_step_end(job, job_type)  # the BAM ledger (JOB-2), with the result's status
             if outcome is not None:
                 # Stored in the context so the judges (another process) read the same outcome.
                 try:
@@ -2494,6 +2499,33 @@ class Coordinator:
                 failure_kind=failure_kind or "",
             )
 
+    def record_cut_short_steps(self, rows: List[Dict[str, Any]]) -> None:
+        """Steps that were running for a BAM when ROBIN last stopped (from the BAM ledger,
+        JOB-2). They are not run again, as they may have added their data; each is a failed
+        file (``failure_kind`` "cut_short"), shown where failed files are."""
+        for r in rows or []:
+            job_type = str(r.get("job_type", ""))
+            path = str(r.get("filepath", ""))
+            text = str(r.get("error", ""))
+            sid = str(r.get("sample_id", "") or "unknown")
+            self.file_failed_by_type[job_type] = self.file_failed_by_type.get(job_type, 0) + 1
+            self._failed_jobs_log.append({
+                "sample_id": sid,
+                "filepath": path,
+                "job_type": job_type,
+                "error": text[:1500],
+                "is_oom": False,
+                "failure_kind": "cut_short",
+            })
+            self._add_event(
+                "file_failed",
+                sample_id=sid,
+                job_type=job_type,
+                file=path,
+                error=text[:EVENT_ERROR_CHARS],
+                step="cut_short",
+            )
+
     def _record_file_failures(self, job: Job, ctx: WorkflowContext) -> None:
         """One failed_jobs row and one ``file_failed`` event per file the job reported as failed.
 
@@ -2745,7 +2777,13 @@ class Coordinator:
                         )
             else:
                 triggered_jobs: List[Job] = []
+                # A BAM resumed after a restart starts only the steps it never started (JOB-2)
+                only = (
+                    job.context.metadata.get("only_steps") if job.job_type == "preprocessing" else None
+                )
                 for t in TRIGGERS.get(job.job_type, []):
+                    if only is not None and t not in only:
+                        continue
                     if (req_types is None) or (t in req_types):
                         q = job_queue_of(t)
                         
@@ -3830,6 +3868,47 @@ def default_file_classifier(filepath: str, plan: List[str], target_panel: str) -
 # live in robin.bam_submission (shared with the non-Ray runner) and are imported above.
 
 
+def _jobs_for_file(
+    path: str,
+    plan: List[str],
+    target_panel: Optional[str],
+    reference: Optional[str],
+    work_dir: Optional[str],
+    fail_only: bool,
+    decision: Optional[Decision] = None,
+) -> List[Job]:
+    """The jobs for one file, the same whether the scan or the watcher found it (JOB-8):
+    work_dir, fail-only, reference and target panel, and the BAM's key and the steps to start
+    (``only_steps``, a BAM resumed after a restart; JOB-2)."""
+    jobs = default_file_classifier(path, plan, target_panel)
+    for j in jobs:
+        if work_dir:
+            j.context.add_metadata("work_dir", work_dir)
+        # If this submission is fail-only BAMs, downstream errors are expected/noisy.
+        if fail_only:
+            j.context.add_metadata("fail_only_bam_submission", True)
+        if reference:
+            j.context.add_metadata("reference", reference)
+        if target_panel:
+            j.context.add_metadata("target_panel", target_panel)
+        if decision is not None and decision.key:
+            j.context.add_metadata("bam_key", decision.key)
+            if decision.only_steps is not None:
+                j.context.add_metadata("only_steps", list(decision.only_steps))
+    return jobs
+
+
+def _intake_decision(intake: BamIntake, path: str) -> Optional[Decision]:
+    """The intake's decision for a BAM; None (and logged) when the ledger can't record it."""
+    try:
+        return intake.decide(path)
+    except Exception as e:
+        logging.getLogger("robin.workflow").error(
+            f"Could not take {path} in (the BAM ledger could not record it): {e}"
+        )
+        return None
+
+
 async def submit_existing_paths(
     coord,
     paths: List[str],
@@ -3838,7 +3917,13 @@ async def submit_existing_paths(
     ignore_patterns: Optional[List[str]] = None,
     recursive: bool = True,
     work_dir: Optional[str] = None,
+    intake: Optional[BamIntake] = None,
 ) -> None:
+    """Send the files already in ``paths``. Each BAM goes through the session's intake (JOB-2):
+    taken in once, and only once complete; a BAM the ledger knows gets only its unstarted
+    steps, and its steps cut short by a stop are reported as failed files."""
+    if intake is None:
+        intake = BamIntake(work_dir, plan)  # a ledger that can't be read stops here
     # Fetch reference and target_panel once before processing files (performance optimization)
     coord_reference = None
     coord_target_panel = None
@@ -3850,13 +3935,28 @@ async def submit_existing_paths(
         coord_target_panel = await coord.get_target_panel.remote()
     except Exception:
         pass
-    
+
     fail_only_bam_submission = _detect_fail_only_bam_submission(
         paths=paths,
         patterns=patterns,
         ignore_patterns=ignore_patterns,
         recursive=recursive,
     )
+    cut_short: List[Dict[str, Any]] = []
+
+    def _jobs_for(f: Path) -> List[Job]:
+        decision = None
+        if _is_bam_path(f):
+            decision = _intake_decision(intake, str(f))
+            if decision is None:
+                return []
+            cut_short.extend(decision.cut_short)
+            if not decision.run:
+                return []
+        return _jobs_for_file(
+            str(f), plan, coord_target_panel, coord_reference, work_dir,
+            fail_only_bam_submission and _is_bam_path(f), decision,
+        )
 
     seed_jobs: List[Job] = []
     for p in paths:
@@ -3865,23 +3965,7 @@ async def submit_existing_paths(
             if _matches_any_pattern(pth, patterns) and _matches_no_ignores(
                 pth, ignore_patterns
             ):
-                jobs = default_file_classifier(str(pth), plan, coord_target_panel)
-                if work_dir:
-                    for j in jobs:
-                        j.context.add_metadata("work_dir", work_dir)
-                # If this submission is fail-only BAMs, downstream errors are expected/noisy.
-                if fail_only_bam_submission and _is_bam_path(pth):
-                    for j in jobs:
-                        j.context.add_metadata("fail_only_bam_submission", True)
-                # Add reference genome to job metadata if available
-                if coord_reference:
-                    for j in jobs:
-                        j.context.add_metadata("reference", coord_reference)
-                # Add target panel to job metadata if available
-                if coord_target_panel:
-                    for j in jobs:
-                        j.context.add_metadata("target_panel", coord_target_panel)
-                seed_jobs += jobs
+                seed_jobs += _jobs_for(pth)
         elif pth.is_dir():
             # Stream directory walk in small batches; avoid building huge lists
             walker = pth.rglob("*") if recursive else pth.glob("*")
@@ -3893,22 +3977,7 @@ async def submit_existing_paths(
                     f, ignore_patterns
                 ):
                     continue
-                jobs = default_file_classifier(str(f), plan, coord_target_panel)
-                if work_dir:
-                    for j in jobs:
-                        j.context.add_metadata("work_dir", work_dir)
-                if fail_only_bam_submission and _is_bam_path(f):
-                    for j in jobs:
-                        j.context.add_metadata("fail_only_bam_submission", True)
-                # Add reference genome to job metadata if available
-                if coord_reference:
-                    for j in jobs:
-                        j.context.add_metadata("reference", coord_reference)
-                # Add target panel to job metadata if available
-                if coord_target_panel:
-                    for j in jobs:
-                        j.context.add_metadata("target_panel", coord_target_panel)
-                batch += jobs
+                batch += _jobs_for(f)
                 if len(batch) >= 256:
                     while True:
                         try:
@@ -3944,6 +4013,14 @@ async def submit_existing_paths(
                     await coord.submit_jobs.remote(chunk)
                     break
                 await asyncio.sleep(0.2)
+    if cut_short:
+        # Steps cut short by the last stop: failed files (the intake has logged each one)
+        try:
+            await coord.record_cut_short_steps.remote(cut_short)
+        except Exception as e:
+            logging.getLogger("robin.workflow").error(
+                f"Could not report {len(cut_short)} step(s) cut short by the last stop: {e}"
+            )
 
 
 async def tqdm_monitor(coord, continuous: bool = False) -> None:
@@ -4217,10 +4294,15 @@ class RayFileWatcher(FileSystemEventHandler):
         ignore_patterns: Optional[List[str]] = None,
         recursive: bool = True,
         work_dir: Optional[str] = None,
+        intake: Optional[BamIntake] = None,
     ):
         self.coord = coord
         self.plan = plan
         self.target_panel = target_panel
+        # One intake per session, shared with the start-up scan and the GUI (JOB-2)
+        self.intake = intake if intake is not None else BamIntake(work_dir, plan)
+        self._reference: Optional[str] = None
+        self._reference_asked = False
         self.patterns = patterns or ["*"]
         self.ignore_patterns = ignore_patterns or []
         self.recursive = recursive
@@ -4264,23 +4346,48 @@ class RayFileWatcher(FileSystemEventHandler):
         except Exception:
             pass
 
+    def _get_reference(self) -> Optional[str]:
+        """The Coordinator's reference genome, asked once: the watcher's BAMs get it as the
+        scan's do (JOB-8)."""
+        if not self._reference_asked:
+            try:
+                self._reference = ray.get(self.coord.get_reference.remote())
+            except Exception:
+                self._reference = None
+            self._reference_asked = True
+        return self._reference
+
     def _handle(self, fp: str):
         if fp in self.processed:
             return
         if not self._should_process(fp):
             return
+        decision = None
+        if _is_bam_path(Path(fp)):
+            # The session's intake (JOB-2): taken in once, and only once complete
+            decision = _intake_decision(self.intake, fp)
+            if decision is None:
+                return  # not recorded: tried again on the file's next event
+            if decision.reason == "incomplete":
+                return  # still being written: decided on a later event
         self.processed.add(fp)
         # Maintain watch-level pass/fail BAM state
         fail_only = self._fail_only_watch.is_fail_only(fp)
-        jobs = default_file_classifier(fp, self.plan, self.target_panel)
-        if self.work_dir:
-            for j in jobs:
-                j.context.add_metadata("work_dir", self.work_dir)
+        if decision is not None:
+            if decision.cut_short:
+                try:
+                    ray.get(self.coord.record_cut_short_steps.remote(decision.cut_short))
+                except Exception as e:
+                    logging.getLogger("robin.workflow").error(
+                        f"Could not report step(s) cut short by the last stop for {fp}: {e}"
+                    )
+            if not decision.run:
+                return
         # Tag fail-only BAM submissions for this watch session.
         # If we've seen a pass BAM, do not suppress errors.
-        if fail_only:
-            for j in jobs:
-                j.context.add_metadata("fail_only_bam_submission", True)
+        jobs = _jobs_for_file(
+            fp, self.plan, self.target_panel, self._get_reference(), self.work_dir, fail_only, decision
+        )
         # enqueue and flush under rate limiter
         self._pending_jobs.extend(jobs)
         self._flush_if_needed()
@@ -4640,6 +4747,7 @@ def add_watch_path(new_path: str) -> Tuple[bool, str]:
                     ignore_patterns=ignore_patterns,
                     recursive=recursive,
                     work_dir=work_dir,
+                    intake=ctx.get("intake"),  # the session's intake (JOB-2)
                 )
             )
         except Exception as e:
@@ -5052,18 +5160,12 @@ async def run(
     if gui_publish_task is not None:
         tasks.append(gui_publish_task)
 
-    # Now submit existing paths (this will run while monitor displays progress)
-    if process_existing and paths:
-        await submit_existing_paths(
-            coord,
-            paths,
-            plan,
-            patterns=patterns,
-            ignore_patterns=ignore_patterns,
-            recursive=recursive,
-            work_dir=work_dir,
-        )
+    # One intake for the session (JOB-2): the scan, the watcher and the GUI's "add folder"
+    # take each BAM in once. A BAM ledger that can't be read stops the start here.
+    intake = BamIntake(work_dir, plan)
 
+    # Watch first, then scan: a BAM that lands while the scan runs is not missed, and the
+    # shared intake takes a BAM both see in once.
     observer = None
     watcher = None
     if watch and paths:
@@ -5076,6 +5178,7 @@ async def run(
             ignore_patterns=ignore_patterns,
             recursive=recursive,
             work_dir=work_dir,
+            intake=intake,
         )
         for p in paths:
             if Path(p).is_dir():
@@ -5092,7 +5195,21 @@ async def run(
             "patterns": patterns,
             "ignore_patterns": ignore_patterns,
             "recursive": recursive,
+            "intake": intake,
         }
+
+    # Now submit existing paths (this will run while monitor displays progress)
+    if process_existing and paths:
+        await submit_existing_paths(
+            coord,
+            paths,
+            plan,
+            patterns=patterns,
+            ignore_patterns=ignore_patterns,
+            recursive=recursive,
+            work_dir=work_dir,
+            intake=intake,
+        )
 
     try:
         if tasks:

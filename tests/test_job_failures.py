@@ -350,6 +350,16 @@ def _sturgeon_files_an_error(job):
     job.context.add_error("sturgeon_analysis", "synthetic sturgeon failure")
 
 
+# Batch 10d-2 (JOB-2): a BAM is taken in only once complete (it ends with the BGZF end-of-file
+# block) and is known by its bytes. These files stand in for BAMs: their name, then that block,
+# so each is complete and different. (They were empty files before.)
+_BGZF_EOF = bytes.fromhex("1f8b08040000000000ff0600424302001b0003000000000000000000")
+
+
+def _stand_in_bam(path):
+    path.write_bytes(path.name.encode() + _BGZF_EOF)
+
+
 def _non_ray_watch(tmp_path, names, existing):
     """Run names through the non-Ray FileWatcher, then each job through the real worker.
 
@@ -378,11 +388,11 @@ def _non_ray_watch(tmp_path, names, existing):
     paths = [tmp_path / n for n in names]
     if existing:
         for p in paths:
-            p.write_bytes(b"")
+            _stand_in_bam(p)
         watcher._process_existing_files()
     else:
         for p in paths:
-            p.write_bytes(b"")
+            _stand_in_bam(p)
             watcher.on_created(FileCreatedEvent(str(p)))
     assert len(jobs) == len(names)
 
@@ -642,13 +652,14 @@ def test_control_a_handler_gets_the_arguments_it_takes_once(tmp_path, job_type, 
     assert out.errors == []
 
 
-def test_the_ray_watcher_keeps_its_watch_session_rule():
+def test_the_ray_watcher_keeps_its_watch_session_rule(tmp_path):
     """The rule moved to robin.bam_submission; the Ray watcher still applies it."""
     w = wr.RayFileWatcher(coord=None, plan=["preprocessing:preprocessing"], target_panel="rCNS2")
     w._flush_interval_s = 1e9
     w._batch_size = 10**6
     for name in ("a_fail_0.bam", "notes.txt", "b_pass_0.bam", "c_fail_1.bam"):
-        w._handle(f"/nonexistent/{name}")
+        _stand_in_bam(tmp_path / name)  # batch 10d-2: a BAM is taken in once complete
+        w._handle(str(tmp_path / name))
     assert [
         (os.path.basename(j.context.filepath),
          bool(j.context.metadata.get("fail_only_bam_submission", False)))
