@@ -466,9 +466,6 @@ class GUILauncher:
         self._start_time: Optional[float] = None
         self._is_running: bool = False
         
-        # Track which samples have had target.bam finalization triggered
-        self._finalized_samples: set = set()
-
         # SNP analysis concurrency control
         self._snp_analysis_lock = threading.Lock()
         self._snp_analysis_running_sample: Optional[str] = None
@@ -718,8 +715,9 @@ class GUILauncher:
 
     def _is_target_bam_finalize_redundant(self, sample_id: str) -> bool:
         """
-        True when target.bam is already merged/indexed and no batch_*.bam remain.
-        In that case running finalize again only queues noise jobs and confuses the samples table.
+        True when target.bam is already merged/indexed and nothing waits to be merged: no
+        batch_*.bam and no staged file. Then running finalize again only queues noise jobs
+        and confuses the samples table.
         """
         if not self.monitored_directory:
             return False
@@ -730,26 +728,10 @@ class GUILauncher:
             return False
         try:
             batch_bams = list(sample_dir.glob("batch_*.bam"))
+            staged = list((sample_dir / "_staging").glob("coverage_*.parquet"))
         except Exception:
             return False
-        return len(batch_bams) == 0
-
-    def _seed_finalized_samples_from_disk(self) -> None:
-        """Populate _finalized_samples from disk so restarts do not re-trigger finalization."""
-        if not self.monitored_directory:
-            return
-        base = Path(self.monitored_directory)
-        if not base.exists():
-            return
-        try:
-            for d in base.iterdir():
-                if not d.is_dir():
-                    continue
-                sid = d.name
-                if self._is_target_bam_finalize_redundant(sid):
-                    self._finalized_samples.add(sid)
-        except Exception as e:
-            logging.debug(f"Seed finalized samples from disk: {e}")
+        return len(batch_bams) == 0 and len(staged) == 0
 
     def _merge_job_types_with_persisted(
         self, sid: str, workflow: Dict[str, Any]
@@ -949,10 +931,10 @@ class GUILauncher:
                             if record.active_jobs == 0 and record.pending_jobs == 0:
                                 record.origin = "Complete"
                                 record._dirty = True
-                                # Trigger finalization if transitioning from Live to Complete
-                                if prev_origin == "Live" and sid not in self._finalized_samples:
+                                # Trigger finalization on every Live -> Complete: a sample that
+                                # came back to Live has new reads to merge (JOB-6).
+                                if prev_origin == "Live":
                                     self._trigger_target_bam_finalization(sid)
-                                    self._finalized_samples.add(sid)
                             # If there are active jobs, keep as Live even if timeout passed
                         elif record.origin == "Pre-existing" and (now_ts - record._last_seen_raw) >= self.completion_timeout_seconds:
                             # Keep as Pre-existing if it was pre-existing and still inactive
@@ -1152,8 +1134,6 @@ class GUILauncher:
             # Try to load cache immediately for fast startup
             if self._load_master_record_cache():
                 logging.info("Loaded samples from cache - table will populate immediately")
-            # Skip spurious target.bam finalization on restart when outputs already exist
-            self._seed_finalized_samples_from_disk()
 
         try:
             # When reload is requested, we must run in the main thread
@@ -6722,13 +6702,14 @@ class GUILauncher:
         return None
 
     def _sample_has_snp_calling_outputs(self, sample_id: str) -> bool:
-        """True when Clair3 / SNP pipeline outputs exist (same check as coverage UI)."""
+        """True when the SNP calls exist and came from target.bam as it is now, with no
+        read waiting to be merged (JOB-6). Older calls count as missing, so bulk SNP calls
+        again and the poller waits for this run's calls."""
         if not self.monitored_directory:
             return False
-        clair = Path(self.monitored_directory) / sample_id / "clair3"
-        snp_vcf = clair / "snpsift_output.vcf"
-        indel_vcf = clair / "snpsift_indel_output.vcf"
-        return snp_vcf.is_file() and indel_vcf.is_file()
+        from robin.analysis.target_analysis import snp_calls_are_current
+
+        return snp_calls_are_current(str(Path(self.monitored_directory) / sample_id))
 
     def _sample_snp_prerequisites_met(self, sample_dir: Path) -> tuple[bool, str]:
         """target.bam + non-empty targets_exceeding_threshold.bed (matches per-sample SNP UI)."""
@@ -7405,8 +7386,9 @@ class GUILauncher:
             )
             return
 
-        if self._is_target_bam_finalize_redundant(sample_id):
-            self._finalized_samples.add(sample_id)
+        # Judged on disk each time: a sample finalized before may have new reads (JOB-6).
+        nothing_to_merge = self._is_target_bam_finalize_redundant(sample_id)
+        if nothing_to_merge:
             print(f"[DEBUG finalize] redundant finalize for sample_id={sample_id}, return", flush=True)
             self._set_pipeline_status(
                 sample_id,
@@ -7450,15 +7432,13 @@ class GUILauncher:
                                 target_panel = panel
                 except Exception:
                     pass  # Use default
-            
-            already_finalized = sample_id in self._finalized_samples
 
             # Trigger finalization (and optional SNP analysis) in background thread to avoid blocking GUI
             import threading
             def finalize_in_background():
                 try:
                     print(
-                        f"[DEBUG finalize] background thread entered sample_id={sample_id} trigger_snp={trigger_snp} already_finalized={already_finalized}",
+                        f"[DEBUG finalize] background thread entered sample_id={sample_id} trigger_snp={trigger_snp} nothing_to_merge={nothing_to_merge}",
                         flush=True,
                     )
                     self._set_pipeline_status(
@@ -7469,14 +7449,17 @@ class GUILauncher:
                     )
                     finalization_succeeded = True
 
-                    if already_finalized:
-                        print(f"[DEBUG finalize] sample already finalized: {sample_id}", flush=True)
-                        logging.info(f"Sample {sample_id} already finalized; skipping target.bam merge")
+                    if nothing_to_merge:
+                        print(f"[DEBUG finalize] nothing to merge: {sample_id}", flush=True)
+                        logging.info(f"Sample {sample_id} has nothing new to merge; skipping target.bam merge")
                     else:
                         print(f"[DEBUG finalize] processing finalization path sample_id={sample_id}", flush=True)
                         logging.info(
                             f"Triggering target.bam finalization for sample {sample_id} (status: Complete)"
                         )
+                        # The GUI merges itself only when no finalize job was queued: two
+                        # merges of one request waste work (JOB-7).
+                        merge_here = True
                         workflow_runner = getattr(self, "workflow_runner", None)
                         if workflow_runner and hasattr(
                             workflow_runner, "submit_target_bam_finalize_job"
@@ -7499,6 +7482,7 @@ class GUILauncher:
                                 flush=True,
                             )
                             if submitted:
+                                merge_here = False
                                 self._set_pipeline_status(
                                     sample_id,
                                     phase="Finalize queued",
@@ -7518,8 +7502,8 @@ class GUILauncher:
                                     },
                                     priority=6,
                                 )
-                                # Treat queued finalization as success; wait for target.bam before SNP submission.
-                                finalization_succeeded = True
+                                # Queued counts as success. The SNP job merges first itself, so
+                                # it only needs a target.bam to exist.
                                 if trigger_snp:
                                     ready = self._wait_for_target_bam_or_timeout(
                                         sample_id, poll_s=2.0, max_wait_s=3600.0
@@ -7551,7 +7535,7 @@ class GUILauncher:
                                 logging.warning(
                                     f"Target BAM finalization job submission failed for {sample_id}; running inline"
                                 )
-                        if finalization_succeeded:
+                        if merge_here:
                             print(f"[DEBUG finalize] running finalize_accumulation_for_sample sample_id={sample_id}", flush=True)
                             result = finalize_accumulation_for_sample(
                                 sample_id=sample_id,
@@ -7560,7 +7544,6 @@ class GUILauncher:
                             )
                             print(f"[DEBUG finalize] finalize_accumulation result={result!r}", flush=True)
                             if result.get("status") != "error":
-                                self._finalized_samples.add(sample_id)
                                 self._set_pipeline_status(
                                     sample_id,
                                     phase="Finalize complete",

@@ -2720,6 +2720,47 @@ def _merged_batch_names(target_bam_path: str) -> set:
     return {c[len(_MERGED_TAG):] for c in comments if c.startswith(_MERGED_TAG)}
 
 
+# Which target.bam the SNP calls in clair3/ came from: its batch list when the call ran.
+_SNP_SOURCE = "target_bam_batches.txt"
+
+
+def _snp_source_path(sample_dir: str) -> str:
+    return os.path.join(sample_dir, "clair3", _SNP_SOURCE)
+
+
+def _reads_wait_to_merge(sample_dir: str) -> bool:
+    """True when a batch BAM or a staged file holds reads not yet in target.bam."""
+    return bool(
+        glob.glob(os.path.join(sample_dir, "batch_*.bam"))
+        or glob.glob(os.path.join(sample_dir, "_staging", "coverage_*.parquet"))
+    )
+
+
+def snp_calls_are_current(sample_dir: str) -> bool:
+    """True when the SNP calls in clair3/ came from target.bam as it is now, and no read
+    waits to be merged into it. Calls made before this record existed count as old."""
+    clair = os.path.join(sample_dir, "clair3")
+    target_bam = os.path.join(sample_dir, "target.bam")
+    vcfs = [os.path.join(clair, n) for n in ("snpsift_output.vcf", "snpsift_indel_output.vcf")]
+    if not os.path.exists(target_bam) or not all(os.path.exists(v) for v in vcfs):
+        return False
+    try:
+        with open(_snp_source_path(sample_dir)) as f:
+            recorded = {line.strip() for line in f if line.strip()}
+        current = _merged_batch_names(target_bam)
+    except Exception:
+        return False
+    return recorded == current and not _reads_wait_to_merge(sample_dir)
+
+
+def _write_snp_source(sample_dir: str, batch_names) -> None:
+    path = _snp_source_path(sample_dir)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        f.writelines(f"{name}\n" for name in sorted(batch_names))
+    os.replace(tmp, path)
+
+
 def _merge_into_target_bam(inputs: List[str], target_bam_path: str, merged_names: List[str]) -> None:
     """Merge ``inputs`` into target.bam, listing ``merged_names`` in its header, and
     replace target.bam (and its index) only once the new file is complete."""
@@ -3188,7 +3229,9 @@ def run_snp_analysis(
 
         if annotation_only:
             logger.info("Annotation-only mode enabled; skipping existing output shortcut.")
-        elif not force_regenerate and all(os.path.exists(f) for f in snp_output_files):
+        # Earlier calls are reused only when they came from target.bam as it is now, with
+        # nothing waiting to be merged (JOB-6); otherwise they would hide newer reads.
+        elif not force_regenerate and snp_calls_are_current(sample_dir):
             logger.info(f"SNP analysis already present in {clair_dir}")
             logger.info("Rebuilding SNP display JSON from existing snpsift output.")
             try:
@@ -3213,6 +3256,14 @@ def run_snp_analysis(
             except Exception as display_exc:
                 logger.warning(f"Failed to refresh SNP display JSON: {display_exc}")
             return clair_dir
+
+        if not annotation_only:
+            # The calls are about to be redone: drop their record first, so a run that
+            # stops part-way never leaves one that matches target.bam.
+            try:
+                os.remove(_snp_source_path(sample_dir))
+            except FileNotFoundError:
+                pass
 
         logger.info("STEP 3: Checking for required input files")
         target_bam = os.path.join(sample_dir, "target.bam")
@@ -4253,17 +4304,8 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
         except Exception as e:
             logger.warning(f"Could not list directory contents: {e}")
 
-        # Check for required input files
         target_bam = os.path.join(sample_dir, "target.bam")
         targets_bed = os.path.join(sample_dir, "targets_exceeding_threshold.bed")
-
-        if not os.path.exists(target_bam):
-            raise RuntimeError(f"target.bam not found: {target_bam}")
-
-        if not os.path.exists(targets_bed):
-            raise RuntimeError(
-                f"targets_exceeding_threshold.bed not found: {targets_bed}"
-            )
 
         # Get job parameters
         threads = job.context.metadata.get("threads", 4)
@@ -4287,6 +4329,30 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
                                 target_panel = panel
             except Exception:
                 pass
+
+        # Merge what is not yet in target.bam first: new batch BAMs and staged files
+        # (JOB-6). Calls from a target.bam missing reads would look complete.
+        sample_path = os.path.normpath(sample_dir)
+        merge = finalize_accumulation_for_sample(
+            sample_id=os.path.basename(sample_path),
+            work_dir=os.path.dirname(sample_path),
+            target_panel=target_panel or "rCNS2",  # as the finalize job does
+            reference=reference,
+        )
+        if merge.get("status") == "error":
+            raise RuntimeError(
+                f"Could not merge new reads into target.bam: {merge.get('error', 'unknown error')}"
+            )
+
+        # Check for required input files
+        if not os.path.exists(target_bam):
+            raise RuntimeError(f"target.bam not found: {target_bam}")
+
+        if not os.path.exists(targets_bed):
+            raise RuntimeError(
+                f"targets_exceeding_threshold.bed not found: {targets_bed}"
+            )
+        batches_read = _merged_batch_names(target_bam)
 
         # Debug logging for reference genome
         logger.info("=== SNP ANALYSIS HANDLER DEBUGGING ===")
@@ -4340,6 +4406,9 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
 
         if not output_dir:
             raise RuntimeError("Failed to complete SNP analysis")
+        if not annotation_only:
+            # Which reads these calls came from; earlier calls are reused only on a match.
+            _write_snp_source(sample_dir, batches_read)
 
         # Record result
         try:
