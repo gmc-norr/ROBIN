@@ -117,3 +117,69 @@ Every pass rule holds.
 - **P5, pins:** `git diff 0ed84c4 -- robin.yml pyproject.toml` is empty.
 
 The output files are in this session's scratchpad folder, as in Gate B.
+
+## Round 2: the external review's finding (locked before code, 2026-11-02)
+
+The external review of `0f2c208` (Codex, pasted by the user) found one P1:
+
+- **What happens:** moving a sample's counts out of the legacy multi-sample file (`update_cnv_dict.pkl`, in the sample's folder) catches every error and only logs a warning (`cnv_analysis.py:185-192`).
+  - If the move fails, `_load_copy_numbers` returns no counts. The run succeeds with only its own BAM and saves those counts.
+  - The next run finds the per-sample file and never reads the legacy file again, so the earlier counts are lost for good.
+  - The review reproduced it through both entry points: 4,202 reads became 200, with no error.
+- **Where it came from:** the swallowed error is in the original code (`0ed84c4`, `:1218-1219` and `:1530-1531`). This batch kept it, and its atomic write added one more way to hit it: a failed rename.
+- **Why it's a gap:** it breaks this batch's own rule. Counts that can't be read fail the run and are kept.
+
+### Gate A
+
+1. **Principle:** unchanged. A run that can't get the sample's earlier counts, from either file, fails and adds nothing.
+2. **What would kill it:** a legacy file that can't be read, or whose move fails, and a run that reports success or saves counts without the legacy ones.
+3. **Refuted before here?** No. This is batch 7's rule again (a step that failed says "failed"), on a second path into the same counts, which round 1's tests didn't take.
+4. **Simplest thing:**
+   - The migration's catch raises instead of logging: one catch for reading the legacy file, one for writing the per-sample file.
+   - The raise reaches each entry point's `except Exception`, which sets `error_message` (`:1299`, `:1620`). That happens before any BAM is counted.
+5. **Inputs (read in code at `0f2c208`):**
+   - Both entry points call `_load_copy_numbers` before counting anything (`:1135`, `:1417`), under the lock.
+   - `atomic_open` removes its temporary file on any error. So a failed move leaves no per-sample file, and the next run tries the move again.
+   - The legacy file is never deleted after a move (unchanged).
+   - **Checked for the same hole elsewhere:**
+     - A counting failure returns before the save in both entry points (`:1215`, `:1527`), so nothing half-counted is saved.
+     - Nothing else reads these files, except subprocess mode (off by default). It re-reads the per-sample file after `_load_copy_numbers` has checked it, under the same lock.
+
+### Gate B: measured on `0f2c208` before this lock
+
+The new tests below: **4 failed, 4 passed** (`before_10c_r2.txt`).
+- T6 failed with "the run went on without the sample's earlier counts".
+- T7 failed with "the run went on with no counts".
+- The 4 controls passed.
+
+### Fix
+
+- In `_load_copy_numbers`, a failure to read the legacy file, or to write the per-sample file from it, raises a `RuntimeError` that names the file and says "The file is kept; no BAM was added".
+- A legacy file that doesn't hold the sample still means no counts yet.
+
+### Tests (added to `tests/test_cnv_counts_shared.py`)
+
+| # | Test | Before (`0f2c208`) |
+|---|------|------|
+| T6 | a failed move out of the legacy file fails the run (single; multiple) | fail ×2: the run went on |
+| T7 | a legacy file that cannot be read fails the run and is kept (single; multiple) | fail ×2: the run went on |
+| C1 | a legacy file is moved and added to (single; multiple) | pass ×2: control |
+| C2 | a legacy file without the sample starts from none (single; multiple) | pass ×2: control |
+
+- **T6:** the first `_save_copy_numbers` call (the move) raises, and the run's own save works.
+  - After the run: no per-sample file, and the legacy file is unchanged.
+  - Then a run with the save working moves the counts and adds its BAM: chr1 100 + chr2 50. The failed run's BAM is not in them.
+- The legacy files are made from a real run's counts in another folder.
+
+### Pass rules (locked)
+
+- **R1:** on `0f2c208`, T6 and T7 fail for the reason shown, and C1 and C2 pass (measured).
+- **R2:** after the fix, all 17 tests in the file pass.
+- **R3:** the full suite passes: 808 + 8 = 816.
+- **R4:** each mutant below, applied alone to the fixed code, makes the file fail (pytest exit 1). The control N0 leaves it passing.
+  - M6: both catches log and go on again (the old code) → T6, T7.
+  - M7: only the move's write failure logs and goes on → T6.
+  - M8: only the legacy read failure logs and goes on, with no counts → T7.
+  - M1–M5 from round 1, applied again to the new code: each still caught.
+  - N0: a no-op change → nothing fails.
+- **R5:** `robin.yml` and `pyproject.toml` unchanged.
