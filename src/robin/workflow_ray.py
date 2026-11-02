@@ -4332,6 +4332,15 @@ class RayFileWatcher(FileSystemEventHandler):
         self._last_flush: float = time.time()
         self._flush_interval_s: float = 0.5
         self._batch_size: int = 128
+        # The timer (JOB-4): sends what waits and checks half-written BAMs again, so nothing
+        # waits for a next file event. File events and the timer share the watcher: one lock.
+        self._lock = threading.RLock()
+        self._tick_s: float = 0.5
+        self._incomplete_after_s: float = 600.0  # unchanged and incomplete this long: shown
+        self._stop_event = threading.Event()
+        self._timer: Optional[threading.Thread] = None
+        self._stopped = False
+        self._send_failed_logged: set = set()
         # Track whether this watch session has seen any "pass" BAMs.
         # If a pass BAM is present, we want fail-BAM errors to remain visible.
         # (The rule is shared with the non-Ray runner: robin.bam_submission.)
@@ -4346,7 +4355,7 @@ class RayFileWatcher(FileSystemEventHandler):
         return True
 
     def _flush_if_needed(self, force: bool = False) -> None:
-        try:
+        with self._lock:
             if not self._pending_jobs:
                 return
             now = time.time()
@@ -4355,15 +4364,92 @@ class RayFileWatcher(FileSystemEventHandler):
                 or len(self._pending_jobs) >= self._batch_size
                 or (now - self._last_flush) >= self._flush_interval_s
             ):
-                batch = self._pending_jobs[: self._batch_size]
-                del self._pending_jobs[: self._batch_size]
-                try:
-                    ray.get(self.coord.submit_jobs.remote(batch))
-                except Exception:
-                    pass
+                self._send_batch()
                 self._last_flush = now
-        except Exception:
-            pass
+
+    def _send_batch(self) -> bool:
+        """Send the first batch that waits. If the Coordinator can't take it, the batch goes
+        back to the front, to be tried again, and each BAM's first failure is logged by name
+        (JOB-4: it used to be dropped silently). True when sent."""
+        with self._lock:
+            batch = self._pending_jobs[: self._batch_size]
+            del self._pending_jobs[: self._batch_size]
+            try:
+                ray.get(self.coord.submit_jobs.remote(batch))
+                return True
+            except Exception as e:
+                self._pending_jobs[:0] = batch
+                new = sorted({j.context.filepath for j in batch} - self._send_failed_logged)
+                if new:
+                    self._send_failed_logged.update(new)
+                    logging.getLogger("robin.workflow").error(
+                        f"Could not send {len(new)} BAM(s) to the Coordinator ({e}); trying again: "
+                        + ", ".join(os.path.basename(p) for p in new)
+                    )
+                return False
+
+    def _send_waiting(self) -> None:
+        """Send every batch that waits, stopping at the first that can't be sent."""
+        with self._lock:
+            while self._pending_jobs:
+                if not self._send_batch():
+                    return
+
+    # ----- the timer (JOB-4) -----
+    def start(self) -> None:
+        """Start the timer: every ``_tick_s`` it checks half-written BAMs again and sends what
+        waits."""
+        if self._timer is not None and self._timer.is_alive():
+            return
+        self._stop_event.clear()
+        self._timer = threading.Thread(target=self._run_timer, name="robin-watcher-timer", daemon=True)
+        self._timer.start()
+
+    def _run_timer(self) -> None:
+        while not self._stop_event.wait(self._tick_s):
+            try:
+                self.tick()
+            except Exception as e:
+                logging.getLogger("robin.workflow").error(f"The file watcher's timer failed: {e}")
+
+    def tick(self) -> None:
+        """Check half-written BAMs again (one that completed is taken in; one unchanged too
+        long is shown once as a failed file), then send everything that waits."""
+        for path in self.intake.waiting_paths():
+            self._handle(path)
+        stale = self.intake.incomplete_too_long(self._incomplete_after_s)
+        if stale:
+            minutes = self._incomplete_after_s / 60
+            rows = [{
+                "sample_id": "unknown",
+                "filepath": p,
+                "job_type": "preprocessing",
+                "error": (
+                    f"{os.path.basename(p)} has no BAM end-of-file block and has not changed for "
+                    f"{minutes:g} minutes: not analysed (it will be if it completes)"
+                ),
+                "failure_kind": "incomplete",
+            } for p in stale]
+            for r in rows:
+                logging.getLogger("robin.workflow").error(r["error"])
+            try:
+                ray.get(self.coord.record_cut_short_steps.remote(rows))
+            except Exception as e:
+                logging.getLogger("robin.workflow").error(f"Could not report {len(rows)} incomplete BAM(s): {e}")
+        with self._lock:
+            self._send_waiting()
+            self._last_flush = time.time()
+
+    def stop(self) -> List[Job]:
+        """Stop the timer, then send what waits (one pass). Returns the jobs still unsent,
+        which are logged by name. Does nothing the second time."""
+        if self._stopped:
+            return []
+        self._stopped = True
+        self._stop_event.set()
+        if self._timer is not None:
+            self._timer.join(timeout=60)
+        return self.flush_remaining()
 
     def _get_reference(self) -> Optional[str]:
         """The Coordinator's reference genome, asked once: the watcher's BAMs get it as the
@@ -4377,6 +4463,10 @@ class RayFileWatcher(FileSystemEventHandler):
         return self._reference
 
     def _handle(self, fp: str):
+        with self._lock:  # file events and the timer both come here
+            self._handle_locked(fp)
+
+    def _handle_locked(self, fp: str):
         if fp in self.processed:
             return
         if not self._should_process(fp):
@@ -4425,9 +4515,44 @@ class RayFileWatcher(FileSystemEventHandler):
             self._handle(event.dest_path)  # Use dest_path for the final location
 
     # Ensure remaining jobs are flushed on shutdown
-    def flush_remaining(self):
-        while self._pending_jobs:
-            self._flush_if_needed(force=True)
+    def flush_remaining(self) -> List[Job]:
+        """Send what waits (one pass). Each BAM still unsent is logged by name, with what
+        happens to it; returns their jobs (JOB-4)."""
+        with self._lock:
+            self._send_waiting()
+            left = list(self._pending_jobs)
+        if left:
+            names = sorted({os.path.basename(j.context.filepath) for j in left})
+            then = (
+                "the BAM ledger runs them at the next start" if self.work_dir
+                else "they are not analysed (there is no work folder, so no BAM ledger)"
+            )
+            logging.getLogger("robin.workflow").error(
+                f"{len(names)} BAM(s) taken in were not sent to the Coordinator: "
+                f"{', '.join(names)}; {then}"
+            )
+        return left
+
+
+def _stop_watching(observer, watcher) -> None:
+    """Stop watching, then send what the watcher holds (JOB-4). Done before the Coordinator is
+    told to stop: it ignores jobs sent after that. Safe to call twice."""
+    if observer is not None:
+        try:
+            if observer.is_alive():
+                print("[SHUTDOWN] Stopping file observer...")
+                observer.stop()
+                observer.join()
+                print("[SHUTDOWN] File observer stopped")
+        except Exception as e:
+            print(f"[SHUTDOWN] Warning: Error stopping file observer: {e}")
+    if watcher is not None:
+        try:
+            print("[SHUTDOWN] Sending the file watcher's waiting jobs...")
+            left = watcher.stop()
+            print(f"[SHUTDOWN] File watcher stopped ({len(left)} job(s) not sent)" if left else "[SHUTDOWN] File watcher flushed")
+        except Exception as e:
+            print(f"[SHUTDOWN] Warning: Error flushing file watcher: {e}")
 
 
 # Global coordinator reference for external access
@@ -5204,6 +5329,7 @@ async def run(
                 watch = observer.schedule(watcher, p, recursive=recursive)
                 _GLOBAL_WATCHED_PATHS[str(Path(p).resolve())] = watch
         observer.start()
+        watcher.start()  # the timer: sends what waits, checks half-written BAMs again (JOB-4)
 
         # Store globally for GUI "Add Folder to Watch"
         _GLOBAL_OBSERVER = observer
@@ -5248,6 +5374,8 @@ async def run(
                     except asyncio.CancelledError:
                         pass
                 print("[SHUTDOWN] Tasks cancelled")
+        # Stop watching and send what waits first: the Coordinator ignores jobs once it stops
+        _stop_watching(observer, watcher)
         # Signal coordinator to stop accepting new jobs and finalize
         try:
             print("[SHUTDOWN] Shutting down coordinator...")
@@ -5261,23 +5389,14 @@ async def run(
             pass
         print("[SHUTDOWN] Workflow stopped gracefully")
     finally:
+        # Stop watching and send what waits before the Coordinator stops (JOB-4: it ignores
+        # jobs sent after). Nothing to do if the Ctrl-C path did it.
+        _stop_watching(observer, watcher)
         # Always finalize target BAMs on exit (including normal completion)
         try:
             await coord.shutdown.remote()
         except Exception:
             pass
-        if watcher is not None:
-            try:
-                print("[SHUTDOWN] Flushing file watcher...")
-                watcher.flush_remaining()
-                print("[SHUTDOWN] File watcher flushed")
-            except Exception as e:
-                print(f"[SHUTDOWN] Warning: Error flushing file watcher: {e}")
-        if observer is not None:
-            print("[SHUTDOWN] Stopping file observer...")
-            observer.stop()
-            observer.join()
-            print("[SHUTDOWN] File observer stopped")
 
         # Clear global watch state
         _GLOBAL_OBSERVER = None

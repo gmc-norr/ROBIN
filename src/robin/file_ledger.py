@@ -207,7 +207,8 @@ class BamIntake:
         self.ledger = FileLedger(work_dir) if work_dir else None
         self.state: Dict[str, BamState] = self.ledger.load() if self.ledger else {}
         self._seen: set = set()
-        self._waiting: set = set()
+        # Half-written BAMs: path -> [(size, mtime), when that last changed, reported]
+        self._waiting: Dict[str, list] = {}
         self._lock = threading.Lock()
 
     def decide(self, path: str) -> Decision:
@@ -219,14 +220,18 @@ class BamIntake:
         to report.
         """
         if not bam_is_complete(path):
+            sig, now = _file_sig(path), time.monotonic()
             with self._lock:
-                if path not in self._waiting:
-                    self._waiting.add(path)
+                held = self._waiting.get(path)
+                if held is None:
+                    self._waiting[path] = [sig, now, False]
                     _log.info(f"Waiting for {path} to be complete (no BAM end-of-file block yet)")
+                elif held[0] != sig:
+                    held[0], held[1] = sig, now  # still being written
             return Decision(False, reason="incomplete")
         key = bam_key(path)
         with self._lock:
-            self._waiting.discard(path)
+            self._waiting.pop(path, None)
             if key in self._seen:
                 return Decision(False, key, reason="seen")
             bam = self.state.get(key)
@@ -268,9 +273,36 @@ class BamIntake:
         run = bool(to_run) or pre is None or not pre.ended
         return Decision(run, key, list(to_run) if run else None, rows, reason="resume")
 
+    def waiting_paths(self) -> List[str]:
+        """The half-written BAMs seen so far, to check again (JOB-4)."""
+        with self._lock:
+            return list(self._waiting)
+
+    def incomplete_too_long(self, seconds: float) -> List[str]:
+        """Half-written BAMs whose size and time have not changed for ``seconds``, each listed
+        once: they are marked reported."""
+        now = time.monotonic()
+        found = []
+        with self._lock:
+            for path, held in self._waiting.items():
+                if not held[2] and now - held[1] >= seconds:
+                    held[2] = True
+                    found.append(path)
+        return found
+
     def _append(self, records: List[dict]) -> None:
         if self.ledger is not None:
             self.ledger.append(records)
+
+
+def _file_sig(path: str):
+    """A file's size and modification time (None if it can't be read): a change means it is
+    still being written."""
+    try:
+        st = os.stat(path)
+        return st.st_size, st.st_mtime_ns
+    except OSError:
+        return None
 
 
 def _earlier_failure(step: str, state: StepState) -> Optional[Tuple[str, str]]:
