@@ -94,3 +94,20 @@ The tests below: **9 failed** (`before_10d3.txt`, in this session's scratchpad f
   - Y9: the send keeps sent jobs in the buffer → C8.
   - N0: a no-op change → nothing fails.
 - **P5:** `robin.yml` and `pyproject.toml` unchanged.
+
+## Result (2026-11-02, on `39039b7`): supported
+
+Every pass rule holds. The output files are in this session's scratchpad folder.
+
+- **P1, before** (`b477842`, `before_10d3.txt`): the 9 failed as shown.
+- **P2, after:** all 9 pass. With `test_bam_ledger.py`, `test_job_failures.py` and `test_file_failures.py`: 250 passed (`after_10d3.txt`). The 9 passed in each of 5 more runs (the timer tests depend on timing).
+- **P3, full suite:** 868 passed (`suite_10d3.txt`).
+- **P4, mutants** (`mutate_10d3.py`; only pytest exit 1 counts as caught; `mutants_10d3.txt`): Y1–Y9 were each caught by the test the plan names. N0 survived (9 passed).
+- **P5, pins:** `git diff b477842 -- robin.yml pyproject.toml` is empty.
+
+### Ruling made after the lock: W4 checks each call's full name
+
+W4 named each call by its last part. `coord.shutdown.remote()` is then a call named `remote`, so W4 would have missed the Ctrl-C path's Coordinator stop.
+- **The change:** W4 now names each call by its full dotted name (`ast.unparse`), and checks that a call to `_stop_watching` comes before any call with "shutdown" in it, in each `except` and `finally` block of `run()` that has one.
+- **Before the code:** the corrected W4 was run again on `b477842`'s code and still failed for its reason (`before_10d3_w4.txt`).
+- **What stays:** its rule (watching stops before the Coordinator, on both paths) is unchanged.
