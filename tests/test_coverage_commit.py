@@ -480,6 +480,87 @@ def test_a_finish_whose_batch_bam_is_gone_looks_for_it_in_target_bam(tmp_path, p
     assert _rows_at_next_start(work, bams[0]) == []
 
 
+def test_a_batch_bam_lost_after_its_claim_folder_went_is_listed_for_the_snp_check(tmp_path, panel, bams, monkeypatch):
+    """C9 (the code review's finding 1): the commit deleted its claim folder and stopped before
+    retiring its list; then its batch BAM is lost. Finalize's finish keeps a claim folder for
+    BAM 1's files, after finalize took its list of claim folders. Finalize must still list it,
+    so the SNP check refuses to call on a target.bam that misses BAM 1's reads."""
+    work = tmp_path / "work"
+    sample_dir = os.path.join(str(work), SAMPLE)
+    _ledger_with_ended_target_steps(work, bams)
+    assert _add(work, bams[0])["status"] == "success"
+    _stage(work, bams[1])
+    real_retire = ta_mod._retire
+
+    def retire(*args, **kwargs):
+        raise _Killed("killed before the list is retired")
+
+    monkeypatch.setattr(ta_mod, "_retire", retire)
+    with pytest.raises(_Killed):
+        _analysis(work).accumulate_staged_files(SAMPLE, force=True)
+    monkeypatch.setattr(ta_mod, "_retire", real_retire)
+    with open(os.path.join(sample_dir, LIST)) as f:
+        step = next(s for s in json.load(f)["steps"] if s["do"] == "batch_bam")
+    claim = os.path.basename(os.path.dirname(step["from"]))
+    assert not os.path.exists(os.path.join(sample_dir, "_staging", claim)), "the claim folder was not removed"
+    moved = os.path.join(sample_dir, step["to"])
+    os.remove(moved)  # lost from outside
+    os.remove(f"{moved}.bai")
+    result = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+    assert [f["file"] for f in result.get("file_failures") or []] == [bams[1]]
+    assert claim in (result.get("claims_left") or []), f"the kept claim folder is not listed: {result}"
+    assert ta_mod._merge_missed_reads(result) is not None, "the SNP check would call on missing reads"
+
+
+def test_a_batch_bam_that_could_not_be_written_is_reported_by_the_finish(tmp_path, panel, bams, monkeypatch):
+    """C10 (the code review's finding 2): BAM 1's batch BAM can't be written, its coverage
+    commit goes on, and the process stops at the first install step. The finish must report
+    BAM 1 as not in target.bam (a failed file and a ledger line), keep its claim folder, and
+    sync that folder before deleting the list."""
+    work = tmp_path / "work"
+    sample_dir = os.path.join(str(work), SAMPLE)
+    _ledger_with_ended_target_steps(work, bams)
+    assert _add(work, bams[0])["status"] == "success"
+    _stage(work, bams[1])
+    real_write = TargetAnalysis._write_batch_bam
+
+    def failing_write(self, *args, **kwargs):
+        raise RuntimeError("synthetic: disk full")
+
+    monkeypatch.setattr(TargetAnalysis, "_write_batch_bam", failing_write)
+    killed, _ = _killed(
+        monkeypatch, 1, "install", lambda: _analysis(work).accumulate_staged_files(SAMPLE, force=True)
+    )
+    monkeypatch.setattr(TargetAnalysis, "_write_batch_bam", real_write)
+    assert killed
+    assert os.path.exists(os.path.join(sample_dir, LIST)), "no install list before the first install step"
+    (claim,) = [os.path.join("_staging", os.path.basename(d))
+                for d in glob.glob(os.path.join(sample_dir, "_staging", "_batch_*"))]
+    events = []
+    real_sync, real_remove = ta_mod._sync_dir, os.remove
+
+    def sync_dir(p):
+        events.append(("dir", os.path.relpath(str(p), sample_dir)))
+        return real_sync(p)
+
+    def remove(p, *args, **kwargs):
+        events.append(("remove", os.path.relpath(str(p), sample_dir)))
+        return real_remove(p, *args, **kwargs)
+
+    monkeypatch.setattr(ta_mod, "_sync_dir", sync_dir)
+    monkeypatch.setattr(os, "remove", remove)
+    result = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+    monkeypatch.setattr(ta_mod, "_sync_dir", real_sync)
+    monkeypatch.setattr(os, "remove", real_remove)
+    failures = result.get("file_failures") or []
+    assert [f["file"] for f in failures] == [bams[1]], result
+    assert "target.bam" in failures[0]["error"] and "disk full" in failures[0]["error"]
+    assert os.path.basename(claim) in (result.get("claims_left") or [])
+    assert _rows_at_next_start(work, bams[1]) == [("target", "failed_before")]
+    deleted = events.index(("remove", LIST))
+    assert ("dir", claim) in events[:deleted], "the kept claim folder was not synced before the list was deleted"
+
+
 # ----------------------------------------------------------------------------- what reaches the disk
 
 

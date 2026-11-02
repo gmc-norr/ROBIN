@@ -279,6 +279,33 @@ def test_a_failed_first_move_leaves_the_set_staged_and_reports_nothing(tmp_path,
     assert again["status"] == "success" and again["files_processed"] == 1
 
 
+def test_a_failed_second_move_still_names_the_bam_and_records_it(tmp_path, panel, monkeypatch):
+    """The code review's finding 3: the set's coverage file moved into the claim folder, then
+    the next move failed, so its BAM's path and key were still in _staging/. The failure must
+    still name the BAM, and the ledger must record it."""
+    bams, _ = write_bams(str(tmp_path), 1)
+    work = tmp_path / "work"
+    _ledger_with_ended_target_steps(work, bams)  # BAM 0's job staged it and ended well
+    _stage(work, bams[0])
+    real_move = ta_mod.shutil.move
+    calls = {"n": 0}
+
+    def move(src, dst, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("synthetic: the second move fails")
+        return real_move(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(ta_mod.shutil, "move", move)
+    ta = TargetAnalysis(work_dir=str(work), target_panel=PANEL_NAME, batch_size=1, use_staging=True)
+    result = ta.accumulate_staged_files(SAMPLE, force=True)
+    monkeypatch.setattr(ta_mod.shutil, "move", real_move)
+    assert calls["n"] == 2
+    assert result["status"] == "error"
+    assert [(f["file"], f["step"]) for f in result.get("file_failures") or []] == [(bams[0], STEP)]
+    assert _rows_at_next_start(work, bams[0]) == [("target", "failed_before")]
+
+
 # --- guards: no failed file where nothing failed -------------------------------------------------
 
 
