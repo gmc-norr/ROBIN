@@ -16,7 +16,8 @@
 **Updated:** 2026-11-01. VAR-1 and VAR-2 are fixed in our fork, so step 9 is done. They were checked against ClinVar's own GRCh38 file. VAR-2 is not fixed as suggested below: matching CLNSIG alone would have dropped BRAF V600E and TERT C228T, whose germline label is "conflicting". A record now counts when ClinVar's germline, oncogenicity or somatic-impact label calls it pathogenic.\
 **Updated:** 2026-11-02. JOB-1 and JOB-5, from step 8, are fixed in our fork: no request for a classifier or SNP run is thrown away. They were checked through a real Coordinator, with requests sent while a run was busy. Their external review found two more problems, fixed too: batched SNP requests kept an older request's settings, and a finished run's waiting request could wait for good on a full backlog. A new finding is noted under step 8: on the `high` preset the Coordinator answers nothing while a job runs.\
 **Updated:** 2026-11-02. JOB-7 and the rest of JOB-6 are fixed in our fork. A finalize request merges once, a sample finalised before still gets its later reads, and an SNP run merges new reads first. Earlier SNP calls are reused only when they came from the same reads. An external review found four gaps in that, fixed too: reads a worker was still adding, merges that missed reads, part-failed Clair3 runs, and a `target.bam` rewritten without a new batch. Batch 6 had already fixed JOB-6's batch-BAM deletion, and its lock already stopped JOB-7's damage: two finalizes at once, slowed, gave 0 bad of 40 with the lock and 39 of 40 without.\
-**Updated:** 2026-11-02. CNV-2, from step 8, is fixed in our fork: no worker keeps its own copy of a sample's CNV counts, a sample's CNV runs take turns, and the counts are written whole or not at all. It was checked with stand-in Ray workers in separate processes, CNV-2's own example among them. Its external review found one more gap, fixed too: an old-format counts file that couldn't be moved was skipped, and its counts were lost.
+**Updated:** 2026-11-02. CNV-2, from step 8, is fixed in our fork: no worker keeps its own copy of a sample's CNV counts, a sample's CNV runs take turns, and the counts are written whole or not at all. It was checked with stand-in Ray workers in separate processes, CNV-2's own example among them. Its external review found one more gap, fixed too: an old-format counts file that couldn't be moved was skipped, and its counts were lost.\
+**Updated:** 2026-11-02. JOB-2 is under way in our fork. A ledger of each BAM's steps is next: after a restart, finished steps are skipped, unstarted ones run, and ones cut short are listed. First, `master.csv` now counts a BAM once, even when it is preprocessed again or is a copy.
 
 ## This fork and the original ROBIN
 
@@ -102,6 +103,7 @@ This review is of the original ROBIN (LooseLab/ROBIN at `493f53f`). Our fork, [g
 | A queued finalize is not also run by the GUI | JOB-7 | `c93a711` | One merge per finalize request |
 | An SNP run waits for reads still being added, fails when a read could not be added or a Clair3 region failed, and keeps staged files it could not add | JOB-6 (external reviews) | `e139331`, `d784753` | More SNP runs say "failed" instead of calling without some reads; a kept `_staging/_batch_<id>/` folder fails the sample's SNP runs until someone deals with it |
 | A sample's CNV counts are read from disk by every run, under a per-sample lock, and written whole | CNV-2 | `1f2c5b1`, `5e71fc6` | No batch is lost between workers; a sample's CNV runs take turns; unreadable counts, or an old-format counts file that can't be moved, fail the run instead of starting again from none |
+| `master.csv` counts each BAM once, known by its contents, and an unreadable `master.csv` is kept and reported | JOB-2 (part 1) | `52b5169` | Rerunning a BAM, or a copy of it, no longer grows BAM passed/failed, bases and read counts; a new `bams_added` column; a `master.csv` from before has no list |
 
 Every change has a regression test in `tests/`. The details are in `CHANGELOG.md` under `[Unreleased]`. Add a row here each time a fix lands.
 
@@ -500,6 +502,13 @@ The CNV summary card and the report's CNV problems are covered in sections 6 and
 - **What's wrong:** The start-up scan doesn't add files to the watcher's dedup set. `add_watch_path` starts watching before it scans. There is no per-file record across restarts (`SQLiteStateTracker` exists but has no callers). Methylation counts, CNV and `master.csv` totals all just add up.
 - **Effect:** a restart with the same `--work-dir` counts everything twice.
 - **Fix:** keep a persistent per-file ledger, and share one dedup set.
+- **Status:** in progress in our fork (batch 10d).
+  - **The plan (the user's choice, 2026-11-02):** a ledger records when each of a BAM's steps starts and ends. After a restart, ROBIN skips the steps a BAM finished and runs the ones it never started. A step that was running when ROBIN stopped is not run again, because it may have added its counts already; it is listed as possibly incomplete.
+  - **Why not the stricter plan:** first the user chose "re-run the unfinished steps exactly once". That needs every counting step to keep the BAMs it has added together with its totals. Mapped, that was six steps and seven batches, two of them large (target coverage and fusion), so the user chose the plan above.
+  - **How a BAM is known:** by its contents (`robin.bam_identity.bam_key`: its size and its first and last 64 KiB), so a copy of it or a moved folder is the same BAM.
+  - **Done:** `master.csv` counts each BAM once (part 1, `52b5169`). It keeps a `bams_added` list, and a `master.csv` that can't be read is kept and reported instead of being started again from zero. That also makes preprocessing safe to run again, which the ledger needs: re-running a BAM's unstarted steps starts from its preprocessing.
+  - **Not done yet:** the ledger and JOB-8 (part 2), and JOB-4 (part 3). A `master.csv` written before this change has no list, so the BAMs it counts can be counted once more after a restart.
+  - Still open in the original ROBIN.
 
 **JOB-3 · high · Confirmed**: A failed handler runs again without `work_dir`, `reference` or `target_panel`.
 - **Where:** `workflow_ray.py:704-742`
@@ -889,13 +898,20 @@ Make each step below its own change, with its own regression test. The scripts i
    - VAR-4, REP-6: "not available" instead of a negative result
 8. **Scheduling state:** *(JOB-1, JOB-5, JOB-7 and CNV-2 done in our fork, with the rest of JOB-6)*
    - JOB-1: per-sample dirty flags *(done)*
-   - JOB-2: a persistent file ledger
+   - JOB-2: a persistent file ledger *(in progress: `master.csv` counts a BAM once; the ledger next)*
    - CNV-2: no worker caches, and atomic writes *(done)*
    - JOB-4, JOB-5 *(done)*, JOB-7 *(done)* (JOB-3 was fixed with step 7)
    - Found while fixing JOB-1: on the `high` preset the Coordinator answers nothing while a job runs. A status call waited the job's full 4 s (0.01 s on `standard`), so submissions and the GUI's status calls wait for running jobs. `high` is opt-in. The cause is not found yet.
    - Found by the external review of JOB-5, older than it: a classifier run started when bed_conversion ends never adds to the running counts per queue and type, but its end takes one off, which loosens the `slow` queue's limit. And jobs that a finished job triggers still wait for room in the backlog inside its finish step; on `high`, where completions are handled one at a time, that may hold up every other completion (not measured).
    - Found while fixing JOB-6: when the workflow's job types are known and their outputs exist, the GUI's background scan marks a timed-out sample Complete without starting a finalize, so its batch BAMs wait for the next SNP run (which now merges first) or a manual finalize. Which of the GUI's scans sees the change first in a real run is not measured. And with new reads after an SNP run, the "SNP complete" poller waits out its 24 h and then says "still running", though the run has ended.
    - Found while fixing CNV-2: `process_single_bam` has no caller in `src/` (the CNV handler always batches), and `SERIALIZE_BY_TYPE_PER_SAMPLE` is empty, so its code in the Coordinator has never run. Both are candidates for ARCH-4's dead-code removal.
+   - Found while mapping JOB-2's counting steps (read in code, not measured):
+     - **MGMT:** it adds a BAM's MGMT reads to `mgmt.bam` by copying a merged file over it in place (`mgmt_analysis.py:1325-1328`). No lock is used anywhere in `mgmt_analysis.py`, so two MGMT jobs for one sample at once could lose one's reads.
+     - **Methylation:**
+       - The merge's lock carries on without locking when `flock` fails (`temp_utilities.py:54-57`).
+       - `bam_file_count` in `<sample>_metadata.json` counts merges, not BAMs: each merge adds 1 (`bed_conversion.py:319`). It is also read before the lock (`temp_utilities.py:285`; the lock is taken at `:382`).
+     - **Fusion:** its accumulation has no lock (already noted under REP-6).
+     - **Target coverage:** its commit is not one transaction (already noted under TGT-3).
 9. **Security hardening:** SEC-2 to SEC-7.
 10. **Pin and record versions** (PKG-1), **add CI with a test suite** (PKG-2), then start on the architecture items. Delete dead code first (ARCH-4), because it is cheap and stops fixes from landing in the wrong copy.
 11. **Later, a feature rather than a fix:** per-base depth for the panel (a D4 file from `mosdepth`), to report the share of each gene's bases at ≥20× and to find low-coverage holes in panel genes. Today "above 30×/20×/10×" counts whole targets by their average depth.
