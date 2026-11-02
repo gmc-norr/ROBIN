@@ -290,3 +290,17 @@ The new tests and the ruled L5, on the unfixed code: **13 failed, 30 passed** (`
   - X13: the converted batch's context is a deep copy → C3.
   - N0: a no-op change → nothing fails.
 - **R10:** `robin.yml` and `pyproject.toml` unchanged.
+
+### Round 2 result (2026-11-02, on `80d457f`): supported
+
+Every pass rule holds. The output files are in this session's scratchpad folder.
+
+- **R6, before** (`2905c04`, measured before the lock, `before_10d2r2.txt`): 13 failed as shown, and the 4 controls and the ruled `master.csv` test passed.
+- **R7, after:** with `test_job_failures.py` and `test_file_failures.py`, 252 passed (`after_10d2r2.txt`).
+  - The first run had 1 failure, in the code, not the test: `_append_counted_key` was a static method, and Q11 (written first) treats it as a method. Made it one; the test is unchanged.
+- **R8, full suite:** 859 passed (`suite_10d2r2.txt`).
+- **R9, mutants** (`mutate_10d2r2.py`; only pytest exit 1 counts as caught; `mutants_10d2r2_ledger.txt`, `mutants_10d2r2_master.txt`):
+  - Each was caught by the test the plan names: X1 by Q1, X2 by Q2, X3 by Q3, X4 by Q4, X5 by Q5, X6 by C5, X7 by Q7, X9 by Q9, X10 by Q10, X11 by Q11, X12 by Q6, X13 by C3.
+  - X8 was caught first by L5 (the runner stops at the first failure). Run against Q8 alone, it is caught by Q8 too.
+  - N0 survived both files (32 and 11 passed).
+- **R10, pins:** `git diff 2905c04 -- robin.yml pyproject.toml` is empty.
