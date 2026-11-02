@@ -94,3 +94,26 @@ The process tests run stand-in Ray workers in their own processes (`multiprocess
   - M5: the counts are written in place → T4.
   - N0: a no-op change → nothing fails.
 - **P5:** `robin.yml` and `pyproject.toml` unchanged.
+
+## Result (2026-11-02): supported
+
+Every pass rule holds.
+
+- **P1, before** (`0ed84c4`, measured before the lock, `before_10c.txt`): 8 failed, 1 passed. Each failure gave the message it was written for:
+  - T1: "a batch another worker added was lost".
+  - T2: "one run overwrote the other's counts".
+  - T3: "the run went on with no counts".
+  - T4: the counts file was left truncated (`UnpicklingError: pickle data was truncated`).
+  - T5, the import guard, passed.
+- **P2, after** (`1f2c5b1`): the 9 new tests pass, and so do the 20 in `test_cnv_control_reference.py` and `test_cnv_reference.py` (29 passed, `after_10c.txt`). Re-run on `1f2c5b1` while writing this result: all 7 CNV test files, 49 passed.
+- **P3, full suite:** 808 passed (799 before, plus the 9), `suite_10c.txt`. It ran on the `src/` and `tests/` committed as `1f2c5b1`; neither has changed since.
+- **P4, mutants** (`mutate_10c.py`, each alone on the fixed code; only pytest exit 1 counts as caught; `mutants_10c.txt`):
+  - M1, a per-process cache returns: caught by T1[single].
+  - M2, `process_multiple_bams` without the lock: caught by T2[multiple].
+  - M3, `process_single_bam` without the lock: caught by T2[single].
+  - M4, unreadable counts read as none: caught by T3[single].
+  - M5, the counts written in place: caught by T4[single].
+  - N0, the no-op control, survived (9 passed).
+- **P5, pins:** `git diff 0ed84c4 -- robin.yml pyproject.toml` is empty.
+
+The output files are in this session's scratchpad folder, as in Gate B.
