@@ -183,3 +183,19 @@ The new tests below: **4 failed, 4 passed** (`before_10c_r2.txt`).
   - M1–M5 from round 1, applied again to the new code: each still caught.
   - N0: a no-op change → nothing fails.
 - **R5:** `robin.yml` and `pyproject.toml` unchanged.
+
+### Round 2 result (2026-11-02, on `5e71fc6`): supported
+
+Every pass rule holds.
+
+- **R1, before** (`0f2c208`, measured before the lock, `before_10c_r2.txt`): T6 and T7 failed, 4 tests, each with its own message, and C1 and C2 passed.
+- **R2, after:** all 17 tests in the file pass (`after_10c_r2.txt`).
+- **R3, full suite:** 816 passed (`suite_10c_r2.txt`).
+  - A first run failed with 806 passed and 10 errors. That was my command, not the code: it had `-p no:logging`, which removes pytest's `caplog` fixture, so the 10 tests that use it could not start. The run without it passed.
+- **R4, mutants** (`mutate_10c_r2.py`; only pytest exit 1 counts as caught; `mutants_10c_r2.txt`):
+  - M1–M5, applied again to the new code: each caught by the same test as in round 1.
+  - M6: caught by T6[single]. The runner stops at the first failure, so M6 was also run against T7 alone: caught by T7[single].
+  - M7: caught by T6[single].
+  - M8: caught by T7[single].
+  - N0 survived (17 passed).
+- **R5, pins:** `git diff 0ed84c4 -- robin.yml pyproject.toml` is empty.
