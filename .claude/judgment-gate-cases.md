@@ -136,3 +136,19 @@ whenever a claim is withdrawn or a finding turns out to be an artifact. Concrete
   checks and gave each run its own new folder.
 - **Gate:** A.4 and D.3. A tolerance is a mechanism. Measure the need before adding it, and
   prefer making the wrong input impossible (a new folder) to making it unlikely (a time window).
+
+## 14. "Counts that can't be read fail the run", with a second way into the counts (batch 10c, 2026-11-02)
+- **Claimed:** in the locked plan (`3ff9e57`), a sample's CNV counts that can't be read fail
+  the run and are kept, never reset to none. The result (`e108753`) said supported.
+- **Rested on:**
+  - "The counts" meant the per-sample file. The loader has a second way in: moving the
+    sample's counts out of the old multi-sample `update_cnv_dict.pkl`.
+  - That move's `try/except`, kept from the original code, logged a warning and went on. So
+    a failed move gave no counts, the run succeeded, and it saved over the legacy counts for
+    good.
+  - The batch's own atomic write added a way to hit it: a failed rename. The tests took only
+    the per-sample path.
+  - Codex's review found it by failing that rename, through both entry points.
+- **Gate:** A.5 again, as in case 12. List every way the input gets in (here, both files the
+  loader reads), and check every `except` on those paths against the rule ("a failure says
+  failed"), not just the lines being changed.
