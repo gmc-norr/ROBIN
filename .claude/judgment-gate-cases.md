@@ -173,3 +173,21 @@ whenever a claim is withdrawn or a finding turns out to be an artifact. Concrete
   layer that runs it: the batcher, the runner and Ray itself. Size any growing record at a
   real run's scale, not a test's. And a record that says "reported" must come after the
   report, not before.
+
+## 16. Case 15's lesson, broken in the same day's next part (batch 10d part 3, 2026-11-02)
+- **Claimed:** part 3's plan (`721507c`) and result (`f7742f0`): a half-written BAM that
+  never completes "shows once as a failed file". Round 2's result (`6b4e991`): the ledger
+  records a step's own failed files.
+- **Rested on:**
+  - The intake marked the BAM reported before the watcher delivered the row, and a failed
+    delivery was only logged. That is case 15's last point, written a few hours earlier.
+  - "A step's own failed files are the ones after the count taken before it" assumed an
+    append-only list owned by one step. The BED step replaces the list, and in the non-Ray
+    runner sibling steps share it at once. Errors already used an owner tag for the same
+    reason (batch 7).
+  - "Counted BAMs are on the list" assumed the list and `master.csv` go together. A
+    deleted `master.csv` left the list saying BAMs were counted.
+  - Codex's second review found all three, each with the real handler or manager.
+- **Gate:** A.3. Re-read the case file's newest entries against the plan being locked, not
+  only the old ones. And A.5: for any shared list or file, check who else writes it, and
+  how (append, replace, delete).
