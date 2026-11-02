@@ -126,3 +126,13 @@ whenever a claim is withdrawn or a finding turns out to be an artifact. Concrete
 - **Gate:** A.5. List every place the input can be (here, every folder reads pass through)
   and every value an upstream function returns (read each of its `return`s). Then test each
   one, not the one you expect.
+
+## 13. A 2-second allowance for a rounding nobody measured (batch 10b round 2 → 3, 2026-11-02)
+- **Claimed:** in round 2's plan (`8b07d81`), a Clair3 VCF counts only if this run wrote it:
+  modified at or after the run's start, "less 2 s for file-system time rounding".
+- **Rested on:** an allowance for rounding that was never measured, for a gap no measured
+  case needed. It let in what the check was there to stop: a file from a run that ended less
+  than 2 s earlier. Codex's second review found it with a quick retry. Round 3 dropped time
+  checks and gave each run its own new folder.
+- **Gate:** A.4 and D.3. A tolerance is a mechanism. Measure the need before adding it, and
+  prefer making the wrong input impossible (a new folder) to making it unlikely (a time window).
