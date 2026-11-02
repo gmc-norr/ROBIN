@@ -99,3 +99,15 @@ The GUI tests build a real `GUILauncher` without NiceGUI, and swap `threading.Th
 
 - **A Complete without a finalize:** when the workflow's job types are known and their outputs exist, the background scan's first Complete check (`:926-943`) marks a timed-out sample Complete without starting a finalize, so the later check never sees a Live → Complete. Its batch BAMs then wait for the next SNP run or a manual finalize. Which of the GUI's scans sees the change first in a real run is not measured.
 - **The poller while reads keep arriving:** with new reads after an SNP run, the "SNP complete" poller waits until its 24 h limit and then says "still running", though the run has ended (its calls are no longer current).
+
+## Result (2026-11-02, on `c93a711`): supported
+
+Measured in this session's scratchpad folder.
+
+- **P1, before:** on `79c8870` src with the new tests: 13 failed, 5 passed (`before_10b.txt`). Each failure has the message the test was written for: "the GUI ran the merge itself" (F1, F2), "the second finalize skipped the merge" (F4), the "done" check true with a staged file (F5), "the second completion started no finalize" (F6), the old `target.bam`'s reads (S1), "variants were called on a target.bam missing reads" (S2), no record (S3), the calls reused (S6, S7, S8 ×2), the sample left out of bulk SNP (S9). F3 ×2, S4, S5 and S10 passed.
+- **P2, after:** 18 passed (`after_10b.txt`).
+- **P3, suite:** 775 passed (`suite_10b.txt`): 757 + 18. No existing test was changed. The target, completion-timeout and GUI-error tests ran on their own as well: 99 passed.
+- **P4, mutants:** N1–N12 each caught (pytest exit 1); N0 survived, 18 passed (`mutants10b.txt`, runner `mutate10b.py`). The runner stops at the first failing test, so each line names one failure, not every test a mutant breaks.
+- **P5, pins:** `git diff 79c8870 -- robin.yml pyproject.toml` is empty.
+
+Not changed, noticed while fixing: the GUI's own merge (now only when the job can't be queued) still runs without the reference, as before. The coverage panel shows SNP calls without saying when they are older than `target.bam`; the poller and bulk SNP now know, the panel doesn't.
