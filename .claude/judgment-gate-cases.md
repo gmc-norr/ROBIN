@@ -97,3 +97,14 @@ whenever a claim is withdrawn or a finding turns out to be an artifact. Concrete
 - **Gate:** A.5 and D.2 — when a test leaves out an assertion for one parameter, that is an
   input assumption: measure what that path does before exempting it, and above all for the
   default setting.
+
+## 11. "Unmerged batch BAMs are still deleted", a day after they weren't (batch 6 → batch 10b, 2026-11-02)
+- **Claimed:** JOB-6's Status line in the code review, and the CHANGELOG's JOB-6 entry, said the
+  batch-BAM deletion "when `target.bam` already exists (`target_analysis.py:2604-2618`)" was not
+  fixed. Both were still saying so when batch 10b started.
+- **Rested on:** the line written in batch 3. Batch 6's `24ebbc8` (TGT-1) deleted that cleanup
+  and made finalize merge every new batch BAM, but its records updated TGT-1 only, not the other
+  finding that cited the same lines. Found by reading the old code at `eccbf18` beside today's.
+- **Gate:** D.4, for records. When a fix removes or rewrites code, search the review for every
+  finding that cites that file and those lines, and re-check each one's Status in the same
+  records commit.
