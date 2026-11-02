@@ -155,6 +155,79 @@ def test_a_failed_counts_write_keeps_the_last_good_counts(tmp_path, control, mon
     assert _counts(work) == {"chr1": 100}, "a write that failed part-way destroyed the counts"
 
 
+# The legacy multi-sample file (round 2: the external review) ---------------------------
+
+
+def _legacy_file(tmp_path, work, holds):
+    """Write ``<work>/S/update_cnv_dict.pkl``, the old multi-sample counts file: each
+    sample in ``holds`` gets 100 reads on chr1, made by a real run in another folder."""
+    seed = tmp_path / "seed"
+    assert _run("single", _bam(tmp_path, "0.bam", "chr1", 100), seed)["error_message"] is None
+    with open(seed / "S" / "S_copy_numbers.pkl", "rb") as f:
+        counts = pickle.load(f)
+    folder = work / "S"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "update_cnv_dict.pkl"
+    path.write_bytes(pickle.dumps({name: counts for name in holds}))
+    return path
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_failed_move_out_of_the_legacy_file_fails_the_run(tmp_path, control, monkeypatch, kind):
+    work = tmp_path / "run"
+    legacy = _legacy_file(tmp_path, work, ["S", "T"])
+    before = legacy.read_bytes()
+    real_save, calls = cnv_analysis._save_copy_numbers, []
+
+    def first_write_fails(path, counts):  # the move's write; the run's own save works
+        calls.append(path)
+        if len(calls) == 1:
+            raise OSError("rename failed")
+        return real_save(path, counts)
+
+    monkeypatch.setattr(cnv_analysis, "_save_copy_numbers", first_write_fails)
+    result = _run(kind, _bam(tmp_path, "2.bam", "chr2", 200), work)
+    assert result["error_message"], "the run went on without the sample's earlier counts"
+    assert not (work / "S" / "S_copy_numbers.pkl").exists(), "counts were saved without the legacy ones"
+    assert legacy.read_bytes() == before, "the legacy file was changed"
+
+    # The next run moves the counts and adds to them; the failed run's BAM is not in them.
+    monkeypatch.setattr(cnv_analysis, "_save_copy_numbers", real_save)
+    assert _run(kind, _bam(tmp_path, "3.bam", "chr2", 50), work)["error_message"] is None
+    assert _counts(work) == {"chr1": 100, "chr2": 50}
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_legacy_file_that_cannot_be_read_fails_the_run_and_is_kept(tmp_path, control, kind):
+    work = tmp_path / "run"
+    (work / "S").mkdir(parents=True)
+    legacy = work / "S" / "update_cnv_dict.pkl"
+    legacy.write_bytes(b"not a pickle")
+    result = _run(kind, _bam(tmp_path, "2.bam", "chr2", 200), work)
+    assert result["error_message"], "the run went on with no counts"
+    assert not (work / "S" / "S_copy_numbers.pkl").exists(), "counts were saved without the legacy ones"
+    assert legacy.read_bytes() == b"not a pickle", "the legacy file was changed"
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_legacy_file_is_moved_and_added_to(tmp_path, control, kind):
+    # Control: the move works as before.
+    work = tmp_path / "run"
+    legacy = _legacy_file(tmp_path, work, ["S", "T"])
+    assert _run(kind, _bam(tmp_path, "2.bam", "chr2", 200), work)["error_message"] is None
+    assert _counts(work) == {"chr1": 100, "chr2": 200}
+    assert legacy.exists()
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_legacy_file_without_the_sample_starts_from_none(tmp_path, control, kind):
+    # Control: a legacy file that doesn't hold this sample is not a failure.
+    work = tmp_path / "run"
+    _legacy_file(tmp_path, work, ["T"])
+    assert _run(kind, _bam(tmp_path, "2.bam", "chr2", 200), work)["error_message"] is None
+    assert _counts(work) == {"chr2": 200}
+
+
 def test_the_workflow_still_imports_the_cnv_handler():
     from robin import workflow_ray
 

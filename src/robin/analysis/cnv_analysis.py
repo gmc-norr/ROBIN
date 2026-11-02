@@ -176,7 +176,8 @@ def _counts_path(sample_output_dir: str, sample_id: str) -> str:
 
 def _load_copy_numbers(sample_output_dir: str, sample_id: str, logger) -> dict:
     """The sample's read counts so far, read from disk: no file means none yet. Counts
-    that can't be read raise, so the run fails and the file is kept as it is."""
+    that can't be read raise, so the run fails and the file is kept as it is. So does
+    a legacy file that can't be read or moved: going on would save over its counts."""
     path = _counts_path(sample_output_dir, sample_id)
     # Backward compatibility: migrate from the old multi-sample dict to the per-sample file
     legacy_dict_path = os.path.join(sample_output_dir, "update_cnv_dict.pkl")
@@ -185,11 +186,20 @@ def _load_copy_numbers(sample_output_dir: str, sample_id: str, logger) -> dict:
         try:
             with open(legacy_dict_path, "rb") as f:
                 update_cnv_dict = pickle.load(f)
-            if sample_id in update_cnv_dict:
-                _save_copy_numbers(path, update_cnv_dict[sample_id])
-                logger.info(f"Migrated copy_numbers for {sample_id} to per-sample file")
         except Exception as e:
-            logger.warning(f"Could not migrate legacy copy_numbers: {e}")
+            raise RuntimeError(
+                f"Could not read the sample's legacy CNV read counts ({legacy_dict_path}): {e}. "
+                "The file is kept; no BAM was added"
+            ) from e
+        if sample_id in update_cnv_dict:
+            try:
+                _save_copy_numbers(path, update_cnv_dict[sample_id])
+            except Exception as e:
+                raise RuntimeError(
+                    f"Could not move the sample's CNV read counts from {legacy_dict_path} "
+                    f"to {path}: {e}. The legacy file is kept; no BAM was added"
+                ) from e
+            logger.info(f"Migrated copy_numbers for {sample_id} to per-sample file")
     if not os.path.exists(path):
         logger.debug("No previous copy_numbers found, starting fresh")
         return {}
