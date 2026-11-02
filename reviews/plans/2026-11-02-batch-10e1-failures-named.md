@@ -115,3 +115,22 @@ The 16 new tests: **13 failed, each on its own assertion; the 3 guards passed** 
   - P12: the GUI sets its fixed text again → L7.
   - N0: a no-op change → nothing fails.
 - **S5:** `robin.yml` and `pyproject.toml` unchanged.
+
+## Result (2026-11-02, on `3ab033c`): supported
+
+Every pass rule holds. Three tests were added after the lock, one for each change found while coding; S3's count grows by them. The output files are in this session's scratchpad folder.
+
+- **S1, before** (`fe10f4b`, `before_10e1_full.txt`):
+  - The 16 planned tests: 13 failed, each on its own assertion, and the 3 guards passed, as locked.
+  - The 3 added after the lock: L8 and F7 failed, and the guard G4 passed.
+- **Found after the lock**, each with its own test and mutant:
+  - **The GUI's own run** of the check (`run_lga_analysis_direct`) threw its job errors away (`add_error` was a no-op), then said "completed successfully!" in green. It now keeps them, and shows the last one in red. Test L8 (`test_the_gui_run_button_keeps_the_jobs_errors`), mutant P13.
+  - **Finalize's own accumulation** only kept its result, so its BAMs that weren't added showed nowhere until an SNP run refused. It now passes the entries on. Test F7 (`test_finalize_shows_a_bam_its_accumulation_could_not_add`), mutant P14.
+  - **A staged set counts as taken only once its files begin to move**, so a claim that fails before that reports nothing; its files stay staged. Guard G4 (`test_a_claim_that_fails_before_any_file_moves_reports_nothing`), mutant P15.
+- **S2, after:** the 11 files: 259 passed (`after_10e1.txt`).
+- **S3, full suite:** 894 passed: 875 + 19 (`suite_10e1.txt`).
+  - The first full run had 2 failures in `test_lga_status_timer.py`. That test compiles `check_lga_status` on its own, and the new red-or-green choice read `lga_errors` from the function around it.
+  - Fixed in the code, before the commit: the flag rides in `lga_status`. No test changed.
+- **S4, mutants** (`mutate_10e1.py`; only pytest exit 1 counts as caught; `mutants_10e1.txt`): P1–P15 each caught by its own test. N0 survived (10 and 9 passed).
+- **S5, pins:** `git diff fe10f4b -- robin.yml pyproject.toml` is empty.
+- **Recorded, not fixed:** the GUI's SNP button also builds its job with a no-op `add_error` (`coverage.py`, the SNP section).
