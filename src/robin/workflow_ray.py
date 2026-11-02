@@ -43,6 +43,7 @@ import uuid
 import asyncio
 import argparse
 from collections import deque
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple, Callable
 import inspect
@@ -70,7 +71,13 @@ from robin.bam_submission import (
     matches_any_pattern as _matches_any_pattern,
     matches_no_ignores as _matches_no_ignores,
 )
-from robin.file_ledger import BamIntake, Decision, record_step_end, record_step_start
+from robin.file_ledger import (
+    BamIntake,
+    Decision,
+    file_failure_count,
+    record_step_end,
+    record_step_start,
+)
 
 try:
     from rich.progress import (
@@ -844,6 +851,7 @@ def _wrap_real_handler(
         record_step_start(job, job_type)
         outcome = None
         errors_before = len(job.context.errors or [])
+        failures_before = file_failure_count(job)  # files this job reports as failed (ledger)
         try:
             if py_handler is None:
                 import_reason = _HANDLER_IMPORT_ERRORS.get(job_type)
@@ -954,7 +962,8 @@ def _wrap_real_handler(
                 had_error = outcome is not None and outcome["status"] == "failed"
                 fallback_result = {"status": "failed"} if had_error else {"status": "success"}
                 job.context.add_result(job_type, fallback_result)
-            record_step_end(job, job_type)  # the BAM ledger (JOB-2), with the result's status
+            # The BAM ledger (JOB-2): the result's status, the job's outcome, files that failed
+            record_step_end(job, job_type, outcome, failures_before)
             if outcome is not None:
                 # Stored in the context so the judges (another process) read the same outcome.
                 try:
@@ -1019,16 +1028,20 @@ def process_single_file_in_batch(context: WorkflowContext, job_type: str, index:
 
 
 # Real wrappers
-preprocessing_handler_remote = ray.remote(
+# The per-BAM steps add a BAM's data to its sample's totals: Ray must not run one again after
+# its worker died (its default is 3 retries), or the data is added twice (JOB-2). The step
+# fails instead, and after a restart the ledger shows it as cut short.
+_NO_RETRY = ray.remote(max_retries=0)
+preprocessing_handler_remote = _NO_RETRY(
     _wrap_real_handler(_preprocessing_handler, "preprocessing")
 )
-bed_conversion_handler_remote = ray.remote(
+bed_conversion_handler_remote = _NO_RETRY(
     _wrap_real_handler(_bed_conversion_handler, "bed_conversion")
 )
-mgmt_handler_remote = ray.remote(_wrap_real_handler(_mgmt_handler, "mgmt"))
-cnv_handler_remote = ray.remote(_wrap_real_handler(_cnv_handler, "cnv"))
-target_handler_remote = ray.remote(_wrap_real_handler(_target_handler, "target"))
-fusion_handler_remote = ray.remote(_wrap_real_handler(_fusion_handler, "fusion"))
+mgmt_handler_remote = _NO_RETRY(_wrap_real_handler(_mgmt_handler, "mgmt"))
+cnv_handler_remote = _NO_RETRY(_wrap_real_handler(_cnv_handler, "cnv"))
+target_handler_remote = _NO_RETRY(_wrap_real_handler(_target_handler, "target"))
+fusion_handler_remote = _NO_RETRY(_wrap_real_handler(_fusion_handler, "fusion"))
 sturgeon_handler_remote = ray.remote(_wrap_real_handler(_sturgeon_handler, "sturgeon"))
 nanodx_handler_remote = ray.remote(_wrap_real_handler(_nanodx_handler, "nanodx"))
 pannanodx_handler_remote = ray.remote(
@@ -2500,14 +2513,16 @@ class Coordinator:
             )
 
     def record_cut_short_steps(self, rows: List[Dict[str, Any]]) -> None:
-        """Steps that were running for a BAM when ROBIN last stopped (from the BAM ledger,
-        JOB-2). They are not run again, as they may have added their data; each is a failed
-        file (``failure_kind`` "cut_short"), shown where failed files are."""
+        """A BAM's steps that failed or may be incomplete, from the BAM ledger (JOB-2), shown at
+        every start: ``failure_kind`` "cut_short" (running when ROBIN stopped) or
+        "failed_before" (failed in an earlier session). None is run again; each is a failed
+        file, shown where failed files are."""
         for r in rows or []:
             job_type = str(r.get("job_type", ""))
             path = str(r.get("filepath", ""))
             text = str(r.get("error", ""))
             sid = str(r.get("sample_id", "") or "unknown")
+            kind = str(r.get("failure_kind") or "cut_short")
             self.file_failed_by_type[job_type] = self.file_failed_by_type.get(job_type, 0) + 1
             self._failed_jobs_log.append({
                 "sample_id": sid,
@@ -2515,7 +2530,7 @@ class Coordinator:
                 "job_type": job_type,
                 "error": text[:1500],
                 "is_oom": False,
-                "failure_kind": "cut_short",
+                "failure_kind": kind,
             })
             self._add_event(
                 "file_failed",
@@ -2523,7 +2538,7 @@ class Coordinator:
                 job_type=job_type,
                 file=path,
                 error=text[:EVENT_ERROR_CHARS],
-                step="cut_short",
+                step=kind,
             )
 
     def _record_file_failures(self, job: Job, ctx: WorkflowContext) -> None:
@@ -3207,14 +3222,18 @@ class Coordinator:
         """Convert BatchedJob objects to regular Job objects for processing"""
         regular_jobs = []
         for batched_job in batched_jobs:
-            # Create a regular job that will handle the batch
+            # The job's own context: the first BAM's, with its own metadata. A BAM's steps share
+            # its context, so writing the batch list into it would change another step's batch
+            # still waiting to run (JOB-2 review). Results, history and errors stay the BAM's.
+            first = batched_job.contexts[0]
+            primary = dataclasses.replace(first, metadata=dict(first.metadata))
             regular_job = Job(
                 job_id=batched_job.job_id,
                 job_type=batched_job.job_type,
                 origin=batched_job.origin,
                 workflow=batched_job.workflow,
                 step=batched_job.step,
-                context=batched_job.contexts[0]  # Use first context as primary
+                context=primary,
             )
             # Store batch information in metadata
             regular_job.context.metadata["_batched_job"] = batched_job

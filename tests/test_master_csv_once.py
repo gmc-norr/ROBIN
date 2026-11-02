@@ -123,10 +123,14 @@ def test_a_master_csv_from_before_this_change_is_added_to(tmp_path):
     path = os.path.join(str(work), SAMPLE, "master.csv")
     row = _master(work)
     row.pop("bams_added", None)
+    row.pop("last_bam_added", None)  # round 2: the record moved to its own list file
     with open(path, "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=list(row))
         writer.writeheader()
         writer.writerow(row)
+    listed = os.path.join(str(work), SAMPLE, "master_csv_bams.txt")
+    if os.path.exists(listed):
+        os.remove(listed)
     _run(b, work)
     assert _counts(work) == _sum(_counts(tmp_path / "wa"), _counts(tmp_path / "wb"))
 
@@ -168,3 +172,52 @@ def test_a_bam_is_known_by_its_bytes(tmp_path):
     shutil.copyfile(a, copy)
     assert bam_key(a) == bam_key(str(copy))
     assert bam_key(a) != bam_key(b)
+
+
+# Round 2: the external review's finding 3 ----------------------------------------------------
+
+
+def _add(manager, key, mapped):
+    return manager.update_master_csv(SAMPLE, {"mapped_reads": mapped}, {"state": "pass"}, key)
+
+
+def test_a_sample_with_4000_bams_keeps_a_master_csv_every_reader_can_read(tmp_path, monkeypatch):
+    # The list of counted BAMs grew in one CSV cell: past 3,640 BAMs, Python's csv module (at its
+    # default field limit) can't read the row, and the panel lookup falls back to rCNS2.
+    assert csv.field_size_limit() <= 131072, "something raised the csv field limit: this test can't tell"
+    monkeypatch.setattr(os, "fsync", lambda fd: None)  # speed only
+    manager = MasterCSVManager(str(tmp_path))
+    for i in range(4000):
+        assert manager.update_master_csv(SAMPLE, {}, {"state": "pass"}, f"{i:032x}")
+    manager.update_analysis_panel(SAMPLE, "AML")
+    row = _master(tmp_path)  # csv.DictReader, as the panel lookup reads it
+    assert (row["analysis_panel"], int(float(row["counter_bam_passed"]))) == ("AML", 4000)
+
+
+def test_a_stop_between_master_csv_and_its_list_counts_the_bam_once(tmp_path, monkeypatch):
+    manager = MasterCSVManager(str(tmp_path))
+    real = MasterCSVManager._append_counted_key
+
+    def stopped(self, path, key):
+        raise OSError("synthetic: ROBIN stopped after writing master.csv")
+
+    monkeypatch.setattr(MasterCSVManager, "_append_counted_key", stopped)
+    with pytest.raises(OSError):
+        _add(manager, "a" * 32, 5)
+    monkeypatch.setattr(MasterCSVManager, "_append_counted_key", real)
+    assert _add(manager, "a" * 32, 5) is False, "a BAM master.csv already counts was counted again"
+    assert _add(manager, "b" * 32, 7) is True
+    assert int(float(_master(tmp_path)["counter_mapped_count"])) == 12
+
+
+def test_a_list_cut_off_mid_key_is_repaired(tmp_path):
+    manager = MasterCSVManager(str(tmp_path))
+    _add(manager, "a" * 32, 5)
+    listed = os.path.join(str(tmp_path), SAMPLE, "master_csv_bams.txt")
+    with open(listed, "r+b") as fh:
+        fh.truncate(10)  # a stop part-way through writing the key
+    assert _add(manager, "a" * 32, 5) is False, "a BAM master.csv already counts was counted again"
+    assert _add(manager, "b" * 32, 7) is True
+    assert int(float(_master(tmp_path)["counter_mapped_count"])) == 12
+    with open(listed) as fh:
+        assert fh.read().split() == ["a" * 32, "b" * 32]

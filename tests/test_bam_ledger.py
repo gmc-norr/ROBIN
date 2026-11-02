@@ -164,7 +164,8 @@ def test_after_a_restart_only_the_steps_a_bam_never_started_run(tmp_path):
     assert again[0].context.metadata.get("only_steps") == ["bed_conversion", "mgmt", "fusion"]
 
 
-def test_a_step_cut_short_by_a_stop_is_not_run_again_and_is_reported_once(tmp_path):
+def test_a_step_cut_short_by_a_stop_is_not_run_again_and_is_reported_at_each_start(tmp_path):
+    # Round 2 ruling (the user's choice): reported at every start, not once.
     from robin.file_ledger import record_step_start
 
     bam = _bam(tmp_path / "run")
@@ -176,7 +177,8 @@ def test_a_step_cut_short_by_a_stop_is_not_run_again_and_is_reported_once(tmp_pa
     assert [(r["job_type"], r["filepath"]) for r in second.cut_short] == [("cnv", bam)]
     assert "may be incomplete" in second.cut_short[0]["error"]
     third = FakeCoord()
-    assert _scan(third, tmp_path / "run", tmp_path / "work") == [] and third.cut_short == [], "reported twice"
+    assert _scan(third, tmp_path / "run", tmp_path / "work") == [], "a step cut short was run again"
+    assert [(r["job_type"], r["filepath"]) for r in third.cut_short] == [("cnv", bam)], "not reported at the next start"
 
 
 def test_a_bam_whose_preprocessing_was_cut_short_runs_again(tmp_path):
@@ -325,6 +327,201 @@ def test_a_ledger_that_cannot_be_read_stops_the_intake_and_a_torn_last_line_is_i
     (tmp_path / LEDGER_NAME).write_text(good + "not json\n" + good)
     with pytest.raises(LedgerError):
         BamIntake(str(tmp_path), PLAN)
+
+
+# Round 2: the external review's findings ---------------------------------------------------
+
+
+def test_a_torn_last_line_is_cut_off_before_the_next_record(tmp_path):
+    # B1: the next record must not be glued to the torn one.
+    from robin.file_ledger import FileLedger
+
+    led = FileLedger(str(tmp_path))
+    led.append([{"e": "take", "key": "k0", "file": "/data/a.bam"}])
+    with open(led.path, "ab") as f:
+        f.write(b'{"e": "start", "key": "k0", "st')  # a stop part-way through a record
+    led.load()
+    led.append([{"e": "take", "key": "k1", "file": "/data/b.bam"}])  # the next session takes a BAM in
+    assert sorted(led.load()) == ["k0", "k1"]
+
+
+def _ctx(i, work=None, module=wr):
+    metadata = {"bam_key": f"k{i}", "bam_metadata": {"sample_id": "S"}}
+    if work is not None:
+        metadata["work_dir"] = str(work)
+    return module.WorkflowContext(filepath=f"/data/S_pass_{i}.bam", metadata=metadata)
+
+
+def _ray_jobs(step, contexts):
+    q = wr.job_queue_of(step)
+    return [wr.Job(next(_ids), step, q, [f"{q}:{step}"], 0, c) for c in contexts]
+
+
+def _simple_jobs(step, contexts):
+    return [ws.Job(next(_ids), step, c, "fast", [f"fast:{step}"]) for c in contexts]
+
+
+def test_two_batches_that_share_a_bam_keep_their_own_lists(tmp_path):
+    # Finding 1: a BAM's steps share its context; a later batch must not change an earlier one's list.
+    from robin.file_ledger import FileLedger
+
+    a, b, c = (_ctx(i, tmp_path) for i in range(3))
+    batcher = wr.SampleJobBatcher()
+    coord = CoordinatorClass(target_panel="rCNS2", preset="standard", enable_batching=False)
+    (cnv_job,) = coord._convert_batched_jobs([batcher._create_batched_job(_ray_jobs("cnv", [a, b]), "S", "cnv")])
+    coord._convert_batched_jobs([batcher._create_batched_job(_ray_jobs("mgmt", [a, c]), "S", "mgmt")])
+    listed = [x.filepath for x in cnv_job.context.metadata["_batched_job"].contexts]
+    assert listed == [a.filepath, b.filepath], "the MGMT batch changed the CNV batch's BAMs"
+    wr._wrap_real_handler(_noop, "cnv")(cnv_job)
+    state = FileLedger(str(tmp_path)).load()
+    assert sorted(k for k in state if "cnv" in state[k].steps) == ["k0", "k1"]
+
+
+def test_two_non_ray_batches_that_share_a_bam_keep_their_own_lists():
+    a, b, c = (_ctx(i, module=ws) for i in range(3))
+    batcher = ws.SampleJobBatcher()
+    mgr = ws.WorkflowManager(enable_batching=False)
+    (cnv_job,) = mgr._convert_batched_jobs([batcher._create_batched_job(_simple_jobs("cnv", [a, b]), "S", "cnv")])
+    mgr._convert_batched_jobs([batcher._create_batched_job(_simple_jobs("mgmt", [a, c]), "S", "mgmt")])
+    listed = [x.filepath for x in cnv_job.context.metadata["_batched_job"].contexts]
+    assert listed == [a.filepath, b.filepath], "the MGMT batch changed the CNV batch's BAMs"
+
+
+def test_a_converted_batch_sees_its_batch_and_its_results_reach_the_bam():
+    # Control: the batch's job still gets its batch, and (non-Ray, one process) what it writes
+    # reaches the first BAM's own context, as before.
+    a, b = (_ctx(i, module=ws) for i in range(2))
+    batcher = ws.SampleJobBatcher()
+    mgr = ws.WorkflowManager(enable_batching=False)
+    (job,) = mgr._convert_batched_jobs([batcher._create_batched_job(_simple_jobs("cnv", [a, b]), "S", "cnv")])
+    assert [x.filepath for x in job.context.metadata["_batched_job"].contexts] == [a.filepath, b.filepath]
+    job.context.add_result("cnv", {"status": "success"})
+    assert a.results.get("cnv") == {"status": "success"}
+
+
+_PER_BAM_REMOTES = {
+    "preprocessing": "preprocessing_handler_remote",
+    "bed_conversion": "bed_conversion_handler_remote",
+    "mgmt": "mgmt_handler_remote",
+    "cnv": "cnv_handler_remote",
+    "target": "target_handler_remote",
+    "fusion": "fusion_handler_remote",
+}
+
+
+def test_a_per_bam_step_is_not_run_again_when_its_worker_dies():
+    # Finding 2: Ray retries a task whose worker died (default 3), which would add its data twice.
+    got = {t: getattr(wr, name)._default_options.get("max_retries") for t, name in _PER_BAM_REMOTES.items()}
+    assert got == {t: 0 for t in _PER_BAM_REMOTES}
+
+
+def test_a_classifier_keeps_rays_retries():
+    # Control: the per-sample classifiers are left as they were (they add nothing up).
+    assert wr.sturgeon_handler_remote._default_options.get("max_retries") is None
+
+
+def _broken(text):
+    def handler(job):
+        raise RuntimeError(text)
+
+    return handler
+
+
+def _rows(coord):
+    return [(r["job_type"], r["filepath"], r.get("failure_kind")) for r in coord.cut_short]
+
+
+def test_a_step_that_failed_is_reported_at_each_start_and_not_run(tmp_path):
+    # Finding 5: an ended failure must not disappear at the next start.
+    bam = _bam(tmp_path / "run")
+    first = _scan(FakeCoord(), tmp_path / "run", tmp_path / "work")
+    _work_through(first[0], steps=["bed_conversion", "mgmt", "target", "fusion"])
+    with pytest.raises(RuntimeError):
+        wr._wrap_real_handler(_broken("synthetic CNV failure"), "cnv")(_step_job(first[0], "cnv"))
+    for _ in range(2):  # every start
+        coord = FakeCoord()
+        assert _scan(coord, tmp_path / "run", tmp_path / "work") == [], "a failed step was run again"
+        assert _rows(coord) == [("cnv", bam, "failed_before")]
+        assert "synthetic CNV failure" in coord.cut_short[0]["error"]
+
+
+def test_a_preprocessing_that_failed_is_reported_at_the_next_start_and_not_run(tmp_path):
+    bam = _bam(tmp_path / "run")
+    first = _scan(FakeCoord(), tmp_path / "run", tmp_path / "work")
+    with pytest.raises(RuntimeError):
+        _work_through(first[0], steps=[], preprocessing=_broken("synthetic preprocessing failure"))
+    coord = FakeCoord()
+    assert _scan(coord, tmp_path / "run", tmp_path / "work") == []
+    assert _rows(coord) == [("preprocessing", bam, "failed_before")]
+
+
+def test_a_bam_that_failed_inside_a_batch_that_went_on_is_reported_at_the_next_start(tmp_path):
+    a = _bam(tmp_path / "run", "S_pass_0.bam", 0)
+    b = _bam(tmp_path / "run", "S_pass_1.bam", 1)
+    first = _scan(FakeCoord(), tmp_path / "run", tmp_path / "work")
+    by_path = {j.context.filepath: j for j in first}
+    for j in first:
+        _work_through(j, steps=["bed_conversion", "mgmt", "target", "fusion"])
+    q = wr.job_queue_of("cnv")
+    contexts = [by_path[a].context, by_path[b].context]
+    batch = wr.BatchedJob(next(_ids), "cnv", q, [f"{q}:cnv"], 0, contexts, "b1", "S")
+    job = wr.Job(batch.job_id, "cnv", q, [f"{q}:cnv"], 0, contexts[0])
+    job.context.metadata["_batched_job"] = batch
+
+    def one_file_fails(job):  # the batch went on; one of its BAMs failed (batch 7's file failures)
+        job.context.add_metadata("file_failures", [{"file": b, "error": "synthetic: unreadable BAM", "step": "bam"}])
+
+    wr._wrap_real_handler(one_file_fails, "cnv")(job)
+    coord = FakeCoord()
+    assert _scan(coord, tmp_path / "run", tmp_path / "work") == []
+    assert _rows(coord) == [("cnv", b, "failed_before")]
+    assert "synthetic: unreadable BAM" in coord.cut_short[0]["error"]
+
+
+def test_an_expected_failure_of_a_fail_only_bam_is_not_reported_at_the_next_start(tmp_path):
+    # Control: a fail-only BAM's expected failure (batch 7) is not a failure.
+    _bam(tmp_path / "run", "S_fail_0.bam", 0)
+    first = _scan(FakeCoord(), tmp_path / "run", tmp_path / "work")
+    assert first[0].context.metadata.get("fail_only_bam_submission")
+    _work_through(first[0], steps=["mgmt", "cnv", "target", "fusion"])
+    wr._wrap_real_handler(_broken("synthetic: fail reads not supported"), "bed_conversion")(
+        _step_job(first[0], "bed_conversion")
+    )
+    coord = FakeCoord()
+    assert _scan(coord, tmp_path / "run", tmp_path / "work") == [] and coord.cut_short == []
+
+
+def test_a_bam_whose_steps_all_ended_well_reports_nothing_at_the_next_start(tmp_path):
+    # Control.
+    _bam(tmp_path / "run")
+    first = _scan(FakeCoord(), tmp_path / "run", tmp_path / "work")
+    _work_through(first[0])
+    coord = FakeCoord()
+    assert _scan(coord, tmp_path / "run", tmp_path / "work") == [] and coord.cut_short == []
+
+
+def test_a_cut_short_step_whose_report_was_lost_is_reported_at_the_next_start(tmp_path):
+    # Finding 4: a second stop after the intake decided, before the report.
+    from robin.file_ledger import BamIntake, record_step_start
+
+    bam = _bam(tmp_path / "run")
+    first = _scan(FakeCoord(), tmp_path / "run", tmp_path / "work")
+    _work_through(first[0], steps=["bed_conversion", "mgmt", "target", "fusion"])
+    record_step_start(_step_job(first[0], "cnv"), "cnv")  # session 1 stopped while CNV ran
+    BamIntake(str(tmp_path / "work"), PLAN).decide(bam)  # session 2 decided, then stopped before reporting
+    coord = FakeCoord()
+    assert _scan(coord, tmp_path / "run", tmp_path / "work") == []
+    assert _rows(coord) == [("cnv", bam, "cut_short")]
+
+
+def test_the_coordinator_keeps_the_kind_of_an_earlier_failure(tmp_path):
+    c = CoordinatorClass(target_panel="rCNS2", preset="standard", enable_batching=False)
+    c.set_work_dir(str(tmp_path))
+    c.record_cut_short_steps([{
+        "sample_id": "S", "filepath": "/data/S_pass_0.bam", "job_type": "cnv",
+        "error": "cnv failed for this BAM in an earlier session", "failure_kind": "failed_before",
+    }])
+    assert [(r["job_type"], r["failure_kind"]) for r in c._failed_jobs_log] == [("cnv", "failed_before")]
 
 
 # The non-Ray runner ------------------------------------------------------------------------

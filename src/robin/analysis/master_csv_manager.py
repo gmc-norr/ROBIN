@@ -6,17 +6,24 @@ This module provides functionality to create and update master.csv files
 for each sample, tracking comprehensive metadata across multiple BAM files.
 """
 
-import json
 import os
+import re
 import tempfile
 import pandas as pd
-from typing import Dict, Any, List
+from typing import Dict, Any, Set
 from dataclasses import dataclass
 import logging
 import time
 
 # Per-sample file lock for master.csv read-modify-write
 from robin.analysis.master_bed_generator import FileLock
+from robin.file_ledger import append_whole_lines
+
+# The keys of the BAMs a sample's master.csv counts, one per line, next to it (JOB-2). Not in
+# master.csv: one cell can't hold thousands of keys (Python's csv reads at most 131,072
+# characters a field).
+COUNTED_BAMS_NAME = "master_csv_bams.txt"
+_KEY = re.compile(r"[0-9a-f]{32}")
 
 
 @dataclass
@@ -59,21 +66,31 @@ class MasterCSVManager:
     ) -> bool:
         """Add one BAM's counts to the sample's master.csv, once (JOB-2).
 
-        A BAM already counted (its ``bam_key`` is in ``bams_added``) changes nothing. The
-        counts and the record are written together, under the per-sample lock. Returns
-        True when the BAM was added, False when it was already counted. Any failure
-        raises, and the file is left as it was.
+        A BAM already counted (its ``bam_key`` is in ``master_csv_bams.txt``, the list next
+        to master.csv) changes nothing. Under the per-sample lock, master.csv is written with
+        the counts and ``last_bam_added`` set to the key, then the key is appended to the
+        list. If a stop came between those two writes, the next update finds
+        ``last_bam_added`` missing from the list and appends it first. Returns True when the
+        BAM was added, False when it was already counted. Any failure raises; a master.csv
+        or list that can't be read is left as it was.
         """
         logger = logging.getLogger("robin.master_csv")
         sample_dir = os.path.join(self.work_dir, sample_id)
         os.makedirs(sample_dir, exist_ok=True)
         master_csv_path = os.path.join(sample_dir, "master.csv")
+        list_path = os.path.join(sample_dir, COUNTED_BAMS_NAME)
         lock_path = self._get_master_csv_lock_path(sample_id)
 
         with FileLock(lock_path, timeout=10.0):
             existing_data = self._load_existing_data(master_csv_path)
-            counted = self._counted_bams(existing_data, master_csv_path)
-            if bam_key in counted:
+            listed = self._read_counted_keys(list_path)
+            last = str(existing_data.get("last_bam_added") or "")
+            if last and last not in listed:
+                # The last update wrote master.csv and stopped before its list: finish it
+                logger.warning(f"master.csv for {sample_id} counts a BAM its list misses; adding it to {list_path}")
+                self._append_counted_key(list_path, last)
+                listed.add(last)
+            if bam_key in listed:
                 logger.info(f"master.csv for {sample_id} already counts this BAM ({bam_key}); not added again")
                 return False
             if bam_info.get("state") == "pass":
@@ -83,34 +100,44 @@ class MasterCSVManager:
             existing_data = self._update_combined_counters(existing_data, bam_data)
             existing_data = self._update_run_info(existing_data, bam_info)
             existing_data = self._update_bam_tracking(existing_data, bam_info)
-            existing_data["bams_added"] = json.dumps(counted + [bam_key])
+            existing_data["last_bam_added"] = bam_key
             self._write_csv_internal(existing_data, master_csv_path)
+            self._append_counted_key(list_path, bam_key)
 
         logger.info(f"Updated master.csv for sample {sample_id}")
         return True
 
     @staticmethod
-    def _counted_bams(data: Dict[str, Any], csv_path: str) -> List[str]:
-        """The keys of the BAMs master.csv counts (``bams_added``, a JSON list)."""
-        raw = data.get("bams_added", "[]")
-        try:
-            keys = json.loads(raw) if isinstance(raw, str) else raw
-        except ValueError as e:
-            keys = e
-        if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
-            raise RuntimeError(
-                f"Could not read the record of counted BAMs in {csv_path} ({raw!r:.80}). "
-                "The file is kept; nothing was added"
-            )
+    def _read_counted_keys(list_path: str) -> Set[str]:
+        """The keys on the list of counted BAMs (none when there is no list). Text after the
+        last newline is a key a stop cut off, and is ignored; any other line that isn't a key
+        raises, and nothing is added."""
+        if not os.path.exists(list_path):
+            return set()
+        with open(list_path, "rb") as fh:
+            lines = fh.read().split(b"\n")
+        lines.pop()  # a torn last line, or "" after the final newline
+        keys = set()
+        for n, raw in enumerate(lines, 1):
+            text = raw.decode("ascii", errors="replace").strip()
+            if not _KEY.fullmatch(text):
+                raise RuntimeError(
+                    f"Could not read line {n} of {list_path}, the list of BAMs master.csv counts "
+                    f"({text[:40]!r}). The file is kept; nothing was added"
+                )
+            keys.add(text)
         return keys
+
+    def _append_counted_key(self, list_path: str, key: str) -> None:
+        append_whole_lines(list_path, (key + "\n").encode("ascii"))
 
     def _load_existing_data(self, csv_path: str) -> Dict[str, Any]:
         """
         Load existing data from CSV or create default structure.
 
-        A master.csv that exists but can't be read, doesn't hold exactly one row, or
-        whose record of counted BAMs isn't a list raises: starting again from zero would
-        write over the sample's counts. No file means a new sample (the defaults).
+        A master.csv that exists but can't be read, or doesn't hold exactly one row, raises:
+        starting again from zero would write over the sample's counts. No file means a new
+        sample (the defaults).
 
         No read locking is used because:
         1. Writers use atomic write-and-rename, so readers never see partial files
@@ -123,7 +150,8 @@ class MasterCSVManager:
         if os.path.exists(csv_path):
             # Read without locking - atomic writes ensure we never see partial data
             try:
-                df = pd.read_csv(csv_path)
+                # A BAM key is text: read as a number, "000…01" would become 1
+                df = pd.read_csv(csv_path, dtype={"last_bam_added": str})
             except Exception as e:
                 raise RuntimeError(
                     f"Could not read {csv_path}: {e}. The file is kept; nothing was added"
@@ -150,7 +178,7 @@ class MasterCSVManager:
             for field in string_fields:
                 if field in data and data[field] is not None:
                     data[field] = str(data[field])
-            self._counted_bams(data, csv_path)
+            data.pop("bams_added", None)  # this branch's first record, in one cell (unreleased)
 
         return data
     
@@ -189,9 +217,9 @@ class MasterCSVManager:
             "run_info_flow_cell": "",
             "bam_tracking_counter": 0,
             "bam_tracking_total_files": 0,
-            # Keys of the BAMs counted above (robin.bam_identity.bam_key), a JSON list:
-            # a BAM already on it is not counted again (JOB-2)
-            "bams_added": "[]",
+            # The key of the last BAM counted (robin.bam_identity.bam_key); the full list is in
+            # master_csv_bams.txt next to this file, and a BAM on it is not counted again (JOB-2)
+            "last_bam_added": "",
             # Analysis panel information
             "analysis_panel": "",
             # Samples overview (persisted GUI table aggregates)

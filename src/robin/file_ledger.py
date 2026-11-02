@@ -5,8 +5,10 @@ One append-only file per work folder, ``robin_bam_ledger.jsonl``, one JSON objec
 - ``{"e": "take", "key": K, "file": path}``: the intake took the BAM in.
 - ``{"e": "start", "key": K, "step": S, "sample": id, "file": path}``: a worker is about to
   run step S for the BAM (written before the handler runs).
-- ``{"e": "end", "key": K, "step": S, "status": st}``: step S ended for the BAM (after the
-  handler; ``"downstream"`` too for preprocessing: whether its steps follow).
+- ``{"e": "end", "key": K, "step": S, "status": st, "outcome": o}``: step S ended for the BAM
+  (after the handler). ``o`` is the job's outcome (success, failed or expected_failure), with
+  ``"error"`` when it failed; ``"file_failed"`` when this BAM failed inside a job that went
+  on; ``"downstream"`` for preprocessing: whether its steps follow.
 
 K is the BAM's key (``robin.bam_identity.bam_key``): a BAM is known by its bytes. Only the
 per-BAM steps are recorded (preprocessing and the five it starts); the per-sample ones
@@ -14,10 +16,11 @@ per-BAM steps are recorded (preprocessing and the five it starts); the per-sampl
 
 After a restart, for each BAM: a step that ended is skipped (success or not), a step that
 never started runs, and a step that started but never ended (it was running when ROBIN
-stopped) is not run again, because it may have added its data, and is reported once as
-possibly incomplete. Preprocessing is the exception: it counts a BAM once (batch 10d-1), so
-a BAM whose preprocessing never ended goes through it again, and a restarted BAM is sent
-through its preprocessing told which steps to start (``only_steps``).
+stopped) is not run again, because it may have added its data. Preprocessing is the
+exception: it counts a BAM once (batch 10d-1), so a BAM whose preprocessing never ended goes
+through it again, and a restarted BAM is sent through its preprocessing told which steps to
+start (``only_steps``). At every start, each step that failed or may be incomplete for the
+BAM is reported as a failed file (none is run again).
 """
 
 import fcntl
@@ -44,6 +47,48 @@ class LedgerError(RuntimeError):
     """The ledger can't be read or written: ROBIN can't tell which BAMs it has done."""
 
 
+def append_whole_lines(path: str, data: bytes) -> None:
+    """Append ``data`` (whole lines) to ``path`` under an exclusive flock, and fsync.
+
+    A torn last line, left by a stop part-way through an earlier append, is cut off first:
+    otherwise the new lines would join it, and the file could no longer be read.
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a+b") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            end = f.seek(0, os.SEEK_END)
+            keep = _whole_lines_end(f, end)
+            if keep < end:
+                _log.warning(
+                    f"Cutting off an unfinished last line of {path} ({end - keep} bytes, left by a stop)"
+                )
+                f.truncate(keep)
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def _whole_lines_end(f, end: int) -> int:
+    """Where the file's whole lines end: just after its last newline (0 if it has none)."""
+    if end == 0:
+        return 0
+    f.seek(end - 1)
+    if f.read(1) == b"\n":
+        return end
+    pos = end
+    while pos > 0:
+        size = min(65536, pos)
+        f.seek(pos - size)
+        i = f.read(size).rfind(b"\n")
+        if i >= 0:
+            return pos - size + i + 1
+        pos -= size
+    return 0
+
+
 def bam_is_complete(path: str) -> bool:
     """True when the BAM ends with the BGZF end-of-file block: its writer has closed it."""
     try:
@@ -64,6 +109,9 @@ class StepState:
     ended: bool = False
     status: Optional[str] = None
     downstream: Optional[bool] = None
+    outcome: Optional[str] = None  # the job's outcome: success, failed or expected_failure
+    error: str = ""
+    file_failed: Optional[str] = None  # this BAM failed inside a job that went on
 
 
 @dataclass
@@ -115,32 +163,27 @@ class FileLedger:
         if kind == "take":
             bam.file = rec.get("file") or bam.file
         elif kind == "start":
-            step = bam.steps.setdefault(rec["step"], StepState())
-            step.started, step.ended, step.status = True, False, None
+            bam.steps[rec["step"]] = StepState(started=True)
             bam.sample = rec.get("sample") or bam.sample
             bam.file = bam.file or rec.get("file") or ""
         elif kind == "end":
             step = bam.steps.setdefault(rec["step"], StepState())
             step.ended, step.status = True, rec.get("status")
             step.downstream = rec.get("downstream")
+            step.outcome = rec.get("outcome")
+            step.error = str(rec.get("error") or "")
+            step.file_failed = rec.get("file_failed")
         else:
             raise ValueError(f"unknown record kind {kind!r}")
 
     def append(self, records: List[dict]) -> None:
-        """Append the records in one write, under an exclusive flock, and fsync."""
+        """Append the records in one write, under an exclusive flock, and fsync (a torn last
+        line is cut off first)."""
         stamp = time.time()
         data = "".join(
             json.dumps({"v": 1, "t": stamp, **r}, sort_keys=True) + "\n" for r in records
         ).encode("utf-8")
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        with open(self.path, "ab") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        append_whole_lines(self.path, data)
 
 
 @dataclass
@@ -199,31 +242,56 @@ class BamIntake:
     def _resume(self, key: str, bam: BamState, path: str) -> Decision:
         pre = bam.steps.get("preprocessing")
         to_run = [s for s in self.after if s not in bam.steps]
-        cut = [s for s in self.after if s in bam.steps and bam.steps[s].started and not bam.steps[s].ended]
+        cut = [s for s in AFTER_PREPROCESSING if s in bam.steps and bam.steps[s].started and not bam.steps[s].ended]
         if pre is not None and pre.ended and not (pre.status == "success" and pre.downstream):
             to_run = []  # preprocessing failed or skipped the BAM: no steps follow
-        rows = []
         if cut:
             self._append([{"e": "end", "key": key, "step": s, "status": "cut_short"} for s in cut])
             for s in cut:
                 bam.steps[s].ended, bam.steps[s].status = True, "cut_short"
-                row = {
-                    "sample_id": bam.sample or "unknown",
-                    "filepath": path,
-                    "job_type": s,
-                    "error": (
-                        f"{s} was running for this BAM when ROBIN stopped: it may be incomplete "
-                        "for this BAM, and it is not run again (it may have added its data)"
-                    ),
-                }
-                rows.append(row)
-                _log.error(f"{os.path.basename(path)}: {row['error']}")
+        # Every start shows each step that failed or may be incomplete (none is run again)
+        rows = []
+        for s in PER_BAM_STEPS:
+            step = bam.steps.get(s)
+            found = _earlier_failure(s, step) if step is not None and step.ended else None
+            if found is None:
+                continue
+            kind, text = found
+            rows.append({
+                "sample_id": bam.sample or "unknown",
+                "filepath": path,
+                "job_type": s,
+                "error": text,
+                "failure_kind": kind,
+            })
+            _log.error(f"{os.path.basename(path)}: {text}")
         run = bool(to_run) or pre is None or not pre.ended
         return Decision(run, key, list(to_run) if run else None, rows, reason="resume")
 
     def _append(self, records: List[dict]) -> None:
         if self.ledger is not None:
             self.ledger.append(records)
+
+
+def _earlier_failure(step: str, state: StepState) -> Optional[Tuple[str, str]]:
+    """(failure_kind, text) for an ended step that was cut short or failed for this BAM; None
+    otherwise (a fail-only BAM's expected failure is not a failure)."""
+    if state.status == "cut_short":
+        return "cut_short", (
+            f"{step} was running for this BAM when ROBIN stopped: it may be incomplete for this "
+            "BAM, and it is not run again (it may have added its data)"
+        )
+    if state.outcome == "failed":
+        return "failed_before", (
+            f"{step} failed for this BAM in an earlier session ({state.error or 'no error text'}); "
+            "it is not run again"
+        )
+    if state.file_failed:
+        return "failed_before", (
+            f"{step} failed for this BAM in an earlier session, while its batch went on "
+            f"({state.file_failed}); it is not run again"
+        )
+    return None
 
 
 def _job_bams(job) -> List[Tuple[str, object]]:
@@ -269,21 +337,49 @@ def record_step_start(job, job_type: str) -> None:
         ) from e
 
 
-def record_step_end(job, job_type: str, fallback_status: str = "unknown") -> None:
-    """Record that ``job_type`` ended for each of the job's BAMs, with the result's status.
-    A failure is logged: after a restart the step then shows as cut short."""
+def file_failure_count(job) -> int:
+    """How many files the job's context lists as failed so far (taken before the handler, so
+    that only the files this job adds count: sibling jobs can share a context)."""
+    return len((getattr(job.context, "metadata", None) or {}).get("file_failures") or [])
+
+
+def record_step_end(
+    job, job_type: str, outcome: Optional[dict] = None, failures_before: int = 0
+) -> None:
+    """Record that ``job_type`` ended for each of the job's BAMs: the result's status, the
+    job's outcome (``job_outcome``: success, failed or expected_failure) with its error, and
+    for each BAM among the files the job reported as failed while it went on, that failure.
+    A failure to write is logged: after a restart the step then shows as cut short."""
     if job_type not in PER_BAM_STEPS:
         return
     bams, ledger = _job_bams(job), _ledger_of(job)
     if not bams or ledger is None:
         return
+    outcome = outcome or {"status": "failed"}
     result = (getattr(job.context, "results", None) or {}).get(job_type)
-    status = result.get("status") if isinstance(result, dict) and result.get("status") else fallback_status
-    extra = {}
+    status = (
+        result.get("status") if isinstance(result, dict) and result.get("status")
+        else outcome.get("status") or "failed"
+    )
+    extra: Dict[str, object] = {"outcome": outcome.get("status") or "failed"}
+    if extra["outcome"] == "failed":
+        extra["error"] = str(outcome.get("error") or "")[:500]
     if job_type == "preprocessing":
         skipped = bool((job.context.metadata or {}).get("skip_downstream"))
         extra["downstream"] = status == "success" and not skipped
+    failed_files: Dict[str, str] = {}
+    added = ((job.context.metadata or {}).get("file_failures") or [])[failures_before:]
+    for f in added:
+        if isinstance(f, dict) and f.get("file"):
+            failed_files[os.path.realpath(str(f["file"]))] = str(f.get("error") or "")[:500]
+    records = []
+    for k, c in bams:
+        rec = {"e": "end", "key": k, "step": job_type, "status": status, **extra}
+        text = failed_files.get(os.path.realpath(str(getattr(c, "filepath", "") or "")))
+        if text is not None:
+            rec["file_failed"] = text or "no error text"
+        records.append(rec)
     try:
-        ledger.append([{"e": "end", "key": k, "step": job_type, "status": status, **extra} for k, _ in bams])
+        ledger.append(records)
     except Exception as e:
         _log.error(f"Could not record the end of {job_type} in the BAM ledger: {e}")

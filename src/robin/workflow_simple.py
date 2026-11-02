@@ -5,6 +5,7 @@ import time
 import threading
 import queue
 import itertools
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Any, Set
@@ -29,7 +30,7 @@ except Exception:
     _RICH_AVAILABLE = False
 from robin.logging_config import get_job_logger
 from robin.job_outcome import JobReportedFailure, job_outcome
-from robin.file_ledger import BamIntake, record_step_end, record_step_start
+from robin.file_ledger import BamIntake, file_failure_count, record_step_end, record_step_start
 from robin.bam_submission import (
     FailOnlyWatchSession,
     detect_fail_only_bam_submission,
@@ -920,6 +921,7 @@ class WorkflowManager:
                     # The BAM ledger (JOB-2): the step's start is on record before it runs;
                     # if it can't be, the step doesn't run (raises), as a restart would run it again.
                     record_step_start(job, job.job_type)
+                    failures_before = file_failure_count(job)
                     owner = f"{job.job_id}:{job.job_type}"
                     _running_job.key = owner
                     outcome = None
@@ -936,9 +938,7 @@ class WorkflowManager:
                             raise
                     finally:
                         _running_job.key = None
-                        record_step_end(
-                            job, job.job_type, outcome["status"] if outcome else "failed"
-                        )
+                        record_step_end(job, job.job_type, outcome, failures_before)
                     if outcome["status"] == "expected_failure":
                         job.context.add_result(
                             job.job_type,
@@ -1303,11 +1303,14 @@ class WorkflowManager:
         """Convert BatchedJob objects to regular Job objects for processing"""
         regular_jobs = []
         for batched_job in batched_jobs:
-            # Create a regular job that will handle the batch
+            # The job's own context: the first BAM's, with its own metadata. A BAM's steps share
+            # its context, so writing the batch list into it would change another step's batch
+            # still waiting to run (JOB-2 review). Results, history and errors stay the BAM's.
+            first = batched_job.contexts[0]
             regular_job = Job(
                 job_id=batched_job.job_id,
                 job_type=batched_job.job_type,
-                context=batched_job.contexts[0],  # Use first context as primary
+                context=dataclasses.replace(first, metadata=dict(first.metadata)),
                 origin=batched_job.origin,
                 workflow=batched_job.workflow,
                 step=batched_job.step
