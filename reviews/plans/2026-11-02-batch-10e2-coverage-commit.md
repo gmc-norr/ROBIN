@@ -171,3 +171,29 @@ C7 records each sync, rename, removal, folder made and folder deleted, in order.
   - Q22: a finish takes it as lost without looking at `target.bam`'s header → C8 (merged).
   - Q23: a kept claim folder not synced after the install → C7 (kept).
 - **S5:** `robin.yml` and `pyproject.toml` unchanged.
+
+## Result (2026-11-03, on `2582814`): supported, with one test fixed after a mutant survived
+
+Every pass rule holds. One locked test, C5, had a blind spot that mutant Q13 found. C5 was fixed (below), and now catches Q13. The output files are in this session's scratchpad folder.
+
+- **S1, before** (`01d9edc`, `before_10e_locked_all.txt`), as measured before the lock:
+  - C1: 8 failed, and the first-file case passed.
+  - C2: 11 of 13 kill points broke, in both cases.
+  - C3–C8, R1 and its guard: failed.
+  - C0 (9 cases) and R1 legacy: passed.
+- **S2, after:** the 8 files: 183 passed (`after_10e2.txt`).
+- **S3, full suite:** 931 passed (`suite_10e2.txt`), with C5 as locked. The fixed C5 was then run alone:
+  - on this code it passes (`test_coverage_commit.py`: 28 passed, `after_10e2_c5fix.txt`);
+  - on `01d9edc` it still fails, as before ("no kill point left an install list").
+- **S4, mutants** (`mutate_10e2.py`, each run against the test the plan names; only pytest exit 1 counts as caught; `mutants_10e2.txt`, `mutants_10e2_q13.txt`):
+  - Q1–Q12 and Q14–Q23: each caught by its named test. N0 survived (57 passed).
+  - **Q13 survived the locked C5:** a finish that deletes `_commit/` without doing the list's steps passed. C5 checked the files only after a finish it had killed. A finish that ran through, unkilled, was never checked, and under Q13 the finish has no step to be killed at.
+  - **C5 fixed:** when the finish is not killed, its own result is checked too. Q13 is now caught. The fix only adds a check, and the test count stays 931.
+- **S5, pins:** `git diff 01d9edc -- robin.yml pyproject.toml` is empty.
+- **One change from the plan's wording:** the plan says finalize finishes a list "before it looks for claim folders". The code finishes it after finalize has waited for other workers' claims (`_claims_left`), and before it lists the claim folders still there.
+  - Why: a worker that dies while finalize waits for it leaves a list. Finishing before the wait would miss that list, and the worker's claim folder, already counted, would be listed.
+  - Not covered by a test: it needs a worker to die during the wait.
+- **Where the code lives** (`target_analysis.py`):
+  - `_commit_batch` prepares the files and returns the steps;
+  - the `TargetAnalysis` method `_finish_commit` finishes a list;
+  - the module helpers `_install`, `_install_batch_bam`, `_append_rows`, `_retire`, `_sync_file` and `_sync_dir` do the rest.
