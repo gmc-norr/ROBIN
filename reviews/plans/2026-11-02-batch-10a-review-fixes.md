@@ -65,3 +65,17 @@ On `f77bc5d` the four direct tests failed in 7 s, each after its own preconditio
 - Triggered jobs submitted from `_on_finish` (`submit_jobs` at 2813, 2860, 2865) still wait for global room, as new work. On `high`, where completions are handled one at a time, any such wait holds up every other completion, so these may block the same way. Older than this batch and not measured here; for a later batch of step 8.
 - The reviewer's note on timing: the Ray tests use a 6 s busy job and check that their requests arrived during it, so a slow machine fails them loudly rather than passing them wrongly. Gates in place of sleeps would make them exact; not done here.
 - Later batches of step 8 (10b–10e), and the `high` freeze.
+
+## Result (2026-11-02): supported
+
+Every pass rule holds.
+
+- **Before** (`f77bc5d`, measured before the lock, above): U1–U4 failed, each by its own assertion, and S2 failed with batching on.
+- **After** (`382588b`), `b10/final_checks_10ar.sh`:
+  - `test_job_requests_direct.py`, `test_job_requests.py`, `test_job_failures.py`, `test_file_failures.py` and `test_classifier_failures.py`: 249 passed (S2 with batching on among them).
+  - The four direct tests take about 2.5 s.
+- **Mutants:**
+  - N1–N4 were each caught (exit 1). N4, the half fix, was caught by U4 alone: U1–U3 passed, as the plan expected.
+  - The no-op control survived (17 passed).
+- **Full suite:** 757 passed (753 before, plus the 4 direct tests).
+- **Pins:** `git diff 0545e2f -- robin.yml pyproject.toml` is empty.
