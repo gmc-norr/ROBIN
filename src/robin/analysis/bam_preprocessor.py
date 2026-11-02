@@ -18,6 +18,7 @@ if sys.version_info < (3, 12):
 import pysam
 from dateutil import parser
 from robin.analysis.master_csv_manager import MasterCSVManager
+from robin.bam_identity import bam_key
 from robin.logging_config import get_job_logger
 
 
@@ -904,11 +905,17 @@ def bam_preprocessing_handler(job, center: str = None):
                 )
                 bam_stats = {key: metadata.extracted_data.get(key, 0) for key in _bam_stat_keys}
 
-                # Update master.csv
+                # Update master.csv: counted once, a BAM is known by its bytes (JOB-2)
                 csv_manager.update_master_csv(
-                    sample_id, bam_stats, metadata.extracted_data
+                    sample_id, bam_stats, metadata.extracted_data, bam_key(bam_path)
                 )
-                
+            except Exception as e:
+                # Reported as a failed file (the job and its other steps go on), not only logged
+                logger.error(f"Could not add {os.path.basename(bam_path)} to master.csv for {sample_id}: {e}")
+                failures = list(job.context.metadata.get("file_failures") or [])
+                failures.append({"file": bam_path, "error": f"{type(e).__name__}: {e}", "step": "master_csv"})
+                job.context.add_metadata("file_failures", failures)
+            else:
                 # Update analysis panel in master.csv (preserve from job context)
                 existing_target_panel = job.context.metadata.get("target_panel")
                 if existing_target_panel:
@@ -916,9 +923,6 @@ def bam_preprocessing_handler(job, center: str = None):
                     logger.info(f"Updated master.csv with analysis panel '{existing_target_panel}' for sample {sample_id}")
                 else:
                     logger.warning(f"No target_panel found in job context for sample {sample_id} - analysis_panel not set in master.csv")
-
-            except Exception as e:
-                logger.warning(f"Could not update master.csv for {sample_id}: {e}")
 
         # Step 5: Add result to context
         sample_id = metadata.extracted_data.get("sample_id", "unknown")

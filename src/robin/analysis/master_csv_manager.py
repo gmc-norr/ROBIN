@@ -6,10 +6,11 @@ This module provides functionality to create and update master.csv files
 for each sample, tracking comprehensive metadata across multiple BAM files.
 """
 
+import json
 import os
 import tempfile
 import pandas as pd
-from typing import Dict, Any
+from typing import Dict, Any, List
 from dataclasses import dataclass
 import logging
 import time
@@ -54,37 +55,63 @@ class MasterCSVManager:
             raise
 
     def update_master_csv(
-        self, sample_id: str, bam_data: Dict[str, Any], bam_info: Dict[str, Any]
-    ) -> None:
-        """Update or create master.csv file for a sample with new BAM data. Uses per-sample lock for full read-modify-write."""
+        self, sample_id: str, bam_data: Dict[str, Any], bam_info: Dict[str, Any], bam_key: str
+    ) -> bool:
+        """Add one BAM's counts to the sample's master.csv, once (JOB-2).
+
+        A BAM already counted (its ``bam_key`` is in ``bams_added``) changes nothing. The
+        counts and the record are written together, under the per-sample lock. Returns
+        True when the BAM was added, False when it was already counted. Any failure
+        raises, and the file is left as it was.
+        """
+        logger = logging.getLogger("robin.master_csv")
+        sample_dir = os.path.join(self.work_dir, sample_id)
+        os.makedirs(sample_dir, exist_ok=True)
+        master_csv_path = os.path.join(sample_dir, "master.csv")
+        lock_path = self._get_master_csv_lock_path(sample_id)
+
+        with FileLock(lock_path, timeout=10.0):
+            existing_data = self._load_existing_data(master_csv_path)
+            counted = self._counted_bams(existing_data, master_csv_path)
+            if bam_key in counted:
+                logger.info(f"master.csv for {sample_id} already counts this BAM ({bam_key}); not added again")
+                return False
+            if bam_info.get("state") == "pass":
+                existing_data = self._update_pass_counters(existing_data, bam_data)
+            else:
+                existing_data = self._update_fail_counters(existing_data, bam_data)
+            existing_data = self._update_combined_counters(existing_data, bam_data)
+            existing_data = self._update_run_info(existing_data, bam_info)
+            existing_data = self._update_bam_tracking(existing_data, bam_info)
+            existing_data["bams_added"] = json.dumps(counted + [bam_key])
+            self._write_csv_internal(existing_data, master_csv_path)
+
+        logger.info(f"Updated master.csv for sample {sample_id}")
+        return True
+
+    @staticmethod
+    def _counted_bams(data: Dict[str, Any], csv_path: str) -> List[str]:
+        """The keys of the BAMs master.csv counts (``bams_added``, a JSON list)."""
+        raw = data.get("bams_added", "[]")
         try:
-            sample_dir = os.path.join(self.work_dir, sample_id)
-            os.makedirs(sample_dir, exist_ok=True)
-            master_csv_path = os.path.join(sample_dir, "master.csv")
-            lock_path = self._get_master_csv_lock_path(sample_id)
-
-            with FileLock(lock_path, timeout=10.0):
-                existing_data = self._load_existing_data(master_csv_path)
-                if bam_info.get("state") == "pass":
-                    existing_data = self._update_pass_counters(existing_data, bam_data)
-                else:
-                    existing_data = self._update_fail_counters(existing_data, bam_data)
-                existing_data = self._update_combined_counters(existing_data, bam_data)
-                existing_data = self._update_run_info(existing_data, bam_info)
-                existing_data = self._update_bam_tracking(existing_data, bam_info)
-                self._write_csv_internal(existing_data, master_csv_path)
-
-            logger = logging.getLogger("robin.master_csv")
-            logger.info(f"Updated master.csv for sample {sample_id}")
-
-        except Exception as e:
-            logger = logging.getLogger("robin.master_csv")
-            logger.error(f"Error updating master.csv for {sample_id}: {e}")
+            keys = json.loads(raw) if isinstance(raw, str) else raw
+        except ValueError as e:
+            keys = e
+        if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
+            raise RuntimeError(
+                f"Could not read the record of counted BAMs in {csv_path} ({raw!r:.80}). "
+                "The file is kept; nothing was added"
+            )
+        return keys
 
     def _load_existing_data(self, csv_path: str) -> Dict[str, Any]:
         """
         Load existing data from CSV or create default structure.
-        
+
+        A master.csv that exists but can't be read, doesn't hold exactly one row, or
+        whose record of counted BAMs isn't a list raises: starting again from zero would
+        write over the sample's counts. No file means a new sample (the defaults).
+
         No read locking is used because:
         1. Writers use atomic write-and-rename, so readers never see partial files
         2. Worst case is reading slightly stale data (acceptable for monitoring)
@@ -92,31 +119,38 @@ class MasterCSVManager:
         """
         # Start with default structure to ensure all fields are present
         data = self._get_default_structure()
-        
+
         if os.path.exists(csv_path):
+            # Read without locking - atomic writes ensure we never see partial data
             try:
-                # Read without locking - atomic writes ensure we never see partial data
                 df = pd.read_csv(csv_path)
-                if not df.empty:
-                    csv_data = df.iloc[0].to_dict()
-                    
-                    # Merge CSV data with default structure (CSV data takes precedence)
-                    for key, value in csv_data.items():
-                        if value is not None and not (isinstance(value, float) and pd.isna(value)):
-                            data[key] = value
-                    
-                    # Ensure string fields are properly converted to strings
-                    # to prevent float objects from being passed to split() methods
-                    string_fields = [
-                        "devices", "basecall_models", "run_time", "flowcell_ids",
-                        "run_info_run_time", "run_info_device", "run_info_model", 
-                        "run_info_flow_cell", "samples_overview_job_types", "analysis_panel"
-                    ]
-                    for field in string_fields:
-                        if field in data and data[field] is not None:
-                            data[field] = str(data[field])
             except Exception as e:
-                print(f"Warning: Error reading existing CSV: {e}")
+                raise RuntimeError(
+                    f"Could not read {csv_path}: {e}. The file is kept; nothing was added"
+                ) from e
+            if len(df) != 1:
+                raise RuntimeError(
+                    f"Could not read {csv_path}: it holds {len(df)} rows, not 1. "
+                    "The file is kept; nothing was added"
+                )
+            csv_data = df.iloc[0].to_dict()
+
+            # Merge CSV data with default structure (CSV data takes precedence)
+            for key, value in csv_data.items():
+                if value is not None and not (isinstance(value, float) and pd.isna(value)):
+                    data[key] = value
+
+            # Ensure string fields are properly converted to strings
+            # to prevent float objects from being passed to split() methods
+            string_fields = [
+                "devices", "basecall_models", "run_time", "flowcell_ids",
+                "run_info_run_time", "run_info_device", "run_info_model",
+                "run_info_flow_cell", "samples_overview_job_types", "analysis_panel"
+            ]
+            for field in string_fields:
+                if field in data and data[field] is not None:
+                    data[field] = str(data[field])
+            self._counted_bams(data, csv_path)
 
         return data
     
@@ -155,6 +189,9 @@ class MasterCSVManager:
             "run_info_flow_cell": "",
             "bam_tracking_counter": 0,
             "bam_tracking_total_files": 0,
+            # Keys of the BAMs counted above (robin.bam_identity.bam_key), a JSON list:
+            # a BAM already on it is not counted again (JOB-2)
+            "bams_added": "[]",
             # Analysis panel information
             "analysis_panel": "",
             # Samples overview (persisted GUI table aggregates)
