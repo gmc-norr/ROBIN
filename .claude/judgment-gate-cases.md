@@ -108,3 +108,21 @@ whenever a claim is withdrawn or a finding turns out to be an artifact. Concrete
 - **Gate:** D.4, for records. When a fix removes or rewrites code, search the review for every
   finding that cites that file and those lines, and re-check each one's Status in the same
   records commit.
+
+## 12. "An SNP run calls on every read", with two places reads wait and one way a merge fails (batch 10b, 2026-11-02)
+- **Claimed:** in the locked plan (`e027717`), an SNP run first merges every read the sample
+  has, and earlier calls count as current only when nothing waits to be merged. The result
+  (`910a296`) said supported.
+- **Rested on:**
+  - "Waiting" meant top-level staged files and batch BAMs. A worker moves the files it claims
+    into `_staging/_batch_<id>/` and adds them outside the lock, and nothing looked there.
+  - "Failed" meant `status == "error"`. Accumulation also returns `lock_timeout`,
+    `load_failed`, and `success` with `batch_bam_error`, and the last two had deleted the
+    reads.
+  - The tests injected only `"error"`, and staged files only at the top level. Below the
+    merge, a failed Clair3 region was skipped, and old VCFs were used.
+  - Codex's review found all of it by pausing a real worker mid-claim and failing a real
+    batch BAM write.
+- **Gate:** A.5. List every place the input can be (here, every folder reads pass through)
+  and every value an upstream function returns (read each of its `return`s). Then test each
+  one, not the one you expect.
