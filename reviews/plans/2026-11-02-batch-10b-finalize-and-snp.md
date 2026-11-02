@@ -302,3 +302,15 @@ The 5 tests below: **5 failed** (`before_r3.txt`, in this session's scratchpad f
   - L4: the SNP job's check ignores `incomplete_staged` → E2.
   - N0: a no-op change → nothing fails.
 - **R5:** `robin.yml` and `pyproject.toml` unchanged.
+
+### Round 3 result (2026-11-02, on `d784753`): supported
+
+Measured in this session's scratchpad folder.
+
+- **R1, before:** on `75c9e7f`, the 5 new tests failed, each with the message it was written for (`before_r3.txt`). The other 19 passed.
+- **R2, after:** the whole file (24) and round 1's 18: 42 passed (`after_r3.txt`).
+- **R3, suite:** 799 passed (`suite_r3.txt`): 794 + 5.
+- **R4, mutants:** L1–L4 each caught (pytest exit 1). N0 survived, with 24 passed (`mutants_r3.txt`, runner `mutate_r3.py`).
+  - L1 failed first at C3, which also reads an old INDEL file and runs earlier in the file.
+  - Run on D1 alone, L1 was caught too, and N0 survived.
+- **R5, pins:** `git diff 54fe364 -- robin.yml pyproject.toml` is empty.
