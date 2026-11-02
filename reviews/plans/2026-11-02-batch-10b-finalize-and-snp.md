@@ -111,3 +111,117 @@ Measured in this session's scratchpad folder.
 - **P5, pins:** `git diff 79c8870 -- robin.yml pyproject.toml` is empty.
 
 Not changed, noticed while fixing: the GUI's own merge (now only when the job can't be queued) still runs without the reference, as before. The coverage panel shows SNP calls without saying when they are older than `target.bam`; the poller and bulk SNP now know, the panel doesn't.
+
+## Round 2: fixes from the external review (locked before code, 2026-11-02)
+
+Codex reviewed `c93a711` (`/home/parlar_ai/robin-batch3-run/review-requests/batch10b-report-codex.md`) and found four gaps. Each was confirmed by reading the code at `54fe364`; Codex's probe scripts were read, not run. The user chose to fix all four on this branch ("1", 2026-11-02).
+
+### Gate A
+
+1. **Principle (unchanged):** an SNP run calls on every read the sample has when it starts, and shows calls as current only if they came from exactly those reads. When it can't, it fails and says why.
+2. **What would kill it:** any of these.
+   - A finalize or SNP run that goes ahead while a worker still holds claimed reads (R1).
+   - A claim folder deleted while its reads are not in `target.bam` (R1).
+   - An SNP run that goes ahead after an accumulation that timed out, could not read its files or could not write its batch BAM (R2).
+   - A Clair3 run counted complete when a region failed, a VCF is missing, or a VCF is from an earlier run (R3).
+   - Calls counted current after `target.bam` changed (R4).
+3. **Refuted before here?** Round 1 counted only top-level staged files and batch BAMs as "waiting", and only `"error"` as a failed merge. Both were inferred, not checked against `accumulate_staged_files`.
+4. **Simplest thing:**
+   - R1: a lock per claim, held by its worker from claim to end. Finalize waits on the claims it finds. A claim folder still there once its lock is free is kept, and counts as reads not in `target.bam`.
+   - R2: a list of the merge results that allow calling.
+   - R3: a start time and a check per region. No deletions: the Clair3 container runs as root, so its region folders may not be ours to delete.
+   - R4: `target.bam`'s size and modification time join the batch list in the record.
+5. **Inputs (read in code at `54fe364`):**
+   - **Claims:** accumulation moves claimed sets into `_staging/_batch_<uuid>/` under the lock (`target_analysis.py:2079-2089`) and works on them outside it.
+     - The folder is deleted at the end (`:2172`), even when the batch BAM failed (`:2140-2145`) or a set could not be read (`:2106-2108`).
+     - With no set read, it is deleted and `load_failed` is returned (`:2124-2127`).
+     - A commit that raises leaves the folder.
+   - **Waiting checks:** `_get_pending_count` (`:986`) and `_reads_wait_to_merge` (`:2731`) look only at top-level staged files. So does the GUI's `_is_target_bam_finalize_redundant` (`gui_launcher.py:731`).
+   - **Results:**
+     - Accumulation returns `no_files`, `below_threshold`, `load_failed`, `success` (with `batch_bam_error` when the batch BAM failed), `lock_timeout` or `error`.
+     - Finalize adds `no_pending_files`. It returns `error` for its own exceptions, including its merge lock timeout.
+     - The SNP job stops only on `error` (`:4342`).
+   - **Clair3 region loop** (`:3742-3871`):
+     - A non-zero exit is logged and skipped (`continue`).
+     - A missing per-region VCF only warns.
+     - `merge_vcf_files` returning False is ignored (`:3879`, `:3888`).
+     - Single-pass copies `snv.vcf.gz` whenever it exists (`:3897`).
+     - Files from earlier runs stay in `clair3/`.
+   - **Container user:** the container runs as root (no `user=` in `create_host_config`, `:3532`).
+   - **Not measured:** whether ClairS-TO always writes `indel.vcf.gz` when it succeeds.
+     - A run with no INDEL file already fails today, at annotation (`gzip.open` on the missing file, `:4108`, then `return ""`). So requiring the file adds no new failure for a first run.
+     - If ClairS-TO skips the file for a region with no candidates, split runs will now fail, with a message naming the region.
+   - **Other writers:** `TargetAnalysis.process_file` (`:1254-1265`) rewrites `target.bam` without updating its `@CO` lines. The workflow does not call it (`target_handler` → `process_multiple_files` → `process_file_with_staging`), but it shows that `target.bam` can change without a new batch.
+
+### Gate B: measured on `54fe364` before this lock
+
+The 19 tests below: **17 failed, 2 passed** (`before_r2.txt`, in this session's scratchpad folder). Each failure has the message it was written for. The 2 controls passed.
+
+### Fixes
+
+1. **R1 (finding 1, and the lost reads in finding 2):**
+   - `accumulate_staged_files` takes a claim lock (`_locks/claim<folder name>.lock`) inside the accumulation lock, before it makes the claim folder. It releases and removes the lock when it ends (`finally`).
+   - The claim folder is kept, not deleted, when its batch BAM failed or a set could not be read. A file `incomplete.txt` in it says which sets' coverage was counted, and why the folder was kept.
+   - Finalize, after its own accumulation, waits on each claim folder's lock, up to `_CLAIM_WAIT_SECONDS` (300 s) in all.
+     - A folder still there after that is listed in its result as `claims_left`.
+     - Its reads are neither merged nor deleted.
+   - `_reads_wait_to_merge` also counts claim folders. The GUI's `_is_target_bam_finalize_redundant` now uses it.
+2. **R2 (finding 2):** the SNP job goes ahead only when finalize returns `success` without `batch_bam_error`, `no_files` or `no_pending_files`, and no `claims_left`. Otherwise it fails with what went wrong, and calls nothing.
+3. **R3 (finding 3):** a run that calls notes its start time.
+   - Each region must exit 0, and must write `snv.vcf.gz` and `indel.vcf.gz` during this run: modified at or after the start, less 2 s for file-system time rounding.
+   - A VCF merge that fails fails the run.
+   - Otherwise the run returns "" (failed), so no record is written.
+4. **R4 (finding 4):** the record, renamed `clair3/target_bam_source.json`, holds `target.bam`'s batch list, size and modification time (ns), taken after the job's merge. Calls are current only when all three match.
+
+### Rulings
+
+- **Round 1's tests** are on this branch and not merged. `test_snp_reads_current.py`'s helpers now write and read the record in its new form; the assertions keep their meaning. No test on main is changed.
+- **Not done here (recorded for later):**
+  - Recovering a kept claim folder. It needs knowing whether its coverage was counted; `incomplete.txt` records that.
+  - The finalize job still fails only on `"error"`.
+  - The coverage panel still shows calls from before a failed run without saying so.
+
+### Tests (new file `tests/test_snp_every_read.py`)
+
+| # | Test | Before (`54fe364`) |
+|---|------|------|
+| W1 | finalize waits for a worker still adding reads | fail: merged before the worker added its reads |
+| W2 | calls are not current while a worker adds reads | fail: current |
+| W3 | the GUI does not call finalize redundant while a worker adds reads | fail: redundant |
+| W4 | an SNP run fails while a worker still adds reads after the wait | fail: variants called |
+| W5 | finalize reports a claim folder a stopped worker left | fail: not reported |
+| W6 | an SNP run fails on a claim folder a stopped worker left | fail: variants called |
+| W7 | a finished claim leaves no folder and no lock | pass: control |
+| A1 | a batch BAM that cannot be written keeps its staged files | fail: deleted |
+| A2 | a staged file that cannot be read keeps its folder | fail: deleted |
+| A3 | an SNP run fails again after a batch BAM could not be written | fail: variants called |
+| A4 | an SNP run fails when its merge missed reads (lock timeout; load failed; batch BAM error) | fail ×3: variants called |
+| C1 | a complete run keeps every region's calls | pass: control |
+| C2 | a failed region fails the run | fail: shown complete |
+| C3 | old INDEL calls are not kept when the caller writes none | fail: old file used |
+| C4 | an old SNV file is not taken as new after a failed single pass | fail: old file used |
+| C5 | a failed VCF merge fails the run | fail: old merged file used |
+| I1 | calls are not reused after target.bam changes without a new batch | fail: current |
+
+The C tests run the real `run_snp_analysis`, with a stand-in for the `docker` module (each container writes the VCFs a region would) and for snpEff and SnpSift (they pass the calls through unchanged).
+
+### Pass rules (locked)
+
+- **Q1:** on `54fe364`, the 17 fail for the reason shown and the 2 controls pass (measured).
+- **Q2:** after the fixes, the 19 pass, and round 1's 18 pass.
+- **Q3:** the full suite passes: 775 + 19 = 794.
+- **Q4:** each mutant below, applied alone to the fixed code, makes the new file fail (pytest exit 1). The control N0 leaves it passing (exit 0).
+  - K1: finalize does not wait for claims → W1.
+  - K2: `_reads_wait_to_merge` ignores claim folders → W2, W3.
+  - K3: the SNP job ignores `claims_left` → W6.
+  - K4: the SNP job stops only on `"error"` → A4.
+  - K5: the claim folder is deleted after a batch BAM error → A1, A3.
+  - K6: the claim folder is deleted when a set could not be read → A2.
+  - K7: no claim lock is taken → W1.
+  - K8: the claim lock file is not removed → W7.
+  - K9: a failed region is skipped again → C2.
+  - K10: per-region VCFs are not checked against the start time → C3.
+  - K11: a failed VCF merge is ignored → C5.
+  - K12: the record has no size and time → I1.
+  - N0: a no-op change → nothing fails.
+- **Q5:** `robin.yml` and `pyproject.toml` unchanged.
