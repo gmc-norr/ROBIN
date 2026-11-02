@@ -140,3 +140,24 @@ The tests below: **17 failed, 2 passed** (`before_10d2.txt`, in this session's s
   - M10: the non-Ray `can_trigger_jobs` ignores `only_steps` → L18.
   - N0: a no-op change → nothing fails.
 - **R5:** `robin.yml` and `pyproject.toml` unchanged.
+
+## Result (2026-11-02, on `4c60efb`): supported
+
+Every pass rule holds.
+
+- **R1, before** (`98dc6ef`, measured before the lock, `before_10d2.txt`): 17 failed as shown, and C1 and C2 passed.
+- **R2, after:** all 19 pass. With `test_master_csv_once.py`, `test_job_failures.py` and `test_file_failures.py`: 236 passed (`after_10d2.txt`).
+- **R3, full suite:** 843 passed (`suite_10d2.txt`).
+- **R4, mutants** (`mutate_10d2.py`; only pytest exit 1 counts as caught; `mutants_10d2.txt`). Each was caught by the test the plan names:
+  - M1 by L1, M2 by L2, M3 by L8, M4 by L5, M5 by L12.
+  - M6 by L1, M7 by L11, M8 by L14, M9 by L9, M10 by L18.
+  - N0 survived (19 passed).
+- **R5, pins:** `git diff 98dc6ef -- robin.yml pyproject.toml` is empty.
+
+The output files are in this session's scratchpad folder.
+
+### Ruling made after the lock: the batch-7 stand-in BAMs
+
+Four tests in `tests/test_job_failures.py` failed on the fixed code. Their stand-in BAMs were empty files, or paths under `/nonexistent`. A BAM is now taken in only once it is complete, and it is known by its bytes. So the intake took in none of the empty files, or only one, since they were all the same.
+- **The change:** each stand-in now holds its own name, then the 28-byte BGZF end-of-file block (`_stand_in_bam`). The watch-session test writes its files under `tmp_path`.
+- **What stays:** every assertion in those tests is unchanged. What they check (which BAMs go to fail-only submission, and that each failure is reported) is the same.
