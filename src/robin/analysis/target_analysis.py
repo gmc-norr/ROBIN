@@ -1894,9 +1894,13 @@ class TargetAnalysis:
         logger,
         union: Optional[pd.DataFrame] = None,
     ) -> Dict[str, Any]:
-        """Add one batch to the sample's totals and write every file. The caller holds the
-        accumulation lock for the whole call (TGT-4). ``union`` is the batch's aligned bases
-        over the merged panel, or None when a BAM in it was staged before batch 8."""
+        """Add one batch to the sample's totals and prepare every file it changes in
+        ``<sample>/_commit/`` (the caller makes it), writing nothing in the sample folder.
+        Returns the coverage numbers, and in ``steps`` the install list's steps that put the
+        prepared files in place (TGT-3). The caller holds the accumulation lock for the whole
+        call (TGT-4). ``union`` is the batch's aligned bases over the merged panel, or None
+        when a BAM in it was staged before batch 8."""
+        prep = os.path.join(sample_dir, _COMMIT_DIR)
         cov_path = os.path.join(sample_dir, "coverage_main.csv")
         bed_path = os.path.join(sample_dir, "bed_coverage_main.csv")
         stretch_path = os.path.join(sample_dir, "_covered_stretches.parquet")
@@ -1996,21 +2000,29 @@ class TargetAnalysis:
         row = np.array([[current_timestamp, global_depth]])
         chart = np.vstack([chart_old, row]) if chart_old is not None else row
 
+        # Each file is prepared whole in _commit/, under its own name; the install list's
+        # steps put them in place: replaces, then a removal, then the time series' append.
+        replaces, removes, appends = [], [], []
+
+        def prepared(name: str, mode: str):
+            replaces.append({"do": "replace", "file": name})
+            return atomic_open(os.path.join(prep, name), mode)
+
         def write_csv(df: pd.DataFrame, name: str) -> None:
-            with atomic_open(os.path.join(sample_dir, name), "w") as f:
+            with prepared(name, "w") as f:
                 df.to_csv(f, index=False)
 
         if all_stretches is not None:
-            with atomic_open(stretch_path, "wb") as f:
+            with prepared(os.path.basename(stretch_path), "wb") as f:
                 all_stretches.to_parquet(f, index=False)
         write_csv(totals, "coverage_main.csv")
         write_csv(target_df, "bed_coverage_main.csv")
         if union_total is not None:
             write_csv(union_total, UNION_FILE)
         elif os.path.exists(union_path):
-            os.remove(union_path)  # this batch has no merged-panel counts: unknown from now on
+            removes.append({"do": "remove", "file": UNION_FILE})  # no merged-panel counts: unknown from now on
         write_csv(target_df, "target_coverage.csv")
-        with atomic_open(os.path.join(sample_dir, "coverage_time_chart.npy"), "wb") as f:
+        with prepared("coverage_time_chart.npy", "wb") as f:
             np.save(f, chart)
 
         # Reads per target, cumulative, and the time series the GUI plots.
@@ -2044,16 +2056,55 @@ class TargetAnalysis:
                 ["chrom", "startpos", "endpos", "name", "length", "coverage", "bases",
                  "timestamp", "reads", "reads_per_length"]
             ]
-            with atomic_open(latest_reads_cache, "wb") as f:
+            with prepared(os.path.basename(latest_reads_cache), "wb") as f:
                 with_reads[tkeys + ["reads"]].to_parquet(f, index=False)
+            # Only the new rows: the install cuts the file back to its size now, then adds
+            # them, so an append a stop cut off part-way is put right by doing it again.
             file_exists = os.path.exists(time_coverage_file)
-            with_reads.to_csv(time_coverage_file, mode="a", header=not file_exists, index=False)
+            with atomic_open(os.path.join(prep, _TIME_SERIES), "w") as f:
+                with_reads.to_csv(f, header=not file_exists, index=False)
+            appends.append({
+                "do": "append", "file": _TIME_SERIES,
+                "size": os.path.getsize(time_coverage_file) if file_exists else 0,
+            })
 
-        with atomic_open(os.path.join(sample_dir, "targets_exceeding_threshold_count.txt"), "w") as f:
+        with prepared("targets_exceeding_threshold_count.txt", "w") as f:
             f.write(str(len(run_list)))
-        with atomic_open(os.path.join(sample_dir, "targets_exceeding_threshold.bed"), "w") as f:
+        with prepared("targets_exceeding_threshold.bed", "w") as f:
             run_list[["chrom", "startpos", "endpos"]].to_csv(f, sep="\t", header=False, index=False)
-        return {"coverage": global_depth, "targets_exceeding_threshold": len(run_list)}
+        return {
+            "coverage": global_depth,
+            "targets_exceeding_threshold": len(run_list),
+            "steps": replaces + removes + appends,
+        }
+
+    def _finish_commit(self, sample_dir: str, logger) -> List[Dict[str, str]]:
+        """Finish a commit a stop left part-way (TGT-3). The caller holds the accumulation
+        lock. With an install list, do its steps (each is safe to do twice), then its syncs,
+        then delete it and _commit/; without one, delete _commit/: nothing was installed.
+        A list that can't be read raises: nothing is guessed. Returns failed-file entries
+        for BAMs whose reads did not reach target.bam."""
+        prep = os.path.join(sample_dir, _COMMIT_DIR)
+        list_path = os.path.join(prep, _INSTALL_LIST)
+        if os.path.exists(list_path):
+            try:
+                with open(list_path) as f:
+                    steps = json.load(f)["steps"]
+                if not isinstance(steps, list) or not all(isinstance(s, dict) and "do" in s for s in steps):
+                    raise ValueError("no list of steps")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Can't read the install list {list_path} ({type(e).__name__}: {e}). The sample's "
+                    "coverage files may be part-way through adding a batch, so nothing more is added "
+                    "until it is dealt with"
+                ) from e
+            logger.warning(f"Finishing a coverage commit that a stop left part-way in {sample_dir}")
+            entries, _ = _install(sample_dir, steps, self.work_dir, logger)
+            _retire(sample_dir, steps)
+            return entries
+        if os.path.isdir(prep):
+            shutil.rmtree(prep)  # never listed: nothing was installed
+        return []
 
     def accumulate_staged_files(self, sample_id: str, force: bool = False) -> Dict[str, Any]:
         """Add staged BAMs to the sample's totals.
@@ -2100,19 +2151,25 @@ class TargetAnalysis:
                 result["file_failures"] = file_failures
             return result
 
+        def with_failures(result: Dict[str, Any]) -> Dict[str, Any]:
+            if file_failures:
+                result["file_failures"] = file_failures
+            return result
+
         try:
-            # --- Locked: claim complete staged sets ---
+            # --- Locked: finish a commit a stop left part-way, then claim complete staged sets ---
             with FileLock(lock_file, timeout=60.0):
+                file_failures.extend(self._finish_commit(sample_dir, logger))
                 counters = _complete_staged_counters(staging_dir)
                 if not counters:
                     logger.info(f"No staged files to accumulate for {sample_id}")
-                    return {"status": "no_files", "files_processed": 0}
+                    return with_failures({"status": "no_files", "files_processed": 0})
                 if not force and len(counters) < self.batch_size:
                     logger.info(
                         f"Skipping accumulation - only {len(counters)} files staged "
                         f"(threshold: {self.batch_size}, force={force})"
                     )
-                    return {"status": "below_threshold", "files_pending": len(counters)}
+                    return with_failures({"status": "below_threshold", "files_pending": len(counters)})
                 claimed = counters if force else counters[: self.batch_size]
                 batch_dir = os.path.join(staging_dir, f"_batch_{uuid.uuid4()}")
                 # Held until this claim ends, so finalize can wait for it (JOB-6).
@@ -2135,6 +2192,7 @@ class TargetAnalysis:
             contigs, targets, stretch_frames, timestamps, source_bams = [], [], [], [], []
             union_frames = []
             used = []
+            bam_refs = []  # each counted BAM and its key, for the install list's batch_bam step
             for n in claimed:
                 def staged(kind: str, ext: str) -> str:
                     return os.path.join(batch_dir, f"{kind}_{n}.{ext}")
@@ -2169,6 +2227,7 @@ class TargetAnalysis:
                 timestamps.append(ts)
                 source_bams.append(src)
                 used.append(n)
+                bam_refs.append({"file": src, "key": _staged_set_key(batch_dir, n)})
             if not contigs:
                 logger.error("No staging files could be loaded successfully")
                 _keep_incomplete_claim(batch_dir, [], claimed, None)
@@ -2193,46 +2252,69 @@ class TargetAnalysis:
                 bam_problem = f"the batch BAM could not be written ({e})"
                 logger.error(f"Could not write the batch BAM for {sample_id}; target.bam will miss these reads: {e}")
 
-            # --- Locked: read the totals, add this batch, write every file; then move the
-            # batch BAM to where finalize looks. If the commit fails, the batch BAM stays in
-            # the batch folder with the staged files: the coverage and target.bam both miss it.
+            # --- Locked: read the totals, add this batch, and prepare every file in _commit/;
+            # write the install list, then do its steps: the files go in place, then the batch
+            # BAM, then the claim folder is deleted. Until the list is written nothing has
+            # changed, and the claim folder keeps the staged files: the coverage and
+            # target.bam both miss them. Once it is written, the commit counts: a stop is
+            # finished by the next accumulation or finalize (TGT-3).
             with FileLock(lock_file, timeout=120.0):
-                summary = self._commit_batch(
-                    sample_dir,
-                    pd.concat(contigs, ignore_index=True),
-                    pd.concat(targets, ignore_index=True),
-                    union_stretches(stretch_frames),
-                    timestamps,
-                    batch_reads,
-                    logger,
-                    # None when any BAM in the batch has no merged-panel part, or the BAMs'
-                    # merged panels differ (the panel changed while they were staged)
-                    union=(
-                        None
-                        if any(u is None for u in union_frames)
-                        or len({_regions(u) for u in union_frames}) > 1
-                        else pd.concat(union_frames, ignore_index=True)
-                    ),
-                )
+                file_failures.extend(self._finish_commit(sample_dir, logger))
+                prep = os.path.join(sample_dir, _COMMIT_DIR)
+                os.makedirs(prep)
+                _sync_dir(sample_dir)  # _commit/'s name
+                try:
+                    summary = self._commit_batch(
+                        sample_dir,
+                        pd.concat(contigs, ignore_index=True),
+                        pd.concat(targets, ignore_index=True),
+                        union_stretches(stretch_frames),
+                        timestamps,
+                        batch_reads,
+                        logger,
+                        # None when any BAM in the batch has no merged-panel part, or the BAMs'
+                        # merged panels differ (the panel changed while they were staged)
+                        union=(
+                            None
+                            if any(u is None for u in union_frames)
+                            or len({_regions(u) for u in union_frames}) > 1
+                            else pd.concat(union_frames, ignore_index=True)
+                        ),
+                    )
+                    steps = summary.pop("steps")
+                    _sync_dir(prep)  # the prepared files' names
+                    not_read = [n for n in claimed if n not in used]
+                    if batch_bam_error or not_read:
+                        # These reads are not in target.bam: keep them, and say so.
+                        _keep_incomplete_claim(batch_dir, used, not_read, batch_bam_error)
+                    if batch_bam:
+                        for path in (batch_bam, f"{batch_bam}.bai"):
+                            _sync_file(path)
+                        _sync_dir(batch_dir)  # their names
+                        _sync_dir(staging_dir)  # the claim folder's name, and the sets moved into it
+                        steps.append({
+                            "do": "batch_bam",
+                            "from": os.path.relpath(batch_bam, sample_dir),
+                            "to": f"batch_{used[0]}_{uuid.uuid4().hex[:8]}.bam",
+                            "bams": bam_refs,
+                        })
+                    if not (batch_bam_error or not_read):
+                        steps.append({"do": "drop_claim", "dir": os.path.relpath(batch_dir, sample_dir)})
+                    with atomic_open(os.path.join(prep, _INSTALL_LIST), "w") as f:
+                        json.dump({"v": 1, "steps": steps}, f)
+                    _sync_dir(prep)  # the list's name
+                except Exception:
+                    shutil.rmtree(prep, ignore_errors=True)  # never listed: nothing was installed
+                    raise
                 committed = True
-                if batch_bam:
-                    final = os.path.join(sample_dir, f"batch_{used[0]}_{uuid.uuid4().hex[:8]}.bam")
-                    try:
-                        _install_batch_bam(batch_bam, final)
-                    except Exception as e:
-                        # The coverage is counted: like a batch BAM that couldn't be written
-                        batch_bam_error = f"could not be moved into place: {e}"
-                        bam_problem = f"the batch BAM could not be moved into place ({e})"
-                        logger.error(f"Could not move the batch BAM for {sample_id} into place: {e}")
+                installed, moved_problem = _install(sample_dir, steps, self.work_dir, logger)
+                file_failures.extend(installed)
+                if moved_problem:
+                    batch_bam_error = moved_problem
+                _retire(sample_dir, steps)
                 if bam_problem:
                     for n in used:
                         failed(n, f"Its coverage is counted, but its reads are not in target.bam: {bam_problem}.")
-                not_read = [n for n in claimed if n not in used]
-                if batch_bam_error or not_read:
-                    # These reads are not in target.bam: keep them, and say so.
-                    _keep_incomplete_claim(batch_dir, used, not_read, batch_bam_error)
-                else:
-                    shutil.rmtree(batch_dir, ignore_errors=True)
 
             gc.collect()
             elapsed = time.time() - start_time
@@ -2246,9 +2328,7 @@ class TargetAnalysis:
             }
             if batch_bam_error:
                 result["batch_bam_error"] = batch_bam_error
-            if file_failures:
-                result["file_failures"] = file_failures
-            return result
+            return with_failures(result)
 
         except TimeoutError as e:
             logger.error(f"Could not acquire accumulation lock for {sample_id}: {e}")
@@ -2867,18 +2947,161 @@ def _record_left_out(work_dir: str, set_dir: str, n: str, error: str) -> None:
     record_bam_failure(work_dir, key, "target", error)
 
 
-def _install_batch_bam(batch_bam: str, final: str) -> None:
-    """Move a committed batch BAM to where finalize looks, its index first (finalize globs
-    *.bam). If the BAM can't be moved, its index goes back, so the claim folder keeps both."""
-    os.replace(f"{batch_bam}.bai", f"{final}.bai")
+# A coverage commit prepares every file it changes in <sample>/_commit/, writes the list of
+# steps that put them in place (install.json), then does them. A list a stop left is finished
+# by the next accumulation or finalize, so a batch reaches every file, or none (TGT-3).
+_COMMIT_DIR = "_commit"
+_INSTALL_LIST = "install.json"
+_TIME_SERIES = "target_coverage_time.csv"
+
+
+def _sync_file(path: str) -> None:
+    """Put a file's contents on disk."""
+    fd = os.open(path, os.O_RDONLY)
     try:
-        os.replace(batch_bam, final)
-    except Exception:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _sync_dir(path: str) -> None:
+    """Put a folder's entries (the names of what is in it) on disk."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _append_rows(path: str, size: int, rows_path: str) -> None:
+    """Cut ``path`` back to ``size`` bytes, then add the rows in ``rows_path``. Safe to do
+    twice, and it puts right an append a stop cut off part-way."""
+    with open(rows_path, "rb") as f:
+        rows = f.read()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o666)
+    with os.fdopen(fd, "wb") as f:
+        end = f.seek(0, os.SEEK_END)
+        if end < size:
+            raise RuntimeError(
+                f"{path} is shorter ({end} bytes) than when this batch's rows were prepared "
+                f"({size} bytes); not guessing which rows it lost"
+            )
+        f.truncate(size)
+        f.seek(size)
+        f.write(rows)
+
+
+def _claim_of(steps: List[dict]) -> Optional[str]:
+    """The claim folder an install list moves the batch BAM from or deletes, relative to the
+    sample folder; None when it does neither."""
+    for step in steps:
+        if step["do"] == "batch_bam":
+            return os.path.dirname(step["from"])
+        if step["do"] == "drop_claim":
+            return step["dir"]
+    return None
+
+
+def _install_batch_bam(sample_dir: str, step: dict) -> Optional[str]:
+    """The install list's batch_bam step: move the index, then the BAM, from the claim folder
+    to where finalize looks (finalize globs *.bam). Returns what went wrong, or None.
+
+    A BAM already gone from the claim folder is in place when it is in the sample folder, or
+    when target.bam lists it as merged (a finalize merges and deletes batch BAMs under its
+    own lock, so it can do so before the list is deleted). Otherwise it is lost."""
+    src, dst = os.path.join(sample_dir, step["from"]), os.path.join(sample_dir, step["to"])
+    if os.path.exists(src):
         try:
-            os.replace(f"{final}.bai", f"{batch_bam}.bai")
-        except OSError:
-            pass
-        raise
+            if os.path.exists(f"{src}.bai"):
+                os.replace(f"{src}.bai", f"{dst}.bai")
+            os.replace(src, dst)
+        except Exception as e:
+            if os.path.exists(f"{dst}.bai") and not os.path.exists(f"{src}.bai"):
+                try:  # the claim folder keeps both
+                    os.replace(f"{dst}.bai", f"{src}.bai")
+                except OSError:
+                    pass
+            return f"the batch BAM could not be moved into place ({e})"
+        return None
+    if os.path.exists(dst) or step["to"] in _merged_batch_names(os.path.join(sample_dir, "target.bam")):
+        return None
+    return "the batch BAM is gone: it is neither in the sample folder nor merged into target.bam"
+
+
+def _left_out_of_target_bam(work_dir: str, step: dict, problem: str) -> List[Dict[str, str]]:
+    """Failed-file entries, and ledger lines, for the BAMs of a batch BAM that is not in
+    target.bam: their coverage is counted, their reads are not in target.bam."""
+    claim = os.path.basename(os.path.dirname(step["from"]))
+    error = (
+        f"Its coverage is counted, but its reads are not in target.bam: {problem}. "
+        f"Its files are kept in _staging/{claim}."
+    )
+    entries = []
+    for bam in step.get("bams") or []:
+        entries.append({"file": bam["file"], "error": error, "step": _COVERAGE_STEP})
+        if bam.get("key"):
+            record_bam_failure(work_dir, bam["key"], "target", error)
+        else:
+            logging.getLogger("robin.target").warning(
+                f"{bam['file']} can't be identified: its failure is only logged"
+            )
+    return entries
+
+
+def _install(sample_dir: str, steps: List[dict], work_dir: str, logger) -> Tuple[List[Dict[str, str]], Optional[str]]:
+    """Do an install list's steps, in order; each is safe to do twice. Returns failed-file
+    entries for BAMs whose reads did not reach target.bam, and why (None when they did)."""
+    prep = os.path.join(sample_dir, _COMMIT_DIR)
+    entries: List[Dict[str, str]] = []
+    problem = None
+    for step in steps:
+        do = step["do"]
+        if do == "replace":
+            src = os.path.join(prep, step["file"])
+            if os.path.exists(src):  # gone: renamed into place already
+                os.replace(src, os.path.join(sample_dir, step["file"]))
+        elif do == "remove":
+            try:
+                os.remove(os.path.join(sample_dir, step["file"]))
+            except FileNotFoundError:
+                pass
+        elif do == "append":
+            _append_rows(os.path.join(sample_dir, step["file"]), int(step["size"]), os.path.join(prep, step["file"]))
+        elif do == "batch_bam":
+            problem = _install_batch_bam(sample_dir, step)
+            if problem:
+                logger.error(f"Batch BAM {step['from']} in {sample_dir}: {problem}; target.bam misses its reads")
+                entries += _left_out_of_target_bam(work_dir, step, problem)
+                claim = os.path.join(sample_dir, os.path.dirname(step["from"]))
+                os.makedirs(claim, exist_ok=True)
+                counted = [os.path.basename(b["file"]) for b in step.get("bams") or []]
+                _keep_incomplete_claim(claim, counted, [], problem)
+        elif do == "drop_claim":
+            claim = os.path.join(sample_dir, step["dir"])
+            if problem is None and os.path.isdir(claim):  # kept when its batch BAM is not in place
+                shutil.rmtree(claim)
+        else:
+            raise ValueError(f"unknown install step {do!r}")
+    return entries, problem
+
+
+def _retire(sample_dir: str, steps: List[dict]) -> None:
+    """Put what the install did on disk, then delete the list (and sync that), then _commit/.
+    A sync that fails raises first, so the list stays and the next finish does it again."""
+    prep = os.path.join(sample_dir, _COMMIT_DIR)
+    for step in steps:
+        if step["do"] == "append":
+            _sync_file(os.path.join(sample_dir, step["file"]))
+    _sync_dir(sample_dir)  # the renames, the removal, the moved batch BAM
+    claim = _claim_of(steps)
+    if claim:
+        if os.path.isdir(os.path.join(sample_dir, claim)):
+            _sync_dir(os.path.join(sample_dir, claim))  # kept: the batch BAM moved out of it
+        _sync_dir(os.path.join(sample_dir, os.path.dirname(claim)))  # _staging/: the claim's removal
+    os.remove(os.path.join(prep, _INSTALL_LIST))
+    _sync_dir(prep)  # a power loss can't bring the list back, to be done again after a later commit
+    shutil.rmtree(prep)
+    _sync_dir(sample_dir)
 
 
 def _add_file_failures(job, entries) -> None:
@@ -3132,15 +3355,22 @@ def finalize_accumulation_for_sample(
             result = {"status": "no_pending_files", "sample_id": sample_id}
 
         # Staged files another worker claimed are not in a batch BAM yet: wait for it,
-        # so its reads are merged too (JOB-6). A claim folder left after that is listed.
+        # so its reads are merged too (JOB-6).
         left = _claims_left(sample_output_dir)
+        # A staged set with a missing part is never claimed: list it. Under the
+        # accumulation lock, so a claim moving a set's files is never seen half done.
+        # First finish a commit a stopped worker left part-way (TGT-3): after the wait, so
+        # a worker that died while waited for is finished too, and its claim folder dropped.
+        with FileLock(target_analysis._get_lock_file(sample_id, "accumulation"), timeout=60.0):
+            finished = target_analysis._finish_commit(sample_output_dir, logger)
+            broken = _incomplete_staged_sets(target_analysis._get_staging_dir(sample_id))
+        if finished:
+            result["file_failures"] = list(result.get("file_failures") or []) + finished
+        # A claim folder left after that is listed.
+        left = [name for name in left if os.path.isdir(os.path.join(sample_output_dir, "_staging", name))]
         if left:
             logger.warning(f"Staged reads in {left} for {sample_id} are not in target.bam")
             result["claims_left"] = left
-        # A staged set with a missing part is never claimed: list it. Under the
-        # accumulation lock, so a claim moving a set's files is never seen half done.
-        with FileLock(target_analysis._get_lock_file(sample_id, "accumulation"), timeout=60.0):
-            broken = _incomplete_staged_sets(target_analysis._get_staging_dir(sample_id))
         if broken:
             logger.warning(f"Staged sets missing a part for {sample_id}: {broken}")
             result["incomplete_staged"] = broken

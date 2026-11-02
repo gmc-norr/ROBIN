@@ -17,7 +17,7 @@ import pytest
 
 from target_fixtures import (
     MERGED_PANEL, MERGED_PANEL_OVERLAPS, PANEL, PANEL_OVERLAPS, SAMPLE,
-    samtools_merged_depth, write_bams, write_panel,
+    fixture_reads, samtools_merged_depth, write_bam, write_bams, write_panel,
 )
 from robin.analysis.target_analysis import TargetAnalysis
 
@@ -171,38 +171,72 @@ def _union_write_fails(monkeypatch):
     return lambda: monkeypatch.setattr(ta_mod, "atomic_open", real)
 
 
-def test_a_commit_that_fails_part_way_never_shows_a_partial_total(tmp_path, monkeypatch):
-    # R1: the second of four commits writes bed_coverage_main.csv, then fails on the union file.
+def _merged_depth_of(tmp_path, k, which):
+    """samtools' merged-panel depth over the reads of the BAMs numbered in ``which`` (of k)."""
+    reads = fixture_reads()
+    merged = write_bam(str(tmp_path / f"subset_{k}_{'_'.join(map(str, which))}.bam"),
+                       [r for j in which for r in reads[j::k]])
+    return samtools_merged_depth(merged, MERGED_PANEL, str(tmp_path))
+
+
+def test_a_commit_that_fails_part_way_changes_nothing(tmp_path, monkeypatch):
+    # R1 (ruling, batch 10e part 2): the second of four commits fails on the union file. A
+    # commit is all or nothing now, so it changes nothing, and the merged total stays right.
+    # (Before part 2 the rows were written and the union file not: this test then checked
+    # that the row sum showed instead of a partial merged total.)
     ta, _ = _analysis(tmp_path, monkeypatch, PANEL)
     bams, _ = write_bams(str(tmp_path), 4)
     _add(ta, bams[0])
+    sample_dir = tmp_path / "work" / SAMPLE
+    shown_before = _shown(sample_dir)
     restore = _union_write_fails(monkeypatch)
     _add(ta, bams[1])
     restore()
-    sample_dir = tmp_path / "work" / SAMPLE
-    # read right after the failed commit: the union file is a generation behind the rows
-    report, _ = _shown(sample_dir)
-    assert report == pytest.approx(_row_sum(sample_dir), rel=1e-9), report
+    assert _shown(sample_dir) == shown_before  # read right after the failed commit
     _add(ta, bams[2])
     _add(ta, bams[3])
+    want = _merged_depth_of(tmp_path, 4, [0, 2, 3])  # BAM 1's set is kept and listed, not counted
+    report, summary = _shown(sample_dir)
+    assert report == pytest.approx(want, rel=1e-9), (report, want)
+    assert summary == f"{want:.2f}x"
+    assert (sample_dir / UNION_FILE).exists()
+
+
+def test_an_older_folders_union_file_a_generation_behind_falls_back_to_the_row_sum(tmp_path, monkeypatch):
+    # R1 legacy (batch 10e part 2, asked by its plan review): a folder written before part 2
+    # can hold a union file a generation behind its rows (a commit that failed part-way then).
+    # It is built by hand here; the row sum shows, and the next commit drops the file.
+    ta, _ = _analysis(tmp_path, monkeypatch, PANEL)
+    bams, _ = write_bams(str(tmp_path), 3)
+    _add(ta, bams[0])
+    sample_dir = tmp_path / "work" / SAMPLE
+    behind = (sample_dir / UNION_FILE).read_bytes()
+    _add(ta, bams[1])
+    (sample_dir / UNION_FILE).write_bytes(behind)
     report, summary = _shown(sample_dir)
     assert report == pytest.approx(_row_sum(sample_dir), rel=1e-9), report
     assert summary == f"{_row_sum(sample_dir):.2f}x"
+    _add(ta, bams[2])
+    report, _ = _shown(sample_dir)
+    assert report == pytest.approx(_row_sum(sample_dir), rel=1e-9), report
     assert not (sample_dir / UNION_FILE).exists()
 
 
-def test_a_first_commit_that_fails_part_way_falls_back_to_the_row_sum(tmp_path, monkeypatch):
-    # R1 guard: the first commit fails on the union file; the sample stays on the row sum.
+def test_a_first_commit_that_fails_part_way_writes_nothing(tmp_path, monkeypatch):
+    # R1 guard (ruling, batch 10e part 2): the first commit fails on the union file and writes
+    # nothing; the next commit is then the sample's first, and its merged total is known.
     ta, _ = _analysis(tmp_path, monkeypatch, PANEL)
     bams, _ = write_bams(str(tmp_path), 2)
     restore = _union_write_fails(monkeypatch)
     _add(ta, bams[0])
     restore()
-    _add(ta, bams[1])
     sample_dir = tmp_path / "work" / SAMPLE
+    assert not (sample_dir / "bed_coverage_main.csv").exists()
+    _add(ta, bams[1])
+    want = _merged_depth_of(tmp_path, 2, [1])
     report, _ = _shown(sample_dir)
-    assert report == pytest.approx(_row_sum(sample_dir), rel=1e-9)
-    assert not (sample_dir / UNION_FILE).exists()
+    assert report == pytest.approx(want, rel=1e-9), (report, want)
+    assert (sample_dir / UNION_FILE).exists()
 
 
 @pytest.mark.parametrize("when", ["between_commits", "within_one_batch"])
