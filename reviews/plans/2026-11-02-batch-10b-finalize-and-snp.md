@@ -225,3 +225,17 @@ The C tests run the real `run_snp_analysis`, with a stand-in for the `docker` mo
   - K12: the record has no size and time → I1.
   - N0: a no-op change → nothing fails.
 - **Q5:** `robin.yml` and `pyproject.toml` unchanged.
+
+### Round 2 result (2026-11-02, on `e139331`): supported
+
+Measured in this session's scratchpad folder.
+
+- **Q1, before:** on `54fe364` with the 19 new tests: 17 failed, 2 passed (`before_r2.txt`). Each failure had the message it was written for. W7 and C1 passed.
+- **Q2, after:** the 19 new tests and round 1's 18 tests: 37 passed (`after_r2.txt`).
+- **Q3, suite:** 794 passed (`suite_r2.txt`): 775 + 19.
+- **Q4, mutants:** K1–K12 each caught (pytest exit 1). N0 survived, with 19 passed (`mutants_r2.txt`, runner `mutate_r2.py`). The runner stops at the first failing test:
+  - K3 failed first at W4. W4 also needs `claims_left`, and it runs before W6.
+  - Every other mutant failed first at the test the plan named.
+- **Q5, pins:** `git diff 54fe364 -- robin.yml pyproject.toml` is empty.
+
+Not changed, noticed while fixing: the coverage panel's own SNP fallback (`coverage.py:4691`) runs through `snp_analysis_handler`, so it gets the same merge, checks and record.
