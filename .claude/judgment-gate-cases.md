@@ -83,3 +83,17 @@ whenever a claim is withdrawn or a finding turns out to be an artifact. Concrete
   selected record's ALT.
 - **Gate:** A.5 — for each field the code reads, tally every value shape in the real input
   (here, ALT by alphabet), not the one shape you expect to break.
+
+## 10. "The newest request carries the newest settings", with the default setting exempted (batch 10a, 2026-11-02)
+- **Claimed:** in the locked plan (`182c509`), a request sent while one runs replaces the older
+  waiting one, because the newest carries the newest settings. The result (`f4ef637`) said
+  supported.
+- **Rested on:** test S2 checked that the follow-up run was the newest request only with
+  batching off. With batching on, the default, it skipped the check, with the comment "the
+  batcher re-wraps jobs under new ids". That treated the batcher as a test nuisance, and never
+  measured what it does to a request: a batch ran with its *first* request's settings, and a
+  request still in the batcher missed the waiting slot, giving three runs. Codex's review found
+  both by sending requests with different settings.
+- **Gate:** A.5 and D.2 — when a test leaves out an assertion for one parameter, that is an
+  input assumption: measure what that path does before exempting it, and above all for the
+  default setting.
