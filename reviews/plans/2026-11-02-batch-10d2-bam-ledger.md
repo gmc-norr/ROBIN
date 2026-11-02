@@ -161,3 +161,132 @@ The output files are in this session's scratchpad folder.
 Four tests in `tests/test_job_failures.py` failed on the fixed code. Their stand-in BAMs were empty files, or paths under `/nonexistent`. A BAM is now taken in only once it is complete, and it is known by its bytes. So the intake took in none of the empty files, or only one, since they were all the same.
 - **The change:** each stand-in now holds its own name, then the 28-byte BGZF end-of-file block (`_stand_in_bam`). The watch-session test writes its files under `tmp_path`.
 - **What stays:** every assertion in those tests is unchanged. What they check (which BAMs go to fail-only submission, and that each failure is reported) is the same.
+
+## Round 2: the external review of parts 1–2 (locked before code, 2026-11-02)
+
+Codex reviewed `01a5482..4c60efb` (`batch10d-report-codex.md`, in the run notes folder) and found five problems. Claude found a sixth while writing the brief (B1). Each was checked by reading the code; Codex's probe scripts were not run. The tests below measure each one.
+
+### The user's choices (2026-11-02)
+
+- **Keep the automatic resume** ("1"). The user asked whether a warning alone would be better, and kept the resume: without it, a restart means re-analysing the run in a new work folder, or numbers counted twice.
+- **A failed or cut-short step is reported at every start**, as long as its BAM is in the folders scanned. It is still never run again. Before, it was reported once (L5 changes with this; see the rulings).
+- **The list of BAMs `master.csv` counts moves out of `master.csv`** into its own file ("1"). The other option was raising Python's CSV size limit in every ROBIN process, which leaves other readers of the file broken.
+
+### Gate A
+
+1. **Principle:** a BAM's data is added to its sample's totals at most once, and a step that failed or may be incomplete says so at every start.
+2. **What would kill it:** any of these.
+   - A step's batch list that holds another step's BAMs.
+   - A per-BAM step run a second time after its worker died.
+   - A `master.csv` that Python's `csv` module can't read at its default limit.
+   - A failed or cut-short step with no failed-file row at a later start.
+   - A fail-only BAM's expected failure reported as a failure.
+   - A torn ledger line that makes the ledger unreadable a restart later.
+3. **Refuted before here?**
+   - The 10d-2 learning (`l-294c2aaa`) says a torn last line is safe to ignore. That holds for reading, but the next append was glued onto it (B1).
+   - Case 14 (batch 10c): a second way into the same data. Here, Ray's own retry is a second way into a step.
+   - Batch 7 decides what counts as a failure: the job's outcome (`job_outcome`). A fail-only BAM's expected failure is not one.
+4. **Simplest thing:** for each finding, the fix listed below. None adds a dependency.
+5. **Inputs** (read in code at `2905c04`):
+   - **Batch lists:**
+     - `_convert_batched_jobs` (Ray `workflow_ray.py:3206`, non-Ray `workflow_simple.py:1302`) uses the batch's first context as the job's context, and writes `_batched_job` into it.
+     - A BAM's per-BAM jobs share one context: `_on_finish` builds them all with `ctx` (`:2802`).
+     - With batching on, every one of them goes through the batcher (`submit_jobs`, `:1827`).
+     - Handlers read `_batched_job` without checking its step (`mgmt_analysis.py:1477`, `cnv_analysis.py:1656`, `target_analysis.py:2471`), and so does the ledger's `_job_bams`.
+     - A job is pickled for its worker when it is dispatched, which can be later than its conversion.
+   - **Retries:**
+     - The six per-BAM remotes (`workflow_ray.py:1022–1031`) set no `max_retries`, so Ray's default applies: 3 retries after the worker dies.
+     - Both call sites (`TypeProcessor.process`, `:1088`; `:3735`) add only `RESOURCE_HINTS` (CPUs, memory).
+     - No ROBIN code re-runs a failed job.
+   - **`master.csv`:**
+     - `bams_added` is a JSON list in one cell, 36 characters per key.
+     - Python's `csv` field limit is 131,072, so the 3,641st key makes the row unreadable to `csv`.
+     - The target finalize's panel lookup (`target_analysis.py:3095–3108`) reads it with `csv.DictReader`, swallows the error and uses `rCNS2`.
+   - **Failures after a restart:**
+     - `_resume` writes a cut-short step's end record when it decides. The scan reports the rows only after it has submitted its jobs (`workflow_ray.py:4016`).
+     - An ended step makes no row, whatever its status.
+     - The end record keeps the results status, not the job's outcome.
+     - Files that failed inside a batch that went on are in `metadata["file_failures"]` (`{file, error, step}`). In the non-Ray runner, sibling jobs share a context and nothing removes that list.
+   - **The ledger:** `FileLedger.append` opens the file to append, and writes after whatever is there.
+
+### Gate B: measured on `2905c04` before this lock
+
+The new tests and the ruled L5, on the unfixed code: **13 failed, 30 passed** (`before_10d2r2.txt`, in this session's scratchpad folder). Each failed for its own reason (table below). The 4 new controls and the ruled `master.csv` test passed.
+
+### Fixes
+
+1. **B1, a torn ledger line.** The ledger, and the `master.csv` list, append through one helper. Under the exclusive lock, it first cuts a torn tail back to the last newline (and logs it), then writes and fsyncs.
+2. **Finding 1, batch lists.** Both `_convert_batched_jobs` give the job its own context: `dataclasses.replace(first, metadata=dict(first.metadata))`, with `_batched_job` set on that copy only. Its results, history and errors stay the first BAM's own (the same objects), so what a handler writes lands where it did.
+3. **Finding 2, retries.** The six per-BAM remotes get `max_retries=0`.
+   - A step whose worker dies then fails, and the Coordinator shows it as a failed job.
+   - Its start has no end, so after a restart it is reported as cut short.
+   - The per-sample steps keep Ray's default.
+4. **Finding 3, `master.csv`.** It drops `bams_added` and gains `last_bam_added` (one key). The list is `<sample>/master_csv_bams.txt`, one key per line. Under the per-sample lock:
+   - Read the list. A torn last line is ignored; any other line that isn't a key raises (the file is kept and reported).
+   - If `last_bam_added` is not on the list, append it first: the last update stopped between its two writes.
+   - A key on the list changes nothing.
+   - Otherwise: add the counts, set `last_bam_added`, write `master.csv`, then append the key.
+5. **Findings 4 and 5, failures after a restart.**
+   - The worker's end record also holds:
+     - the job's `outcome` (success, failed or expected_failure);
+     - its `error` (shortened);
+     - `file_failed`, for each BAM named in the files the job reported as failed. Only files added during this job count: a count is taken before the handler, in both runners.
+   - At every start, `_resume` returns a row for each per-BAM step of the BAM, preprocessing too, that:
+     - was cut short: it started with no end. Its end is then written as cut_short, as before.
+     - ended cut_short in an earlier session;
+     - ended with the outcome "failed";
+     - ended with a file failure.
+   - Rows have `failure_kind` "cut_short" or "failed_before", and the error says which, with the earlier text. An expected failure makes no row. No step is run again.
+   - `Coordinator.record_cut_short_steps` takes each row's `failure_kind` (default "cut_short").
+   - The non-Ray runner logs the rows, as before.
+
+### Rulings
+
+- **L5** (`tests/test_bam_ledger.py`): its last check changes from "not reported the session after" to "reported again", with the user's rule change. Its name changes with it (`..._is_reported_at_each_start`).
+- **"A `master.csv` from before this change is added to"** (`tests/test_master_csv_once.py`): its setup also removes `last_bam_added` and the list file, since the record moved. Its check is unchanged.
+- **End records from before this round** have no `outcome`, and are read as not failed (only cut_short shows). Such records exist only on this unmerged branch.
+- **A failure to append the key after `master.csv` was written** raises, so the BAM's preprocessing shows a `master_csv` failed file. The next update repairs the list.
+
+### Tests (new)
+
+| # | Test | Before (`2905c04`) |
+|---|------|------|
+| Q1 | a torn last line is cut off before the next record | fail: `LedgerError` |
+| Q2 | two batches that share a BAM keep their own lists (Ray; and the ledger records the CNV batch's BAMs) | fail: CNV list became the MGMT batch's |
+| Q3 | the same, non-Ray | fail: same |
+| C3 | a converted batch sees its batch, and its results reach the first BAM (control) | pass |
+| Q4 | a per-BAM step is not run again when its worker dies (`max_retries` 0) | fail: None |
+| C4 | a classifier keeps Ray's retries (control) | pass |
+| Q5 | a step that failed is reported at each start and not run | fail: no row |
+| Q6 | a preprocessing that failed is reported at the next start and not run | fail: no row |
+| Q7 | a BAM that failed inside a batch that went on is reported at the next start (only that BAM) | fail: no row |
+| C5 | a fail-only BAM's expected failure is not reported at the next start (control) | pass |
+| C6 | a BAM whose steps all ended well reports nothing at the next start (control) | pass |
+| Q8 | a cut-short step whose report was lost to a second stop is reported at the next start | fail: no row |
+| Q9 | the Coordinator keeps the kind of an earlier failure | fail: "cut_short" |
+| Q10 | a sample with 4,000 BAMs keeps a `master.csv` every reader can read (with its panel) | fail: `csv.Error`, field limit |
+| Q11 | a stop between `master.csv` and its list counts the BAM once | fail: no list helper |
+| Q12 | a list cut off mid-key is repaired | fail: no list file |
+| L5 (ruled) | a step cut short is reported at each start | fail: not reported the session after |
+
+### Pass rules (locked)
+
+- **R6:** on `2905c04`, the tests fail as shown, and the controls pass (measured).
+- **R7:** after the fixes, `test_bam_ledger.py` and `test_master_csv_once.py` all pass, and so do `test_job_failures.py` and `test_file_failures.py`.
+- **R8:** the full suite passes: 843 + 16 = 859.
+- **R9:** each mutant below, applied alone, makes its test fail (pytest exit 1). The control N0 leaves them passing.
+  - X1: the append doesn't cut a torn tail → Q1.
+  - X2: Ray's `_convert_batched_jobs` writes into the shared first context → Q2.
+  - X3: the non-Ray one does → Q3.
+  - X4: the CNV remote keeps Ray's retries → Q4.
+  - X5: no row for a step whose outcome failed → Q5.
+  - X6: a row for any outcome but success → C5.
+  - X7: the worker ignores file failures → Q7.
+  - X8: no row for an earlier cut_short → Q8.
+  - X9: the Coordinator ignores the row's `failure_kind` → Q9.
+  - X10: `master.csv` also keeps every key in a column → Q10.
+  - X11: no repair when `last_bam_added` is not on the list → Q11.
+  - X12: no row for a failed preprocessing → Q6.
+  - X13: the converted batch's context is a deep copy → C3.
+  - N0: a no-op change → nothing fails.
+- **R10:** `robin.yml` and `pyproject.toml` unchanged.
