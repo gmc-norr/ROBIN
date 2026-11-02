@@ -4824,6 +4824,7 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                         )
 
                         from robin.analysis.lightweight_gene_analysis import (
+                            lga_status_text,
                             pick_lga_results,
                         )
 
@@ -4834,9 +4835,8 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             str(sample_dir),
                         )
                         if found:
-                            lga_results_status.set_text(
-                                "Lightweight variant analysis completed successfully!"
-                            )
+                            # Names any region the check could not check (batch 10e)
+                            lga_results_status.set_text(lga_status_text(found))
                             _display_lga_results(found)
                         elif found_untrusted:
                             # Older versions could use another sample's BAM (VAR-9)
@@ -6041,7 +6041,9 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
 
                     context.get_sample_id = get_sample_id
                     context.add_result = lambda key, value: None  # Mock for now
-                    context.add_error = lambda key, value: None  # Mock for now
+                    # Kept, so a region the check could not check is shown (batch 10e)
+                    lga_errors = []
+                    context.add_error = lambda key, value: lga_errors.append(str(value))
 
                     # Create job
                     print(" GUI: Creating job object...")
@@ -6076,8 +6078,11 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                                 "Lightweight variant analysis completed successfully!"
                             )
                             lga_status["status"] = "completed"
+                            lga_status["partial"] = bool(lga_errors)
                             lga_status["message"] = (
-                                "Lightweight variant analysis completed successfully!"
+                                lga_errors[-1]
+                                if lga_errors
+                                else "Lightweight variant analysis completed successfully!"
                             )
 
                         except Exception as e:
@@ -6104,7 +6109,9 @@ def add_coverage_section(launcher: Any, sample_dir: Path) -> None:
                             try:
                                 lga_status_label.set_text(lga_status["message"])
                                 lga_status_label.classes(
-                                    replace="text-sm text-green-600"
+                                    replace="text-sm text-red-600"
+                                    if lga_status.get("partial")
+                                    else "text-sm text-green-600"
                                 )
                                 lga_analysis_button.enable()
                                 lga_analysis_button.set_text("Rerun Variant Analysis")

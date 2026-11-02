@@ -108,6 +108,19 @@ def gene_pathogenic_status(high_coverage: int, found: int, review: int) -> str:
     return "none_detected"
 
 
+def _variant_genes(variant: Dict[str, Any]) -> List[str]:
+    """The gene symbols of a ClinVar record's GENEINFO (``SYMBOL:ID``, ``|`` between genes)."""
+    info = str(variant.get("gene_info") or "")
+    return [part.split(":")[0] for part in info.split("|") if part.split(":")[0] not in ("", "unknown")]
+
+
+def region_label(failed: Dict[str, Any]) -> str:
+    """A failed region for people: its name, with its genes when they differ from it."""
+    region = str(failed.get("region", "?"))
+    genes = [str(g) for g in failed.get("genes") or []]
+    return region if not genes or genes == [region] else f"{region} ({', '.join(genes)})"
+
+
 def _is_plain_allele(allele: str) -> bool:
     """True for an allele of plain bases (A, C, G, T, N): one a pileup can look for."""
     return bool(allele) and set(allele.upper()) <= set("ACGTN")
@@ -168,6 +181,8 @@ class LightweightGeneAnalysis:
         # Pathogenic records with no plain-base ALT (ClinVar's "." = the reference
         # base itself): a pileup can't check them, so they are skipped and counted
         self.clinvar_records_not_checkable = 0
+        # Regions whose check raised: listed in the results, never just dropped (batch 10e)
+        self.regions_failed: List[Dict[str, Any]] = []
 
         # Load ClinVar data
         self._load_clinvar_data()
@@ -383,6 +398,7 @@ class LightweightGeneAnalysis:
         )
 
         results = {}
+        self.regions_failed = []
         total_regions = len([r for r in region_variants.values() if r])
 
         print(f"Starting analysis of {total_regions} regions with variants...")
@@ -409,6 +425,16 @@ class LightweightGeneAnalysis:
             except Exception as e:
                 print(f"Error analyzing region '{region_id}': {e}")
                 self.logger.error(f"Error analyzing region {region_id}: {e}")
+                self.regions_failed.append({
+                    "region": region_id,
+                    "genes": sorted({g for v in variants for g in _variant_genes(v)}),
+                    "intervals": [
+                        f"{r['chromosome']}:{r['start']}-{r['end']}"
+                        for r in bed_regions
+                        if r["name"] == region_id
+                    ],
+                    "error": f"{type(e).__name__}: {e}",
+                })
                 continue
 
         print(f"Analysis completed! Successfully analyzed {len(results)} regions")
@@ -536,10 +562,16 @@ class LightweightGeneAnalysis:
 
                     parts = line.split("\t")
                     if len(parts) >= 3:
+                        try:
+                            start, end = int(parts[1]), int(parts[2])
+                        except ValueError:
+                            raise ValueError(
+                                f"{bed_path} line {line_num} is not a BED row: {line!r}"
+                            ) from None
                         region = {
                             "chromosome": parts[0],
-                            "start": int(parts[1]),
-                            "end": int(parts[2]),
+                            "start": start,
+                            "end": end,
                             "name": (
                                 parts[3] if len(parts) > 3 else f"region_{line_num}"
                             ),
@@ -560,9 +592,11 @@ class LightweightGeneAnalysis:
             return regions
 
         except Exception as e:
+            # Raised, not read as "no regions": the check never says "nothing found" for
+            # regions it couldn't read (batch 10e)
             print(f"   Error loading BED file: {e}")
             self.logger.error(f"Error loading BED file: {e}")
-            return []
+            raise
 
     def _find_bed_clinvar_intersections(
         self, bed_regions: List[Dict[str, Any]]
@@ -1709,6 +1743,8 @@ class LightweightGeneAnalysis:
                 ),
                 # ClinVar records skipped because they have no alternate allele
                 "clinvar_records_not_checkable": self.clinvar_records_not_checkable,
+                # Regions whose check failed: their genes have no result (batch 10e)
+                "regions_failed": list(getattr(self, "regions_failed", None) or []),
             },
             "genes": gene_variants,
         }
@@ -1785,6 +1821,28 @@ def lga_results_belong_to_sample(json_path: str, sample_folder: str) -> bool:
     folder = os.path.realpath(sample_folder)
     bam = os.path.realpath(input_bam)
     return os.path.commonpath([folder, bam]) == folder
+
+
+LGA_DONE_TEXT = "Lightweight variant analysis completed successfully!"
+
+
+def lga_status_text(json_path: str) -> str:
+    """The GUI's status line for a results file: it names the regions the check could not
+    check, which have no result. A file written before batch 10e has no list."""
+    import json
+
+    try:
+        with open(json_path) as f:
+            failed = (json.load(f).get("metadata") or {}).get("regions_failed") or []
+    except (OSError, ValueError, AttributeError) as e:
+        return f"The variant results could not be read: {e}"
+    failed = [f for f in failed if isinstance(f, dict)]
+    if not failed:
+        return LGA_DONE_TEXT
+    return (
+        f"Variant analysis finished, but {len(failed)} region(s) could not be checked, "
+        f"so they have no result: {', '.join(region_label(f) for f in failed)}"
+    )
 
 
 def pick_lga_results(
@@ -2023,6 +2081,18 @@ def lightweight_gene_analysis_handler(job, work_dir: Optional[str] = None) -> No
             )
         except Exception:
             pass
+
+        # A region the check could not check fails the job; the other genes' results stay
+        # in the file written above (batch 10e)
+        if analysis.regions_failed:
+            failed = analysis.regions_failed
+            message = (
+                f"The variant check could not check {len(failed)} region(s), which have no "
+                f"result: {', '.join(region_label(f) for f in failed)}. "
+                f"First error: {failed[0]['error']}"
+            )
+            logger.error(message)
+            job.context.add_error("lightweight_gene_analysis", message)
 
         print(" Lightweight gene analysis completed successfully!")
         print(

@@ -2063,6 +2063,32 @@ class TargetAnalysis:
         sample_dir = os.path.join(self.work_dir, sample_id)
         start_time = time.time()
         claim = None
+        claimed, batch_dir, committed = [], None, False
+        taken = []  # the claimed sets whose files began to move into the claim folder
+        # A BAM whose coverage was not added, or whose reads are not in target.bam: one
+        # failed-file entry each, which the handler shows (batch 10e)
+        file_failures: List[Dict[str, str]] = []
+        listed = set()
+
+        def failed(n: str, text: str) -> None:
+            listed.add(n)
+            file_failures.append({
+                "file": _staged_set_bam(batch_dir, n),
+                "error": f"{text} Its files are kept in _staging/{os.path.basename(batch_dir)}.",
+                "step": _COVERAGE_STEP,
+            })
+
+        def not_added(result: Dict[str, Any]) -> Dict[str, Any]:
+            # After the claim and before the commit, no claimed set's coverage was added; the
+            # claim folder stays, and finalize lists it. Before the claim, nothing is lost:
+            # the files are still staged for the next accumulation.
+            if not committed:
+                for n in taken:
+                    if n not in listed:
+                        failed(n, f"Its coverage was not added ({result['status']}: {result['error']}).")
+            if file_failures:
+                result["file_failures"] = file_failures
+            return result
 
         try:
             # --- Locked: claim complete staged sets ---
@@ -2084,6 +2110,7 @@ class TargetAnalysis:
                 claim.acquire()
                 os.makedirs(batch_dir)
                 for n in claimed:
+                    taken.append(n)
                     for kind, ext in _STAGED_KINDS:
                         name = f"{kind}_{n}.{ext}"
                         shutil.move(os.path.join(staging_dir, name), os.path.join(batch_dir, name))
@@ -2109,6 +2136,11 @@ class TargetAnalysis:
                         src = f.read().strip()
                 except Exception as e:
                     logger.warning(f"Error loading staged set {n} for {sample_id}: {e}")
+                    failed(
+                        n,
+                        f"Its staged coverage could not be read ({type(e).__name__}: {e}), "
+                        "so its coverage is not counted.",
+                    )
                     continue
                 # The merged-panel part is optional: unreadable counts as missing (the panel
                 # depth falls back to the row sum); the BAM's other totals are still used.
@@ -2128,7 +2160,7 @@ class TargetAnalysis:
             if not contigs:
                 logger.error("No staging files could be loaded successfully")
                 _keep_incomplete_claim(batch_dir, [], claimed, None)
-                return {"status": "load_failed", "files_attempted": len(claimed)}
+                return {"status": "load_failed", "files_attempted": len(claimed), "file_failures": file_failures}
 
             read_frames = []
             for bam_path in source_bams:
@@ -2141,11 +2173,12 @@ class TargetAnalysis:
                     ["chrom", "startpos", "endpos", "name"], as_index=False
                 ).agg({"reads": "sum"})
 
-            batch_bam, batch_bam_error = None, None
+            batch_bam, batch_bam_error, bam_problem = None, None, None
             try:
                 batch_bam = self._write_batch_bam(sample_id, batch_dir, list(dict.fromkeys(source_bams)))
             except Exception as e:
                 batch_bam_error = str(e)
+                bam_problem = f"the batch BAM could not be written ({e})"
                 logger.error(f"Could not write the batch BAM for {sample_id}; target.bam will miss these reads: {e}")
 
             # --- Locked: read the totals, add this batch, write every file; then move the
@@ -2169,10 +2202,19 @@ class TargetAnalysis:
                         else pd.concat(union_frames, ignore_index=True)
                     ),
                 )
+                committed = True
                 if batch_bam:
                     final = os.path.join(sample_dir, f"batch_{used[0]}_{uuid.uuid4().hex[:8]}.bam")
-                    os.replace(f"{batch_bam}.bai", f"{final}.bai")
-                    os.replace(batch_bam, final)  # finalize globs *.bam: the index is there first
+                    try:
+                        _install_batch_bam(batch_bam, final)
+                    except Exception as e:
+                        # The coverage is counted: like a batch BAM that couldn't be written
+                        batch_bam_error = f"could not be moved into place: {e}"
+                        bam_problem = f"the batch BAM could not be moved into place ({e})"
+                        logger.error(f"Could not move the batch BAM for {sample_id} into place: {e}")
+                if bam_problem:
+                    for n in used:
+                        failed(n, f"Its coverage is counted, but its reads are not in target.bam: {bam_problem}.")
                 not_read = [n for n in claimed if n not in used]
                 if batch_bam_error or not_read:
                     # These reads are not in target.bam: keep them, and say so.
@@ -2192,16 +2234,18 @@ class TargetAnalysis:
             }
             if batch_bam_error:
                 result["batch_bam_error"] = batch_bam_error
+            if file_failures:
+                result["file_failures"] = file_failures
             return result
 
         except TimeoutError as e:
             logger.error(f"Could not acquire accumulation lock for {sample_id}: {e}")
-            return {"status": "lock_timeout", "error": str(e)}
+            return not_added({"status": "lock_timeout", "error": str(e)})
         except Exception as e:
             logger.error(f"Error during batch accumulation for {sample_id}: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            return {"status": "error", "error": str(e)}
+            return not_added({"status": "error", "error": str(e)})
         finally:
             if claim is not None:
                 _end_claim(claim)
@@ -2366,25 +2410,36 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, reference
         # Process each BAM file individually using staging
         logger.info("Processing files with staging (fast path)")
         processed_files = 0
-        
+        # A BAM that could not be staged is not counted: a failed file (batch 10e)
+        not_staged = []
+
+        def not_counted(bam_path: str, why: str) -> None:
+            not_staged.append({
+                "file": bam_path,
+                "error": f"Its coverage could not be prepared, so it is not counted: {why}",
+                "step": _COVERAGE_STEP,
+            })
+
         for i, (bam_path, metadata) in enumerate(zip(bam_paths, metadata_list)):
             logger.info(f"Processing BAM file {i+1}/{len(bam_paths)}: {os.path.basename(bam_path)}")
-            
+
             try:
                 # Process file with staging
                 target_metadata, should_accumulate = target_analysis.process_file_with_staging(
                     bam_path, metadata
                 )
-                
+
                 if target_metadata.error_message:
                     logger.warning(f"Error processing {os.path.basename(bam_path)}: {target_metadata.error_message}")
+                    not_counted(bam_path, target_metadata.error_message)
                     continue
-                
+
                 processed_files += 1
                 logger.debug(f"Successfully staged file {i+1}: {os.path.basename(bam_path)}")
-                
+
             except Exception as e:
                 logger.warning(f"Error processing {os.path.basename(bam_path)}: {e}")
+                not_counted(bam_path, f"{type(e).__name__}: {e}")
                 continue
 
         if processed_files == 0:
@@ -2408,6 +2463,7 @@ def process_multiple_files(bam_paths, metadata_list, work_dir, logger, reference
 
         analysis_result["processing_steps"].append("accumulation_complete")
         logger.info(f"Accumulation completed: {accumulation_result}")
+        analysis_result["file_failures"] = not_staged + list(accumulation_result.get("file_failures") or [])
 
         # Load final accumulated data for result metadata
         sample_output_dir = os.path.join(work_dir, sample_id)
@@ -2552,6 +2608,8 @@ def target_handler(job, work_dir=None, reference=None, target_panel=None):
             job.context.add_error("target_analysis", batch_result["error_message"])
         else:
             logger.info("Batch processing completed successfully with aggregated target analysis")
+            # BAMs whose coverage was not added: failed files, the job goes on (batch 10e)
+            _add_file_failures(job, batch_result.get("file_failures"))
             job.context.add_result(
                 "target_analysis",
                 {
@@ -2665,6 +2723,8 @@ def target_handler(job, work_dir=None, reference=None, target_panel=None):
                 )
                 logger.info(f"Accumulation result: {accumulation_result}")
                 job.context.add_metadata("accumulation_result", accumulation_result)
+                # BAMs whose coverage was not added: failed files, the job goes on (batch 10e)
+                _add_file_failures(job, accumulation_result.get("file_failures"))
             
             # Store flag for potential end-of-queue accumulation
             job.context.add_metadata("needs_final_accumulation", True)
@@ -2748,6 +2808,43 @@ def _end_claim(claim: "FileLock") -> None:
     except FileNotFoundError:
         pass
     claim.release()
+
+
+# The failed-file step name for a BAM whose coverage the target step could not add.
+_COVERAGE_STEP = "target_coverage"
+
+
+def _staged_set_bam(set_dir: str, n: str) -> str:
+    """The BAM a staged set came from, or the set's own coverage file when that can't be read."""
+    try:
+        with open(os.path.join(set_dir, f"source_bam_{n}.txt")) as f:
+            source = f.read().strip()
+        if source:
+            return source
+    except OSError:
+        pass
+    return os.path.join(set_dir, f"coverage_{n}.parquet")
+
+
+def _install_batch_bam(batch_bam: str, final: str) -> None:
+    """Move a committed batch BAM to where finalize looks, its index first (finalize globs
+    *.bam). If the BAM can't be moved, its index goes back, so the claim folder keeps both."""
+    os.replace(f"{batch_bam}.bai", f"{final}.bai")
+    try:
+        os.replace(batch_bam, final)
+    except Exception:
+        try:
+            os.replace(f"{final}.bai", f"{batch_bam}.bai")
+        except OSError:
+            pass
+        raise
+
+
+def _add_file_failures(job, entries) -> None:
+    """Add failed-file entries to the job's list, keeping those already there."""
+    if entries:
+        failures = list(job.context.metadata.get("file_failures") or [])
+        job.context.add_metadata("file_failures", failures + list(entries))
 
 
 def _keep_incomplete_claim(claim_dir: str, counted, not_read, batch_bam_error) -> None:
@@ -3121,6 +3218,8 @@ def target_bam_finalize_handler(job, work_dir: Optional[str] = None) -> None:
         if result.get("status") == "error":
             job.context.add_error("target_bam_finalize", result.get("error", "Unknown error"))
         else:
+            # BAMs whose coverage its accumulation could not add: failed files (batch 10e)
+            _add_file_failures(job, result.get("file_failures"))
             job.context.add_result("target_bam_finalize", result)
 
     except Exception as e:
