@@ -110,3 +110,31 @@ All go through the real `bam_preprocessing_handler`, with synthetic BAMs from `t
   - M5: the handler logs a failed update instead of reporting it → T7.
   - N0: a no-op change → nothing fails.
 - **P5:** `robin.yml` and `pyproject.toml` unchanged.
+
+## Result (2026-11-02, on `52b5169`): supported
+
+Every pass rule holds.
+
+- **P1, before** (`01a5482`, measured before the lock, `before_10d1.txt`): T1, T2, T4, T6, T7 and T8 failed, each for its own reason, and T3 and T5 passed.
+- **P2, after:** all 8 pass.
+- **P3, full suite:** 824 passed (`suite_10d1.txt`).
+- **P4, mutants** (`mutate_10d1.py`; only pytest exit 1 counts as caught; `mutants_10d1.txt`):
+  - M1: caught by T1.
+  - M2: caught by T2.
+  - M3: caught by T6.
+  - M4: caught by T7.
+  - M5: caught first by T6 (the runner stops at the first failure). Run against T7 alone, it is caught by T7 too.
+  - N0 survived (8 passed).
+- **P5, pins:** `git diff 01a5482 -- robin.yml pyproject.toml` is empty.
+
+The output files are in this session's scratchpad folder.
+
+## The plan changed after this part (the user's choice, 2026-11-02)
+
+The 8-part order above is replaced, and this part stays.
+- **Why:** mapping parts 2–6 showed six counting steps and seven batches, two of them large (target coverage commits about ten files one by one, and fusion appends part files with new ids on each run). The user asked for a simpler way and chose it.
+- **The new plan:** a ledger records when each of a BAM's steps starts and ends. After a restart, finished steps are skipped and unstarted ones run. A step that was running at the stop is not run again (it may have added its counts) and is listed as possibly incomplete.
+- **The remaining parts:**
+  - Part 2: the ledger, with JOB-8.
+  - Part 3: JOB-4.
+- **Why this part stays:** re-running a BAM's unstarted steps starts from its preprocessing, which must not count the BAM in `master.csv` again.
