@@ -2,12 +2,13 @@
 they came from those reads (batch 10b: JOB-6). Synthetic BAMs; Clair3 is never run.
 
 - The SNP job first merges what is not yet in target.bam: new batch BAMs and staged files.
-- A finished call records which batch BAMs its target.bam held, in
-  ``clair3/target_bam_batches.txt`` (one name per line).
+- A finished call records which target.bam it read (its batch BAMs, size and time), in
+  ``clair3/target_bam_source.json``.
 - Earlier calls are reused only when that record matches target.bam and nothing waits to
   be merged; otherwise the variants are called again.
 """
 
+import json
 import os
 
 import pytest
@@ -20,7 +21,7 @@ from robin.analysis.target_analysis import (
 from robin.gui_launcher import GUILauncher
 
 PANEL_NAME = "TESTPANEL"
-STAMP = "target_bam_batches.txt"
+STAMP = "target_bam_source.json"
 
 
 @pytest.fixture
@@ -109,7 +110,10 @@ def _write_calls(sample, stamp_names=None):
     for name in ("snpsift_output.vcf", "snpsift_indel_output.vcf"):
         (clair / name).write_text("##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n")
     if stamp_names is not None:
-        (clair / STAMP).write_text("".join(f"{n}\n" for n in sorted(stamp_names)))
+        # The record of a target.bam that held these batch BAMs.
+        record = ta_mod._target_bam_identity(str(sample["dir"] / "target.bam"))
+        record["batches"] = sorted(stamp_names)
+        (clair / STAMP).write_text(json.dumps(record))
 
 
 def _run_until_input_checks(sample):
@@ -123,7 +127,7 @@ def _stamp(sample):
     path = sample["dir"] / "clair3" / STAMP
     if not path.exists():
         return None
-    return {line.strip() for line in path.read_text().splitlines() if line.strip()}
+    return set(json.loads(path.read_text())["batches"])
 
 
 # The SNP job merges first -------------------------------------------------------------

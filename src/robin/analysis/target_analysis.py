@@ -2062,6 +2062,7 @@ class TargetAnalysis:
         staging_dir = self._get_staging_dir(sample_id)
         sample_dir = os.path.join(self.work_dir, sample_id)
         start_time = time.time()
+        claim = None
 
         try:
             # --- Locked: claim complete staged sets ---
@@ -2078,6 +2079,9 @@ class TargetAnalysis:
                     return {"status": "below_threshold", "files_pending": len(counters)}
                 claimed = counters if force else counters[: self.batch_size]
                 batch_dir = os.path.join(staging_dir, f"_batch_{uuid.uuid4()}")
+                # Held until this claim ends, so finalize can wait for it (JOB-6).
+                claim = FileLock(_claim_lock_path(batch_dir), timeout=0)
+                claim.acquire()
                 os.makedirs(batch_dir)
                 for n in claimed:
                     for kind, ext in _STAGED_KINDS:
@@ -2123,7 +2127,7 @@ class TargetAnalysis:
                 used.append(n)
             if not contigs:
                 logger.error("No staging files could be loaded successfully")
-                shutil.rmtree(batch_dir, ignore_errors=True)
+                _keep_incomplete_claim(batch_dir, [], claimed, None)
                 return {"status": "load_failed", "files_attempted": len(claimed)}
 
             read_frames = []
@@ -2169,7 +2173,12 @@ class TargetAnalysis:
                     final = os.path.join(sample_dir, f"batch_{used[0]}_{uuid.uuid4().hex[:8]}.bam")
                     os.replace(f"{batch_bam}.bai", f"{final}.bai")
                     os.replace(batch_bam, final)  # finalize globs *.bam: the index is there first
-                shutil.rmtree(batch_dir, ignore_errors=True)
+                not_read = [n for n in claimed if n not in used]
+                if batch_bam_error or not_read:
+                    # These reads are not in target.bam: keep them, and say so.
+                    _keep_incomplete_claim(batch_dir, used, not_read, batch_bam_error)
+                else:
+                    shutil.rmtree(batch_dir, ignore_errors=True)
 
             gc.collect()
             elapsed = time.time() - start_time
@@ -2193,6 +2202,9 @@ class TargetAnalysis:
             import traceback
             logger.error(traceback.format_exc())
             return {"status": "error", "error": str(e)}
+        finally:
+            if claim is not None:
+                _end_claim(claim)
 
 
 def process_single_file(
@@ -2720,19 +2732,106 @@ def _merged_batch_names(target_bam_path: str) -> set:
     return {c[len(_MERGED_TAG):] for c in comments if c.startswith(_MERGED_TAG)}
 
 
-# Which target.bam the SNP calls in clair3/ came from: its batch list when the call ran.
-_SNP_SOURCE = "target_bam_batches.txt"
+# A worker moves the staged files it claims into _staging/_batch_<id>/ and adds them
+# outside the accumulation lock, holding this claim's own lock until it ends.
+_CLAIM_WAIT_SECONDS = 300.0
+
+
+def _claim_lock_path(claim_dir: str) -> str:
+    sample_dir = os.path.dirname(os.path.dirname(claim_dir))
+    return os.path.join(sample_dir, "_locks", f"claim{os.path.basename(claim_dir)}.lock")
+
+
+def _end_claim(claim: "FileLock") -> None:
+    try:
+        os.remove(claim.lock_file)
+    except FileNotFoundError:
+        pass
+    claim.release()
+
+
+def _keep_incomplete_claim(claim_dir: str, counted, not_read, batch_bam_error) -> None:
+    """Keep a claim folder whose reads did not all reach target.bam, and say why: they
+    count as reads not in target.bam until someone deals with them."""
+    if batch_bam_error:
+        bam = f"could not be written: {batch_bam_error}"
+    else:
+        bam = "written" if counted else "not written"
+    with open(os.path.join(claim_dir, "incomplete.txt"), "w") as f:
+        f.write(
+            "The reads of these staged files are not all in target.bam.\n"
+            f"Coverage counted for: {' '.join(counted) or 'none'}\n"
+            f"Could not be read (coverage not counted): {' '.join(not_read) or 'none'}\n"
+            f"Batch BAM: {bam}\n"
+        )
+
+
+def _claims_left(sample_dir: str) -> List[str]:
+    """Wait for workers still adding claimed staged files, up to _CLAIM_WAIT_SECONDS in
+    all. Returns the claim folders still there: a worker still adding them, or one that
+    stopped or failed. Their reads are not in target.bam."""
+    deadline = time.time() + _CLAIM_WAIT_SECONDS
+    left = []
+    for claim_dir in sorted(glob.glob(os.path.join(sample_dir, "_staging", "_batch_*"))):
+        lock_path = _claim_lock_path(claim_dir)
+        lock = FileLock(lock_path, timeout=max(0.0, deadline - time.time()))
+        try:
+            lock.acquire()
+        except TimeoutError:
+            lock.release()
+            left.append(os.path.basename(claim_dir))  # still being added
+            continue
+        lock.release()
+        try:
+            os.remove(lock_path)
+        except FileNotFoundError:
+            pass
+        if os.path.exists(claim_dir):
+            left.append(os.path.basename(claim_dir))
+    return left
+
+
+def _merge_missed_reads(result: Dict[str, Any]) -> Optional[str]:
+    """What kept reads out of target.bam in a finalize result; None when nothing did."""
+    status = result.get("status")
+    if status not in ("success", "no_files", "no_pending_files"):
+        detail = result.get("error")
+        return f"the accumulation ended with '{status}'" + (f": {detail}" if detail else "")
+    if result.get("batch_bam_error"):
+        return f"a batch BAM could not be written: {result['batch_bam_error']}"
+    if result.get("claims_left"):
+        folders = ", ".join(f"_staging/{name}" for name in result["claims_left"])
+        return f"staged reads in {folders} were not added (a worker is still adding them, or it stopped)"
+    return None
+
+
+# Which target.bam the SNP calls in clair3/ came from, when the call ran.
+_SNP_SOURCE = "target_bam_source.json"
 
 
 def _snp_source_path(sample_dir: str) -> str:
     return os.path.join(sample_dir, "clair3", _SNP_SOURCE)
 
 
+def _target_bam_identity(target_bam: str) -> Dict[str, Any]:
+    """Which target.bam this is: its merged batches, size and modification time. A merge,
+    or any other rewrite, changes it."""
+    st = os.stat(target_bam)
+    return {
+        "batches": sorted(_merged_batch_names(target_bam)),
+        "size": st.st_size,
+        "mtime_ns": st.st_mtime_ns,
+    }
+
+
 def _reads_wait_to_merge(sample_dir: str) -> bool:
-    """True when a batch BAM or a staged file holds reads not yet in target.bam."""
+    """True when a batch BAM, a staged file or a claim folder holds reads not yet in
+    target.bam."""
+    staging = os.path.join(sample_dir, "_staging")
     return bool(
         glob.glob(os.path.join(sample_dir, "batch_*.bam"))
-        or glob.glob(os.path.join(sample_dir, "_staging", "coverage_*.parquet"))
+        or glob.glob(os.path.join(staging, "coverage_*.parquet"))
+        or glob.glob(os.path.join(staging, "_batch_*"))
     )
 
 
@@ -2746,18 +2845,18 @@ def snp_calls_are_current(sample_dir: str) -> bool:
         return False
     try:
         with open(_snp_source_path(sample_dir)) as f:
-            recorded = {line.strip() for line in f if line.strip()}
-        current = _merged_batch_names(target_bam)
+            recorded = json.load(f)
+        current = _target_bam_identity(target_bam)
     except Exception:
         return False
     return recorded == current and not _reads_wait_to_merge(sample_dir)
 
 
-def _write_snp_source(sample_dir: str, batch_names) -> None:
+def _write_snp_source(sample_dir: str, identity: Dict[str, Any]) -> None:
     path = _snp_source_path(sample_dir)
     tmp = f"{path}.tmp"
     with open(tmp, "w") as f:
-        f.writelines(f"{name}\n" for name in sorted(batch_names))
+        json.dump(identity, f)
     os.replace(tmp, path)
 
 
@@ -2876,7 +2975,14 @@ def finalize_accumulation_for_sample(
         else:
             logger.info(f"No pending files for {sample_id} - skipping accumulation")
             result = {"status": "no_pending_files", "sample_id": sample_id}
-        
+
+        # Staged files another worker claimed are not in a batch BAM yet: wait for it,
+        # so its reads are merged too (JOB-6). A claim folder left after that is listed.
+        left = _claims_left(sample_output_dir)
+        if left:
+            logger.warning(f"Staged reads in {left} for {sample_id} are not in target.bam")
+            result["claims_left"] = left
+
         # Merge every new batch BAM into target.bam, keeping the reads already in it
         # (TGT-1). target.bam's header lists the batch BAMs merged into it, so one left
         # behind by a crash after the merge is not merged twice. The merge has its own
@@ -3739,6 +3845,11 @@ def run_snp_analysis(
             except ImportError:
                 logger.info("psutil not available, skipping resource logging")
 
+            # A region's VCFs count only when written by this run: files from an earlier
+            # run stay in clair3/ (the container writes them as root). 2 s allows for
+            # file-system time rounding.
+            run_started = time.time() - 2
+
             # Process each region
             for i, region_spec in enumerate(regions):
                 region_label = region_spec["label"]
@@ -3841,10 +3952,12 @@ def run_snp_analysis(
                             status_code,
                         )
 
-                    logger.warning(
-                        f"Clair3 region {i+1} failed with status code {status_code}, skipping this region"
+                    # Calls without this region would look complete: the run fails.
+                    logger.error(
+                        f"Clair3 region {i+1} ({region_label}) failed with status code "
+                        f"{status_code}; SNP calling failed"
                     )
-                    continue
+                    return ""
 
                 # Clean up container
                 client.api.remove_container(container=container.get("Id"))
@@ -3857,19 +3970,18 @@ def run_snp_analysis(
                     region_snv = f"{clair_dir}/snv.vcf.gz"
                     region_indel = f"{clair_dir}/indel.vcf.gz"
 
-                if os.path.exists(region_snv):
-                    all_snv_vcfs.append(region_snv)
-                    logger.info(f"Region {i+1} SNV output created: {region_snv}")
-                else:
-                    logger.warning(f"Region {i+1} SNV output not found: {region_snv}")
-
-                if os.path.exists(region_indel):
-                    all_indel_vcfs.append(region_indel)
-                    logger.info(f"Region {i+1} INDEL output created: {region_indel}")
-                else:
-                    logger.warning(
-                        f"Region {i+1} INDEL output not found: {region_indel}"
-                    )
+                for kind, path, found in (
+                    ("SNV", region_snv, all_snv_vcfs),
+                    ("INDEL", region_indel, all_indel_vcfs),
+                ):
+                    if not (os.path.exists(path) and os.stat(path).st_mtime >= run_started):
+                        logger.error(
+                            f"Region {i+1} ({region_label}) {kind} output was not written by "
+                            f"this run: {path}; SNP calling failed"
+                        )
+                        return ""
+                    found.append(path)
+                    logger.info(f"Region {i+1} {kind} output created: {path}")
 
             if use_split_regions:
                 # Merge all split-region outputs
@@ -3879,7 +3991,8 @@ def run_snp_analysis(
 
                 if all_snv_vcfs:
                     merged_snv = f"{clair_dir}/merged_snv.vcf.gz"
-                    merge_vcf_files(all_snv_vcfs, merged_snv, "SNV")
+                    if not merge_vcf_files(all_snv_vcfs, merged_snv, "SNV"):
+                        return ""
                     shutil.copy2(merged_snv, f"{clair_dir}/output_done.vcf.gz")
                     logger.info(f"Merged SNV VCFs into: {clair_dir}/output_done.vcf.gz")
                 else:
@@ -3888,7 +4001,8 @@ def run_snp_analysis(
 
                 if all_indel_vcfs:
                     merged_indel = f"{clair_dir}/merged_indel.vcf.gz"
-                    merge_vcf_files(all_indel_vcfs, merged_indel, "INDEL")
+                    if not merge_vcf_files(all_indel_vcfs, merged_indel, "INDEL"):
+                        return ""
                     shutil.copy2(merged_indel, f"{clair_dir}/output_indel_done.vcf.gz")
                     logger.info(
                         f"Merged INDEL VCFs into: {clair_dir}/output_indel_done.vcf.gz"
@@ -4339,10 +4453,9 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
             target_panel=target_panel or "rCNS2",  # as the finalize job does
             reference=reference,
         )
-        if merge.get("status") == "error":
-            raise RuntimeError(
-                f"Could not merge new reads into target.bam: {merge.get('error', 'unknown error')}"
-            )
+        missed = _merge_missed_reads(merge)
+        if missed:
+            raise RuntimeError(f"Not every read is in target.bam, so no variants were called: {missed}")
 
         # Check for required input files
         if not os.path.exists(target_bam):
@@ -4352,7 +4465,7 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
             raise RuntimeError(
                 f"targets_exceeding_threshold.bed not found: {targets_bed}"
             )
-        batches_read = _merged_batch_names(target_bam)
+        read_from = _target_bam_identity(target_bam)
 
         # Debug logging for reference genome
         logger.info("=== SNP ANALYSIS HANDLER DEBUGGING ===")
@@ -4408,7 +4521,7 @@ def snp_analysis_handler(job, work_dir: Optional[str] = None) -> None:
             raise RuntimeError("Failed to complete SNP analysis")
         if not annotation_only:
             # Which reads these calls came from; earlier calls are reused only on a match.
-            _write_snp_source(sample_dir, batches_read)
+            _write_snp_source(sample_dir, read_from)
 
         # Record result
         try:

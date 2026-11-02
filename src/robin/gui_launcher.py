@@ -716,8 +716,8 @@ class GUILauncher:
     def _is_target_bam_finalize_redundant(self, sample_id: str) -> bool:
         """
         True when target.bam is already merged/indexed and nothing waits to be merged: no
-        batch_*.bam and no staged file. Then running finalize again only queues noise jobs
-        and confuses the samples table.
+        batch_*.bam, no staged file and no claim folder. Then running finalize again only
+        queues noise jobs and confuses the samples table.
         """
         if not self.monitored_directory:
             return False
@@ -727,11 +727,11 @@ class GUILauncher:
         if not (tb.exists() and tb.is_file() and bai.exists() and bai.is_file()):
             return False
         try:
-            batch_bams = list(sample_dir.glob("batch_*.bam"))
-            staged = list((sample_dir / "_staging").glob("coverage_*.parquet"))
+            from robin.analysis.target_analysis import _reads_wait_to_merge
+
+            return not _reads_wait_to_merge(str(sample_dir))
         except Exception:
             return False
-        return len(batch_bams) == 0 and len(staged) == 0
 
     def _merge_job_types_with_persisted(
         self, sid: str, workflow: Dict[str, Any]
