@@ -202,3 +202,13 @@ whenever a claim is withdrawn or a finding turns out to be an artifact. Concrete
   - A `keep_claim` folder whose name never reached the disk was not made again, though the lost-batch-BAM step already did that.
   - Codex's second code review found all three, through the real SNP handler.
 - **Gate:** D.3: "checked by reading" is inferred, not measured. A rule about every error needs a test with an error that has no text. And A.5: a fact every later finalize needs belongs on disk where every finalize looks (`incomplete.txt`), not in the return value of whichever job happened to finish the list.
+
+## 18. "No ledger" and "contents not synced", both read off the Python code (batch 10e round 6 → 7, 2026-11-03)
+- **Claimed:**
+  - Round 6's plan (`4492af6`) and code (`f1e4039`): a clear skips quietly only when there is no ledger; anything else raises and keeps the list.
+  - Round 6's rulings and learning (`l-c65e7566`): finalize does not sync target.bam's contents before it deletes the batch BAMs.
+- **Rested on:**
+  - "No ledger" was tested with `os.path.exists`, which is False for any error looking the file up (an I/O error, a folder ROBIN may not search), not only for a missing file. Measured in round 7: False with `os.stat` raising EIO, and for a real file in a folder with mode 0.
+  - "Not synced" was read off the Python code: no `_sync_file` call. Codex traced the system calls (pysam 0.24.1, samtools 1.24): samtools `fdatasync`s the new target.bam and its index before they are renamed into place.
+  - Codex's round-6 code review found both.
+- **Gate:** D.3: both were inferred, not measured. A rule that splits "missing" from "anything else" needs a test with a lookup error, not only a missing file. A claim about what reaches the disk needs a syscall trace, not a read of the Python layer: the native library below it does its own syncs.
