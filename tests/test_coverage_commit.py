@@ -16,6 +16,7 @@ before what is checked by the order of the sync calls (C7). Synthetic BAMs only;
 import errno
 import glob
 import json
+import logging
 import os
 import shutil
 
@@ -774,6 +775,265 @@ def test_a_batch_bam_move_that_reports_an_error_is_judged_by_where_the_bam_is(tm
         assert ta_mod._merge_missed_reads(first) is not None, "the SNP check would call on missing reads"
         again = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
         assert ta_mod._merge_missed_reads(again) is not None, "a later finalize lets the SNP calls through"
+
+
+@pytest.mark.parametrize("case", ["error", "killed", "own_job", "still_failing"])
+def test_a_failure_a_later_finish_puts_right_is_not_reported_again(tmp_path, panel, bams, monkeypatch, case):
+    """C16 (the fourth code review's finding): BAM 1's batch BAM move raises before it takes
+    effect, so the install records BAM 1 in the ledger as not in target.bam; then putting the
+    install on disk (_retire) fails, so the list stays. Finalize's finish does the list again:
+    - error: _retire raised an error, and the finish moves the BAM. BAM 1's reads are in
+      target.bam, so no start reports it any more;
+    - killed: as error, but the process died there;
+    - own_job: as error, but BAM 1's own target job ran the add-up (as the per-BAM target
+      handler does), so its end line in the ledger carries the failure too;
+    - still_failing: the finish's move fails too. BAM 1 is still reported at every start,
+      and the SNP check refuses."""
+    from robin.bam_identity import bam_key
+    from robin.file_ledger import LEDGER_NAME
+
+    work = tmp_path / "work"
+    sample_dir = os.path.join(str(work), SAMPLE)
+    _ledger_with_ended_target_steps(work, bams)
+    assert _add(work, bams[0])["status"] == "success"
+    _stage(work, bams[1])
+    real_replace, real_retire = os.replace, ta_mod._retire
+    moves = []
+
+    def replace(src, dst, *args, **kwargs):
+        if _in(src, "_batch_") and not _in(dst, "_batch_") and str(src).endswith(".bam") and (
+            not moves or case == "still_failing"
+        ):
+            moves.append(str(src))
+            raise OSError(errno.EIO, "synthetic: the disk is away", str(src))
+        return real_replace(src, dst, *args, **kwargs)
+
+    def retire(*args, **kwargs):
+        monkeypatch.setattr(ta_mod, "_retire", real_retire)  # once
+        if case == "killed":
+            raise _Killed("killed before the list is retired")
+        raise OSError(errno.EIO, "synthetic: a sync fails")
+
+    def add_up():
+        return _analysis(work).accumulate_staged_files(SAMPLE, force=True)
+
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(ta_mod, "_retire", retire)
+    if case == "killed":
+        with pytest.raises(_Killed):
+            add_up()
+    elif case == "own_job":
+        from robin import workflow_ray as wr
+
+        ctx = wr.WorkflowContext(filepath=bams[1], metadata={
+            "bam_key": bam_key(bams[1]), "work_dir": str(work), "bam_metadata": {"sample_id": SAMPLE},
+        })
+
+        def handler(job):  # as the per-BAM target handler: the add-up's failed files are its own
+            ta_mod._add_file_failures(job, add_up().get("file_failures"))
+
+        q = wr.job_queue_of("target")
+        wr._wrap_real_handler(handler, "target")(wr.Job(80_000_016, "target", q, [f"{q}:target"], 0, ctx))
+        with open(os.path.join(str(work), LEDGER_NAME)) as f:
+            ends = [r for r in map(json.loads, f) if r["e"] == "end" and r["key"] == bam_key(bams[1])]
+        assert ends[-1].get("file_failed"), "BAM 1's own end line does not carry its failure"
+    else:
+        add_up()
+    if case != "still_failing":
+        monkeypatch.setattr(os, "replace", real_replace)
+    assert len(moves) == 1, moves
+    assert os.path.exists(os.path.join(sample_dir, LIST)), "the install list was retired"
+    assert _rows_at_next_start(work, bams[1]) == [("target", "failed_before")], "the failure was not recorded"
+    first = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+    monkeypatch.setattr(os, "replace", real_replace)
+    assert not os.path.exists(os.path.join(sample_dir, LIST)), "the finish did not end"
+    if case == "still_failing":
+        assert len(moves) == 2, moves
+        claims = [os.path.basename(d) for d in glob.glob(os.path.join(sample_dir, "_staging", "_batch_*"))]
+        assert claims and set(claims) <= set(first.get("claims_left") or []), first
+        assert ta_mod._merge_missed_reads(first) is not None, "the SNP check would call on missing reads"
+        again = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+        assert ta_mod._merge_missed_reads(again) is not None, "a later finalize lets the SNP calls through"
+        assert _rows_at_next_start(work, bams[1]) == [("target", "failed_before")]
+    else:
+        assert _agreement(tmp_path, panel, work, {0}, 1, first, must_include=True) == []
+        assert ta_mod._merge_missed_reads(first) is None, ta_mod._merge_missed_reads(first)
+        again = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+        assert ta_mod._merge_missed_reads(again) is None, ta_mod._merge_missed_reads(again)
+        assert _rows_at_next_start(work, bams[1]) == [], "a failure the finish put right is still reported at every start"
+
+
+def _is_batch_bam_move(src, dst):
+    return _in(src, "_batch_") and not _in(dst, "_batch_") and str(src).endswith(".bam")
+
+
+def _left_out_with_its_list_kept(work, bams, monkeypatch):
+    """C16 error's start: BAM 1's batch BAM move raises before it takes effect, so the install
+    records BAM 1 in the ledger as not in target.bam; then _retire fails once, so the list
+    stays."""
+    sample_dir = os.path.join(str(work), SAMPLE)
+    _ledger_with_ended_target_steps(work, bams)
+    assert _add(work, bams[0])["status"] == "success"
+    _stage(work, bams[1])
+    real_replace, real_retire = os.replace, ta_mod._retire
+    moves = []
+
+    def replace(src, dst, *args, **kwargs):
+        if _is_batch_bam_move(src, dst) and not moves:
+            moves.append(str(src))
+            raise OSError(errno.EIO, "synthetic: the disk is away", str(src))
+        return real_replace(src, dst, *args, **kwargs)
+
+    def retire(*args, **kwargs):
+        monkeypatch.setattr(ta_mod, "_retire", real_retire)  # once
+        raise OSError(errno.EIO, "synthetic: a sync fails")
+
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(ta_mod, "_retire", retire)
+    _analysis(work).accumulate_staged_files(SAMPLE, force=True)
+    monkeypatch.setattr(os, "replace", real_replace)
+    monkeypatch.setattr(ta_mod, "_retire", real_retire)
+    assert len(moves) == 1, moves
+    assert os.path.exists(os.path.join(sample_dir, LIST)), "the install list was retired"
+    assert _rows_at_next_start(work, bams[1]) == [("target", "failed_before")], "the failure was not recorded"
+
+
+def _ledger_records(work):
+    from robin.file_ledger import LEDGER_NAME
+
+    with open(os.path.join(str(work), LEDGER_NAME)) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+@pytest.mark.parametrize("case", ["order", "lost"])
+def test_a_finish_writes_its_clear_only_once_the_install_is_on_disk(tmp_path, panel, bams, monkeypatch, case):
+    """C17 (Codex's plan check, finding 1): as C16 error, BAM 1's failure is recorded and the
+    list stays. A clear that reached the disk before the move did could, after a power loss,
+    hide a failure that holds again:
+    - order: finalize's finish writes the cleared line after every sync made before the list's
+      removal (the sample folder's among them), and before that removal;
+    - lost: the finish's first sync of the sample folder raises (a stop before the install is
+      on disk), and the sample folder is put back as it was (the move and the claim folder's
+      removal never reached the disk; the ledger, in the work folder, keeps what was
+      written). No cleared line was written. A finalize whose move fails again lists the claim
+      folder, and the next start reports BAM 1."""
+    from robin.file_ledger import FileLedger
+
+    work = tmp_path / "work"
+    sample_dir = os.path.join(str(work), SAMPLE)
+    _left_out_with_its_list_kept(work, bams, monkeypatch)
+    real_dir, real_file, real_remove = ta_mod._sync_dir, ta_mod._sync_file, os.remove
+    real_append, real_replace = FileLedger.append, os.replace
+    if case == "order":
+        events = []
+
+        def rel(p):
+            return os.path.relpath(os.path.abspath(str(p)), sample_dir)
+
+        def sync_dir(p):
+            events.append(("sync", rel(p)))
+            return real_dir(p)
+
+        def sync_file(p):
+            events.append(("sync", rel(p)))
+            return real_file(p)
+
+        def remove(p, *args, **kwargs):
+            events.append(("remove", rel(p)))
+            return real_remove(p, *args, **kwargs)
+
+        def append(self, records):
+            if any(r.get("e") == "cleared" for r in records):
+                events.append(("cleared",))
+            return real_append(self, records)
+
+        monkeypatch.setattr(ta_mod, "_sync_dir", sync_dir)
+        monkeypatch.setattr(ta_mod, "_sync_file", sync_file)
+        monkeypatch.setattr(os, "remove", remove)
+        monkeypatch.setattr(FileLedger, "append", append)
+        first = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+        monkeypatch.setattr(ta_mod, "_sync_dir", real_dir)
+        monkeypatch.setattr(ta_mod, "_sync_file", real_file)
+        monkeypatch.setattr(os, "remove", real_remove)
+        monkeypatch.setattr(FileLedger, "append", real_append)
+        assert ("cleared",) in events, "the finish wrote no cleared line"
+        assert ("remove", LIST) in events, "the finish did not delete the list"
+        cleared, removed = events.index(("cleared",)), events.index(("remove", LIST))
+        assert ("sync", ".") in events[:cleared], "the clear came before the move was synced"
+        syncs = [i for i, e in enumerate(events[:removed]) if e[0] == "sync"]
+        assert max(syncs) < cleared < removed, events
+        assert ta_mod._merge_missed_reads(first) is None, ta_mod._merge_missed_reads(first)
+        assert _rows_at_next_start(work, bams[1]) == []
+    else:
+        copy = str(tmp_path / "the_sample_folder_before_the_finish")
+        shutil.copytree(sample_dir, copy, symlinks=True)
+
+        def sync_dir(p):
+            if os.path.abspath(str(p)) == os.path.abspath(sample_dir):
+                raise _Killed("the power goes before the install is on disk")
+            return real_dir(p)
+
+        monkeypatch.setattr(ta_mod, "_sync_dir", sync_dir)
+        with pytest.raises(_Killed):
+            _analysis(work)._finish_commit(sample_dir, logging.getLogger("robin.target"))
+        monkeypatch.setattr(ta_mod, "_sync_dir", real_dir)
+        shutil.rmtree(sample_dir)
+        shutil.copytree(copy, sample_dir, symlinks=True)
+        assert not [r for r in _ledger_records(work) if r["e"] == "cleared"], "a clear came before the move was on disk"
+        moves = []
+
+        def replace(src, dst, *args, **kwargs):
+            if _is_batch_bam_move(src, dst):
+                moves.append(str(src))
+                raise OSError(errno.EIO, "synthetic: the disk is away again", str(src))
+            return real_replace(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(os, "replace", replace)
+        first = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+        monkeypatch.setattr(os, "replace", real_replace)
+        assert moves, "the finish did not move the batch BAM again"
+        assert not os.path.exists(os.path.join(sample_dir, LIST)), "the finish did not end"
+        claims = [os.path.basename(d) for d in glob.glob(os.path.join(sample_dir, "_staging", "_batch_*"))]
+        assert claims and set(claims) <= set(first.get("claims_left") or []), first
+        assert ta_mod._merge_missed_reads(first) is not None, "the SNP check would call on missing reads"
+        assert _rows_at_next_start(work, bams[1]) == [("target", "failed_before")]
+
+
+@pytest.mark.parametrize("case", ["before", "after"])
+def test_a_clear_that_cannot_be_written_keeps_the_list_for_the_next_finish(tmp_path, panel, bams, monkeypatch, case):
+    """C18 (Codex's plan check, finding 2): as C16 error, BAM 1's failure is recorded and the
+    list stays. Finalize's finish moves the BAM, but the ledger write of its cleared line
+    raises once: before writing (before), or after the line is written (after: the write or
+    its fsync reports an error). The list stays, so the next finalize finishes it again: every
+    file and target.bam agree with BAMs 0 and 1, the SNP check passes, and the next start
+    does not report BAM 1."""
+    from robin.file_ledger import FileLedger
+
+    work = tmp_path / "work"
+    sample_dir = os.path.join(str(work), SAMPLE)
+    _left_out_with_its_list_kept(work, bams, monkeypatch)
+    real_append = FileLedger.append
+    failed = []
+
+    def append(self, records):
+        if any(r.get("e") == "cleared" for r in records) and not failed:
+            failed.append(len(records))
+            if case == "after":
+                real_append(self, records)
+            raise OSError(errno.EIO, "synthetic: the ledger's disk is away")
+        return real_append(self, records)
+
+    monkeypatch.setattr(FileLedger, "append", append)
+    first = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+    monkeypatch.setattr(FileLedger, "append", real_append)
+    assert failed, "the finish wrote no cleared line"
+    assert first.get("status") == "error", first
+    assert os.path.exists(os.path.join(sample_dir, LIST)), "a clear that was not written let the list go"
+    again = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+    assert not os.path.exists(os.path.join(sample_dir, LIST)), "the next finish did not end"
+    assert _agreement(tmp_path, panel, work, {0}, 1, again, must_include=True) == []
+    assert ta_mod._merge_missed_reads(again) is None, ta_mod._merge_missed_reads(again)
+    assert _rows_at_next_start(work, bams[1]) == [], "the failure is still reported at every start"
 
 
 # ----------------------------------------------------------------------------- what reaches the disk

@@ -8,10 +8,16 @@ One append-only file per work folder, ``robin_bam_ledger.jsonl``, one JSON objec
 - ``{"e": "end", "key": K, "step": S, "status": st, "outcome": o}``: step S ended for the BAM
   (after the handler). ``o`` is the job's outcome (success, failed or expected_failure), with
   ``"error"`` when it failed; ``"file_failed"`` when this BAM failed inside a job that went
-  on; ``"downstream"`` for preprocessing: whether its steps follow.
+  on (with ``"file_failed_claim"`` when that failure names a claim folder, as below);
+  ``"downstream"`` for preprocessing: whether its steps follow.
 - ``{"e": "file_failed", "key": K, "step": S, "error": text}``: another job found that step S
   failed for this BAM (a later accumulation left its staged coverage out). A later ``end`` of
-  the step keeps it; only a ``start`` resets the step.
+  the step keeps it; only a ``start`` resets the step. ``"claim": C`` when the failure is that
+  the batch BAM of the commit with claim folder C is not in target.bam.
+- ``{"e": "cleared", "key": K, "step": S, "claim": C}``: a later finish of that commit put its
+  batch BAM in place, on disk, so the BAM's failures of step S naming C no longer hold, and one
+  naming C that comes later is ignored. It never adds a step: the steps a BAM has no record of
+  run at the next start. A ``start`` of the step forgets it.
 
 K is the BAM's key (``robin.bam_identity.bam_key``): a BAM is known by its bytes. Only the
 per-BAM steps are recorded (preprocessing and the five it starts); the per-sample ones
@@ -34,7 +40,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from robin.bam_identity import bam_key
 
@@ -143,7 +149,8 @@ class StepState:
     downstream: Optional[bool] = None
     outcome: Optional[str] = None  # the job's outcome: success, failed or expected_failure
     error: str = ""
-    file_failed: Optional[str] = None  # this BAM failed inside a job that went on
+    file_failed: Optional[str] = None  # this BAM failed inside a job that went on: the last failure
+    failures: List[Tuple[Optional[str], str]] = field(default_factory=list)  # (claim, text), oldest first
 
 
 @dataclass
@@ -151,6 +158,18 @@ class BamState:
     file: str = ""
     sample: str = ""
     steps: Dict[str, StepState] = field(default_factory=dict)
+    cleared: Dict[str, Set[str]] = field(default_factory=dict)  # by step: claims whose failures don't hold
+
+
+def _add_failure(bam: BamState, step: str, claim, text: str) -> None:
+    """Add a failure of ``step`` for the BAM, unless a ``cleared`` line for its claim came
+    first: then it adds nothing, not even the step."""
+    claim = None if claim is None else str(claim)
+    if claim is not None and claim in bam.cleared.get(step, ()):
+        return
+    state = bam.steps.setdefault(step, StepState())
+    state.failures.append((claim, text))
+    state.file_failed = text
 
 
 class FileLedger:
@@ -191,11 +210,22 @@ class FileLedger:
     @staticmethod
     def _apply(state: Dict[str, BamState], rec: dict) -> None:
         kind, key = rec["e"], rec["key"]
+        if kind == "cleared":
+            # Never adds a BAM or a step: the intake runs the steps a BAM has no record of
+            bam, name, claim = state.get(key), rec["step"], str(rec["claim"])
+            if bam is not None:
+                bam.cleared.setdefault(name, set()).add(claim)
+                step = bam.steps.get(name)
+                if step is not None:
+                    step.failures = [f for f in step.failures if f[0] != claim]
+                    step.file_failed = step.failures[-1][1] if step.failures else None
+            return
         bam = state.setdefault(key, BamState())
         if kind == "take":
             bam.file = rec.get("file") or bam.file
         elif kind == "start":
             bam.steps[rec["step"]] = StepState(started=True)
+            bam.cleared.pop(rec["step"], None)
             bam.sample = rec.get("sample") or bam.sample
             bam.file = bam.file or rec.get("file") or ""
         elif kind == "end":
@@ -205,10 +235,10 @@ class FileLedger:
             step.outcome = rec.get("outcome")
             step.error = str(rec.get("error") or "")
             # A failure another job recorded first is kept (batch 10e)
-            step.file_failed = rec.get("file_failed") or step.file_failed
+            if rec.get("file_failed"):
+                _add_failure(bam, rec["step"], rec.get("file_failed_claim"), rec["file_failed"])
         elif kind == "file_failed":
-            step = bam.steps.setdefault(rec["step"], StepState())
-            step.file_failed = str(rec.get("error") or "no error text")
+            _add_failure(bam, rec["step"], rec.get("claim"), str(rec.get("error") or "no error text"))
         else:
             raise ValueError(f"unknown record kind {kind!r}")
 
@@ -431,16 +461,18 @@ def record_step_end(
     if job_type == "preprocessing":
         skipped = bool((job.context.metadata or {}).get("skip_downstream"))
         extra["downstream"] = status == "success" and not skipped
-    failed_files: Dict[str, str] = {}
+    failed_files: Dict[str, Tuple[str, Optional[str]]] = {}  # (text, claim)
     for f in (job.context.metadata or {}).get("file_failures") or []:
         if isinstance(f, dict) and f.get("file") and owner is not None and f.get("owner") == owner:
-            failed_files[os.path.realpath(str(f["file"]))] = str(f.get("error") or "")[:500]
+            failed_files[os.path.realpath(str(f["file"]))] = (str(f.get("error") or "")[:500], f.get("claim"))
     records = []
     for k, c in bams:
         rec = {"e": "end", "key": k, "step": job_type, "status": status, **extra}
-        text = failed_files.get(os.path.realpath(str(getattr(c, "filepath", "") or "")))
-        if text is not None:
-            rec["file_failed"] = text or "no error text"
+        found = failed_files.get(os.path.realpath(str(getattr(c, "filepath", "") or "")))
+        if found is not None:
+            rec["file_failed"] = found[0] or "no error text"
+            if found[1]:
+                rec["file_failed_claim"] = str(found[1])
         records.append(rec)
     try:
         ledger.append(records)
@@ -448,9 +480,13 @@ def record_step_end(
         _log.error(f"Could not record the end of {job_type} in the BAM ledger: {e}")
 
 
-def record_bam_failure(work_dir: Optional[str], key: str, step: str, error: str) -> bool:
+def record_bam_failure(
+    work_dir: Optional[str], key: str, step: str, error: str, claim: Optional[str] = None
+) -> bool:
     """Record that ``step`` failed for the BAM ``key``, found by another job (a later
     accumulation that left its staged coverage out), so that every start reports it.
+    ``claim``: the claim folder of the commit whose batch BAM is not in target.bam, when that
+    is the failure (a later finish that puts it in place clears it: ``clear_bam_failures``).
 
     Written only where the work folder has a ledger that has taken the BAM in: a failure line
     alone would make the next start skip that step, which never ran. Anything it can't do is
@@ -465,8 +501,31 @@ def record_bam_failure(work_dir: Optional[str], key: str, step: str, error: str)
         if key not in ledger.load():
             _log.warning(f"The BAM ledger in {work_dir} has not taken BAM {key} in: its {step} failure is only logged")
             return False
-        ledger.append([{"e": "file_failed", "key": key, "step": step, "error": str(error or "")[:500]}])
+        rec = {"e": "file_failed", "key": key, "step": step, "error": str(error or "")[:500]}
+        if claim:
+            rec["claim"] = str(claim)
+        ledger.append([rec])
         return True
     except Exception as e:
         _log.error(f"Could not record the {step} failure of BAM {key} in the BAM ledger: {e}")
         return False
+
+
+def clear_bam_failures(work_dir: Optional[str], keys: Iterable[str], step: str, claim: str) -> int:
+    """Record that the failures of ``step`` naming ``claim`` no longer hold for these BAMs: a
+    later finish put that commit's batch BAM in place, and on disk. One ``cleared`` line for
+    each BAM the ledger has taken in, all in one write. Returns how many: 0 when there is no
+    work folder or no ledger (no failure was recorded there). Anything else that goes wrong
+    raises, so that the caller keeps what it needs to try again."""
+    if not work_dir:
+        return 0
+    ledger = FileLedger(work_dir)
+    if not os.path.exists(ledger.path):
+        return 0
+    known = ledger.load()
+    records = [
+        {"e": "cleared", "key": k, "step": step, "claim": str(claim)} for k in dict.fromkeys(keys) if k in known
+    ]
+    if records:
+        ledger.append(records)
+    return len(records)

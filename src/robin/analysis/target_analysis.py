@@ -34,7 +34,7 @@ import pandas as pd
 import pysam
 from robin.logging_config import get_job_logger
 from robin.bam_identity import bam_key
-from robin.file_ledger import record_bam_failure
+from robin.file_ledger import clear_bam_failures, record_bam_failure
 from robin.analysis.snp_processing import build_snp_display_data
 from robin.analysis.target_coverage import (
     UNION_FILE,
@@ -2100,8 +2100,11 @@ class TargetAnalysis:
                     "until it is dealt with"
                 ) from e
             logger.warning(f"Finishing a coverage commit that a stop left part-way in {sample_dir}")
-            entries, _ = _install(sample_dir, steps, self.work_dir, logger)
-            _retire(sample_dir, steps)
+            entries, problem = _install(sample_dir, steps, self.work_dir, logger)
+            _put_on_disk(sample_dir, steps)
+            if problem is None:  # after the syncs: the clear holds only once the move is on disk
+                _clear_left_out(self.work_dir, steps)
+            _delete_list(sample_dir)  # after the clear: a clear that can't be written keeps the list
             return entries
         if os.path.isdir(prep):
             shutil.rmtree(prep)  # never listed: nothing was installed
@@ -3056,16 +3059,18 @@ def _install_batch_bam(sample_dir: str, step: dict) -> Optional[str]:
 
 def _left_out_of_target_bam(work_dir: str, claim: str, bams, problem: str) -> List[Dict[str, str]]:
     """Failed-file entries, and ledger lines, for the BAMs of a batch whose batch BAM is not
-    in target.bam: their coverage is counted, their reads are not in target.bam."""
+    in target.bam: their coverage is counted, their reads are not in target.bam. Each names
+    the claim folder (as the install list does), so that a later finish that puts the batch
+    BAM in place clears it (_clear_left_out)."""
     error = (
         f"Its coverage is counted, but its reads are not in target.bam: {problem}. "
         f"Its files are kept in _staging/{os.path.basename(claim)}."
     )
     entries = []
     for bam in bams or []:
-        entries.append({"file": bam["file"], "error": error, "step": _COVERAGE_STEP})
+        entries.append({"file": bam["file"], "error": error, "step": _COVERAGE_STEP, "claim": claim})
         if bam.get("key"):
-            record_bam_failure(work_dir, bam["key"], "target", error)
+            record_bam_failure(work_dir, bam["key"], "target", error, claim=claim)
         else:
             logging.getLogger("robin.target").warning(
                 f"{bam['file']} can't be identified: its failure is only logged"
@@ -3122,7 +3127,24 @@ def _install(sample_dir: str, steps: List[dict], work_dir: str, logger) -> Tuple
 def _retire(sample_dir: str, steps: List[dict]) -> None:
     """Put what the install did on disk, then delete the list (and sync that), then _commit/.
     A sync that fails raises first, so the list stays and the next finish does it again."""
-    prep = os.path.join(sample_dir, _COMMIT_DIR)
+    _put_on_disk(sample_dir, steps)
+    _delete_list(sample_dir)
+
+
+def _clear_left_out(work_dir: str, steps: List[dict]) -> None:
+    """A finish put the list's batch BAM in place, and on disk: the failures its commit
+    recorded for the batch's BAMs (_left_out_of_target_bam) no longer hold. Raises when that
+    can't be recorded, so the list stays and the next finish tries again."""
+    for step in steps:
+        if step["do"] == "batch_bam":
+            keys = [b["key"] for b in step.get("bams") or [] if b.get("key")]
+            if keys:
+                clear_bam_failures(work_dir, keys, "target", os.path.dirname(step["from"]))
+
+
+def _put_on_disk(sample_dir: str, steps: List[dict]) -> None:
+    """Sync what the install did: the appended files, the sample folder's names (the renames,
+    the removal, the moved batch BAM), then the claim folder and its parent."""
     for step in steps:
         if step["do"] == "append":
             _sync_file(os.path.join(sample_dir, step["file"]))
@@ -3132,6 +3154,11 @@ def _retire(sample_dir: str, steps: List[dict]) -> None:
         if os.path.isdir(os.path.join(sample_dir, claim)):
             _sync_dir(os.path.join(sample_dir, claim))  # kept: the batch BAM moved out of it
         _sync_dir(os.path.join(sample_dir, os.path.dirname(claim)))  # _staging/: the claim's removal
+
+
+def _delete_list(sample_dir: str) -> None:
+    """Delete the install list (and sync that), then _commit/."""
+    prep = os.path.join(sample_dir, _COMMIT_DIR)
     os.remove(os.path.join(prep, _INSTALL_LIST))
     _sync_dir(prep)  # a power loss can't bring the list back, to be done again after a later commit
     shutil.rmtree(prep)

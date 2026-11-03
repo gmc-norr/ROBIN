@@ -18,6 +18,7 @@ stand-in Coordinator that records what is sent; the steps run through the real w
 import ast
 import asyncio
 import inspect
+import json
 import os
 import queue
 import shutil
@@ -703,3 +704,110 @@ def test_a_step_with_only_a_failure_line_is_reported_at_the_next_start(tmp_path)
     rows = BamIntake(str(tmp_path / "work"), PLAN).decide(str(bam)).cut_short
     assert [(r["job_type"], r["failure_kind"]) for r in rows] == [("target", "failed_before")]
     assert "staged coverage unreadable" in rows[0]["error"]
+
+
+# A later finish takes back a failure its commit recorded (batch 10e round 6) ----------------
+
+CLAIM = "_staging/_batch_0001"
+OTHER = "_staging/_batch_0002"
+_START = {"e": "start", "step": "target", "sample": "S", "file": "/data/A.bam"}
+_ENDED = {"e": "end", "step": "target", "status": "success", "outcome": "success"}
+
+
+def _left_out(claim=None, text="its reads are not in target.bam"):
+    rec = {"e": "file_failed", "step": "target", "error": text}
+    if claim:
+        rec["claim"] = claim
+    return rec
+
+
+def _cleared(claim=CLAIM):
+    return {"e": "cleared", "step": "target", "claim": claim}
+
+
+def _start_rows(tmp_path, *records):
+    """The failed-file rows the next start reports for a BAM whose ledger has ``records``
+    after its take line (each record without its key): (job type, kind, text)."""
+    from robin.bam_identity import bam_key
+    from robin.file_ledger import BamIntake
+
+    bam = _bam(tmp_path / "run")
+    key = bam_key(str(bam))
+    _ledger_lines(tmp_path / "work", {"e": "take", "key": key, "file": str(bam)}, *({**r, "key": key} for r in records))
+    rows = BamIntake(str(tmp_path / "work"), PLAN).decide(str(bam)).cut_short
+    return [(r["job_type"], r["failure_kind"], r["error"]) for r in rows]
+
+
+def test_a_cleared_line_takes_back_the_failures_naming_its_claim(tmp_path):
+    # L1: from a file_failed line and from the BAM's own end line
+    ended = {**_ENDED, "file_failed": "its reads are not in target.bam", "file_failed_claim": CLAIM}
+    assert _start_rows(tmp_path, _START, _left_out(CLAIM), ended, _cleared()) == []
+
+
+def test_a_cleared_line_keeps_the_failures_naming_another_claim_or_none(tmp_path):
+    # L2
+    from robin.file_ledger import FileLedger
+
+    _ledger_lines(
+        tmp_path,
+        {"e": "take", "key": "k1", "file": "/data/A.bam"},
+        {**_START, "key": "k1"},
+        {**_left_out(None, "staged coverage unreadable"), "key": "k1"},
+        {**_left_out(OTHER, "another commit's batch BAM"), "key": "k1"},
+        {**_left_out(CLAIM), "key": "k1"},
+        {**_cleared(), "key": "k1"},
+    )
+    step = FileLedger(str(tmp_path)).load()["k1"].steps["target"]
+    assert step.failures == [(None, "staged coverage unreadable"), (OTHER, "another commit's batch BAM")]
+    assert step.file_failed == "another commit's batch BAM"
+
+
+def test_a_failure_naming_a_cleared_claim_that_comes_later_is_ignored(tmp_path):
+    # L3: the finish cleared it before the line came: a file_failed line, and the BAM's own
+    # end line (its add-up returned, another job finished the list, then its job ended)
+    ended = {**_ENDED, "file_failed": "its reads are not in target.bam", "file_failed_claim": CLAIM}
+    assert _start_rows(tmp_path, _START, _cleared(), _left_out(CLAIM), ended) == []
+
+
+def test_an_earlier_failure_naming_no_claim_is_reported_after_a_clear(tmp_path):
+    # L4: the later failure, naming the claim, does not take its place for good
+    rows = _start_rows(tmp_path, _START, _left_out(None, "staged coverage unreadable"), _left_out(CLAIM), _ENDED, _cleared())
+    assert [(kind, why) for kind, why, _ in rows] == [("target", "failed_before")]
+    assert "staged coverage unreadable" in rows[0][2]
+
+
+def test_a_start_after_a_clear_counts_a_later_failure_naming_its_claim(tmp_path):
+    # L5: a start resets the step, and forgets its clears
+    rows = _start_rows(tmp_path, _START, _left_out(CLAIM), _cleared(), _START, _left_out(CLAIM, "again"), _ENDED)
+    assert [(kind, why) for kind, why, _ in rows] == [("target", "failed_before")]
+    assert "again" in rows[0][2]
+
+
+def test_a_cleared_line_adds_no_step_and_no_bam(tmp_path):
+    # L6: the intake runs the steps a BAM has no record of
+    from robin.file_ledger import FileLedger
+
+    _ledger_lines(
+        tmp_path,
+        {"e": "take", "key": "k1", "file": "/data/A.bam"},
+        {**_cleared(), "key": "k1"},
+        {**_left_out(CLAIM), "key": "k1"},
+        {**_cleared(), "key": "k2"},
+    )
+    state = FileLedger(str(tmp_path)).load()
+    assert "target" not in state["k1"].steps
+    assert "k2" not in state
+
+
+def test_a_clear_is_written_only_for_bams_the_ledger_has_taken_in(tmp_path):
+    # L7
+    from robin.file_ledger import LEDGER_NAME, FileLedger, clear_bam_failures
+
+    assert clear_bam_failures(str(tmp_path / "none"), ["k1"], "target", CLAIM) == 0
+    assert not os.path.exists(tmp_path / "none" / LEDGER_NAME)
+    _ledger_lines(tmp_path / "work", {"e": "take", "key": "k1", "file": "/data/A.bam"})
+    assert clear_bam_failures(str(tmp_path / "work"), ["k1", "k2", "k1"], "target", CLAIM) == 1
+    with open(FileLedger(str(tmp_path / "work")).path) as f:
+        lines = [json.loads(line) for line in f]
+    assert [(r["e"], r["key"]) for r in lines] == [("take", "k1"), ("cleared", "k1")]
+    assert lines[1]["step"] == "target" and lines[1]["claim"] == CLAIM
