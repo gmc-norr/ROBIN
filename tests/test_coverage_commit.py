@@ -561,6 +561,152 @@ def test_a_batch_bam_that_could_not_be_written_is_reported_by_the_finish(tmp_pat
     assert ("dir", claim) in events[:deleted], "the kept claim folder was not synced before the list was deleted"
 
 
+def _commit_stopped_before_retiring_with_its_batch_bam_lost(work, sample_dir, bams, monkeypatch):
+    """C9's start: BAM 1's commit deleted its claim folder and stopped before retiring its
+    list; then its batch BAM is lost from outside. Returns the claim folder's name."""
+    _ledger_with_ended_target_steps(work, bams)
+    assert _add(work, bams[0])["status"] == "success"
+    _stage(work, bams[1])
+    real_retire = ta_mod._retire
+
+    def retire(*args, **kwargs):
+        raise _Killed("killed before the list is retired")
+
+    monkeypatch.setattr(ta_mod, "_retire", retire)
+    with pytest.raises(_Killed):
+        _analysis(work).accumulate_staged_files(SAMPLE, force=True)
+    monkeypatch.setattr(ta_mod, "_retire", real_retire)
+    with open(os.path.join(sample_dir, LIST)) as f:
+        step = next(s for s in json.load(f)["steps"] if s["do"] == "batch_bam")
+    moved = os.path.join(sample_dir, step["to"])
+    os.remove(moved)
+    os.remove(f"{moved}.bai")
+    return os.path.basename(os.path.dirname(step["from"]))
+
+
+@pytest.mark.parametrize("peer", ["finalize", "accumulation"])
+def test_a_claim_folder_another_job_kept_is_listed_by_finalize(tmp_path, panel, bams, monkeypatch, peer):
+    """C11 (the second code review's finding 1): as C9, but another job (a finalize, or an
+    add-up of a new BAM) finishes the list after finalize took its list of claim folders and
+    before finalize's own finish. Finalize must still list the claim folder kept for BAM 1,
+    so the SNP check refuses."""
+    work = tmp_path / "work"
+    sample_dir = os.path.join(str(work), SAMPLE)
+    claim = _commit_stopped_before_retiring_with_its_batch_bam_lost(work, sample_dir, bams, monkeypatch)
+    real_left = ta_mod._claims_left
+    peer_result = []
+
+    def claims_left(path):
+        left = real_left(path)
+        if not peer_result:  # once: the other job runs between finalize's list and its finish
+            peer_result.append(None)
+            if peer == "finalize":
+                peer_result[0] = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+            else:
+                peer_result[0] = _add(work, bams[2])
+        return left
+
+    monkeypatch.setattr(ta_mod, "_claims_left", claims_left)
+    result = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+    assert not os.path.exists(os.path.join(sample_dir, LIST)), "the other job did not finish the list"
+    assert [f["file"] for f in peer_result[0].get("file_failures") or []] == [bams[1]], peer_result[0]
+    assert claim in (result.get("claims_left") or []), f"the kept claim folder is not listed: {result}"
+    assert ta_mod._merge_missed_reads(result) is not None, "the SNP check would call on missing reads"
+
+
+def _failing_batch_bam(monkeypatch, error):
+    def failing_write(self, *args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(TargetAnalysis, "_write_batch_bam", failing_write)
+
+
+def test_a_kept_claim_folder_that_is_gone_is_made_again_by_the_finish(tmp_path, panel, bams, monkeypatch):
+    """C12 (the second code review's finding 2): as C10, but the claim folder is gone when the
+    list is finished (its name never reached the disk). The finish must make it again, with
+    incomplete.txt, so this finalize and every later one list it and the SNP check refuses."""
+    work = tmp_path / "work"
+    sample_dir = os.path.join(str(work), SAMPLE)
+    _ledger_with_ended_target_steps(work, bams)
+    assert _add(work, bams[0])["status"] == "success"
+    _stage(work, bams[1])
+    real_write = TargetAnalysis._write_batch_bam
+    _failing_batch_bam(monkeypatch, RuntimeError("synthetic: disk full"))
+    killed, _ = _killed(
+        monkeypatch, 1, "install", lambda: _analysis(work).accumulate_staged_files(SAMPLE, force=True)
+    )
+    monkeypatch.setattr(TargetAnalysis, "_write_batch_bam", real_write)
+    assert killed
+    (claim_dir,) = glob.glob(os.path.join(sample_dir, "_staging", "_batch_*"))
+    shutil.rmtree(claim_dir)
+    result = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+    assert [f["file"] for f in result.get("file_failures") or []] == [bams[1]], result
+    assert os.path.exists(os.path.join(claim_dir, "incomplete.txt")), "the claim folder was not made again"
+    assert os.path.basename(claim_dir) in (result.get("claims_left") or []), result
+    assert ta_mod._merge_missed_reads(result) is not None, "the SNP check would call on missing reads"
+    again = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+    assert ta_mod._merge_missed_reads(again) is not None, "a later finalize lets the SNP calls through"
+
+
+def test_a_kept_claim_folder_is_synced_before_its_list(tmp_path, panel, bams, monkeypatch):
+    """C13 (the second code review's finding 2): when the batch BAM can't be written, the claim
+    folder (with incomplete.txt) and _staging/ are synced before the install list is put in
+    place, as they are when it is written. After a power loss, the list never names a claim
+    folder whose name did not reach the disk."""
+    work = tmp_path / "work"
+    sample_dir = os.path.join(str(work), SAMPLE)
+    assert _add(work, bams[0])["status"] == "success"
+    _stage(work, bams[1])
+    _failing_batch_bam(monkeypatch, RuntimeError("synthetic: disk full"))
+    events = []
+    real_sync, real_replace = ta_mod._sync_dir, os.replace
+
+    def sync_dir(p):
+        events.append(("dir", os.path.relpath(str(p), sample_dir)))
+        return real_sync(p)
+
+    def replace(src, dst, *args, **kwargs):
+        events.append(("replace", os.path.relpath(str(dst), sample_dir)))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(ta_mod, "_sync_dir", sync_dir)
+    monkeypatch.setattr(os, "replace", replace)
+    _analysis(work).accumulate_staged_files(SAMPLE, force=True)
+    monkeypatch.setattr(ta_mod, "_sync_dir", real_sync)
+    monkeypatch.setattr(os, "replace", real_replace)
+    (claim,) = [os.path.join("_staging", os.path.basename(d))
+                for d in glob.glob(os.path.join(sample_dir, "_staging", "_batch_*"))]
+    listed = events.index(("replace", LIST))
+    assert ("dir", claim) in events[:listed], "the kept claim folder was not synced before the list"
+    assert ("dir", "_staging") in events[:listed], "_staging/ was not synced before the list"
+
+
+def test_a_batch_bam_error_with_no_text_still_keeps_the_claim_folder(tmp_path, panel, bams, monkeypatch):
+    """C14 (the second code review's note): an error with no text (RuntimeError()) while
+    writing the batch BAM is still an error. The list keeps the claim folder (no drop_claim),
+    the folder says why, and the add-up's result names the error."""
+    work = tmp_path / "work"
+    sample_dir = os.path.join(str(work), SAMPLE)
+    assert _add(work, bams[0])["status"] == "success"
+    _stage(work, bams[1])
+    _failing_batch_bam(monkeypatch, RuntimeError())
+    steps = []
+    real_install = ta_mod._install
+
+    def install(where, listed, *args, **kwargs):
+        steps.extend(listed)
+        return real_install(where, listed, *args, **kwargs)
+
+    monkeypatch.setattr(ta_mod, "_install", install)
+    result = _analysis(work).accumulate_staged_files(SAMPLE, force=True)
+    kinds = sorted({s["do"] for s in steps})
+    assert "keep_claim" in kinds, kinds
+    assert "drop_claim" not in kinds, f"the list drops the claim folder: {kinds}"
+    assert result.get("batch_bam_error"), result
+    (claim_dir,) = glob.glob(os.path.join(sample_dir, "_staging", "_batch_*"))
+    assert os.path.exists(os.path.join(claim_dir, "incomplete.txt")), "the kept claim folder does not say why"
+
+
 # ----------------------------------------------------------------------------- what reaches the disk
 
 
