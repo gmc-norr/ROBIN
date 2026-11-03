@@ -179,14 +179,16 @@ class FileLedger:
         self.path = os.path.join(work_dir, LEDGER_NAME)
 
     def load(self) -> Dict[str, BamState]:
-        """Each BAM's state, by key. Text after the last newline is a record a stop cut off and
-        is ignored; any other line that can't be read raises LedgerError."""
+        """Each BAM's state, by key; empty when there is no ledger yet. Text after the last
+        newline is a record a stop cut off and is ignored; any other line that can't be read
+        raises LedgerError, and so does a ledger that can't be opened for any reason but
+        being missing (os.path.exists would call it missing: batch 10e round 7)."""
         state: Dict[str, BamState] = {}
-        if not os.path.exists(self.path):
-            return state
         try:
             with open(self.path, "rb") as f:
                 data = f.read()
+        except FileNotFoundError:
+            return state
         except OSError as e:
             raise LedgerError(f"Could not read the BAM ledger {self.path}: {e}") from e
         lines = data.split(b"\n")
@@ -494,8 +496,13 @@ def record_bam_failure(
     if not work_dir:
         return False
     ledger = FileLedger(work_dir)
-    if not os.path.exists(ledger.path):
+    try:
+        os.stat(ledger.path)
+    except FileNotFoundError:
         _log.info(f"No BAM ledger in {work_dir}: the {step} failure of BAM {key} is only logged")
+        return False
+    except OSError as e:
+        _log.error(f"Could not look up the BAM ledger in {work_dir} ({e}): the {step} failure of BAM {key} is only logged")
         return False
     try:
         if key not in ledger.load():
@@ -516,13 +523,12 @@ def clear_bam_failures(work_dir: Optional[str], keys: Iterable[str], step: str, 
     later finish put that commit's batch BAM in place, and on disk. One ``cleared`` line for
     each BAM the ledger has taken in, all in one write. Returns how many: 0 when there is no
     work folder or no ledger (no failure was recorded there). Anything else that goes wrong
-    raises, so that the caller keeps what it needs to try again."""
+    raises, a ledger that can't be looked up among them, so that the caller keeps what it
+    needs to try again."""
     if not work_dir:
         return 0
     ledger = FileLedger(work_dir)
-    if not os.path.exists(ledger.path):
-        return 0
-    known = ledger.load()
+    known = ledger.load()  # empty when the ledger is missing: then nothing is written
     records = [
         {"e": "cleared", "key": k, "step": step, "claim": str(claim)} for k in dict.fromkeys(keys) if k in known
     ]

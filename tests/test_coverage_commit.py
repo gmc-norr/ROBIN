@@ -13,6 +13,7 @@ before what is checked by the order of the sync calls (C7). Synthetic BAMs only;
 (through pysam) is the reference.
 """
 
+import builtins
 import errno
 import glob
 import json
@@ -1029,6 +1030,63 @@ def test_a_clear_that_cannot_be_written_keeps_the_list_for_the_next_finish(tmp_p
     assert failed, "the finish wrote no cleared line"
     assert first.get("status") == "error", first
     assert os.path.exists(os.path.join(sample_dir, LIST)), "a clear that was not written let the list go"
+    again = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+    assert not os.path.exists(os.path.join(sample_dir, LIST)), "the next finish did not end"
+    assert _agreement(tmp_path, panel, work, {0}, 1, again, must_include=True) == []
+    assert ta_mod._merge_missed_reads(again) is None, ta_mod._merge_missed_reads(again)
+    assert _rows_at_next_start(work, bams[1]) == [], "the failure is still reported at every start"
+
+
+def _failing_ledger_lookups(monkeypatch, path, how):
+    """Looking up the ledger file at ``path`` fails with EIO: every os.stat of it (stat), each
+    one after the first (second_stat), or every open of it (open). Returns what ends it."""
+    real_stat, real_open = os.stat, builtins.open
+    stats = []
+
+    def is_ledger(p):
+        return not isinstance(p, int) and os.path.abspath(os.fspath(p)) == path
+
+    def stat(p, *args, **kwargs):
+        if how in ("stat", "second_stat") and is_ledger(p):
+            stats.append(p)
+            if how == "stat" or len(stats) > 1:
+                raise OSError(errno.EIO, "synthetic: the ledger can't be looked up", str(p))
+        return real_stat(p, *args, **kwargs)
+
+    def open_(p, *args, **kwargs):
+        if how == "open" and is_ledger(p):
+            raise OSError(errno.EIO, "synthetic: the ledger can't be opened", str(p))
+        return real_open(p, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat)
+    monkeypatch.setattr(builtins, "open", open_)
+
+    def end():
+        monkeypatch.setattr(os, "stat", real_stat)
+        monkeypatch.setattr(builtins, "open", real_open)
+
+    return end
+
+
+@pytest.mark.parametrize("how", ["stat", "second_stat", "open"])
+def test_a_ledger_that_cannot_be_looked_up_keeps_the_list(tmp_path, panel, bams, monkeypatch, how):
+    """C19 (Codex's round-6 code review): as C16 error, BAM 1's failure is recorded and the
+    list stays. During the first finalize, looking up the ledger file fails with EIO: every
+    os.stat of it (stat), each one after the first (second_stat: the check inside
+    FileLedger.load), or every open of it (open). A lookup error is not a missing ledger:
+    after that finalize the list is gone only if a cleared line is in the ledger. Once lookups
+    work again, the next finalize ends the list: every file and target.bam agree with BAMs 0
+    and 1, the SNP check passes, and the next start does not report BAM 1."""
+    from robin.file_ledger import LEDGER_NAME
+
+    work = tmp_path / "work"
+    sample_dir = os.path.join(str(work), SAMPLE)
+    _left_out_with_its_list_kept(work, bams, monkeypatch)
+    end = _failing_ledger_lookups(monkeypatch, os.path.abspath(os.path.join(str(work), LEDGER_NAME)), how)
+    finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+    end()
+    cleared = [r for r in _ledger_records(work) if r["e"] == "cleared"]
+    assert cleared or os.path.exists(os.path.join(sample_dir, LIST)), "the list went, and no clear was written"
     again = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
     assert not os.path.exists(os.path.join(sample_dir, LIST)), "the next finish did not end"
     assert _agreement(tmp_path, panel, work, {0}, 1, again, must_include=True) == []

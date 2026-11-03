@@ -17,8 +17,11 @@ stand-in Coordinator that records what is sent; the steps run through the real w
 
 import ast
 import asyncio
+import builtins
+import errno
 import inspect
 import json
+import logging
 import os
 import queue
 import shutil
@@ -811,3 +814,74 @@ def test_a_clear_is_written_only_for_bams_the_ledger_has_taken_in(tmp_path):
         lines = [json.loads(line) for line in f]
     assert [(r["e"], r["key"]) for r in lines] == [("take", "k1"), ("cleared", "k1")]
     assert lines[1]["step"] == "target" and lines[1]["claim"] == CLAIM
+
+
+# A ledger that can't be looked up is not "no ledger" (batch 10e round 7) -------------------
+
+
+def _ledger_lookup_fails(monkeypatch, path, stat=False, opening=False):
+    """``os.stat`` and/or ``open`` of the file at ``path`` raise EIO. Returns what ends it."""
+    real_stat, real_open = os.stat, builtins.open
+
+    def is_ledger(p):
+        return not isinstance(p, int) and os.path.abspath(os.fspath(p)) == path
+
+    def fake_stat(p, *args, **kwargs):
+        if stat and is_ledger(p):
+            raise OSError(errno.EIO, "synthetic: the ledger can't be looked up", str(p))
+        return real_stat(p, *args, **kwargs)
+
+    def fake_open(p, *args, **kwargs):
+        if opening and is_ledger(p):
+            raise OSError(errno.EIO, "synthetic: the ledger can't be opened", str(p))
+        return real_open(p, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", fake_stat)
+    monkeypatch.setattr(builtins, "open", fake_open)
+
+    def end():
+        monkeypatch.setattr(os, "stat", real_stat)
+        monkeypatch.setattr(builtins, "open", real_open)
+
+    return end
+
+
+def test_a_ledger_that_cannot_be_looked_up_is_never_read_as_empty(tmp_path, monkeypatch):
+    # L8 (Codex's round-6 code review): only a missing ledger reads as empty
+    from robin.file_ledger import FileLedger, LedgerError
+
+    assert FileLedger(str(tmp_path / "none")).load() == {}
+    _ledger_lines(tmp_path, {"e": "take", "key": "k1", "file": "/data/A.bam"})
+    ledger = FileLedger(str(tmp_path))
+    path = os.path.abspath(ledger.path)
+    end = _ledger_lookup_fails(monkeypatch, path, stat=True)
+    try:
+        state = ledger.load()
+    except LedgerError:
+        state = None
+    end()
+    assert state is None or "k1" in state, "a ledger that can't be looked up read as empty"
+    end = _ledger_lookup_fails(monkeypatch, path, opening=True)
+    try:
+        with pytest.raises(LedgerError):
+            ledger.load()
+    finally:
+        end()
+
+
+def test_a_failure_not_recorded_for_a_lookup_error_is_logged_as_an_error(tmp_path, monkeypatch, caplog):
+    # L9: not as "No BAM ledger" at info, which hides a failure that was lost
+    from robin.file_ledger import FileLedger, record_bam_failure
+
+    _ledger_lines(tmp_path, {"e": "take", "key": "k1", "file": "/data/A.bam"})
+    path = os.path.abspath(FileLedger(str(tmp_path)).path)
+    end = _ledger_lookup_fails(monkeypatch, path, stat=True, opening=True)
+    try:
+        with caplog.at_level(logging.INFO, logger="robin.file_ledger"):
+            written = record_bam_failure(str(tmp_path), "k1", "target", "its reads are not in target.bam")
+    finally:
+        end()
+    assert written is False
+    assert not [r for r in caplog.records if "No BAM ledger" in r.getMessage()]
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors and "k1" in errors[0], errors
