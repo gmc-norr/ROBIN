@@ -191,3 +191,14 @@ whenever a claim is withdrawn or a finding turns out to be an artifact. Concrete
 - **Gate:** A.3. Re-read the case file's newest entries against the plan being locked, not
   only the old ones. And A.5: for any shared list or file, check who else writes it, and
   how (append, replace, delete).
+
+## 17. A rule "checked by reading", and a fact handed to one caller (batch 10e round 3, 2026-11-03)
+- **Claimed:**
+  - Round 3's result (`405dee3`): "a list never has both `keep_claim` and `drop_claim`", checked by reading, not by a test.
+  - Round 3's code (`a932279`) and brief: finalize's own finish returns the claim folder it kept, and the add-up may ignore it, because finalize's list is taken after the add-up.
+- **Rested on:**
+  - The reading assumed an error's text is never empty. `RuntimeError()` has none, so `batch_bam_error` was `""`: the list got both steps, and the claim folder no `incomplete.txt`.
+  - Only finalize's own add-up was thought of. Another finalize, or an add-up of a new BAM, can finish the list between finalize's wait and its lock; finalize's own finish then returns nothing.
+  - A `keep_claim` folder whose name never reached the disk was not made again, though the lost-batch-BAM step already did that.
+  - Codex's second code review found all three, through the real SNP handler.
+- **Gate:** D.3: "checked by reading" is inferred, not measured. A rule about every error needs a test with an error that has no text. And A.5: a fact every later finalize needs belongs on disk where every finalize looks (`incomplete.txt`), not in the return value of whichever job happened to finish the list.
