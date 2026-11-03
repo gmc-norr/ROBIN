@@ -13,6 +13,7 @@ before what is checked by the order of the sync calls (C7). Synthetic BAMs only;
 (through pysam) is the reference.
 """
 
+import errno
 import glob
 import json
 import os
@@ -705,6 +706,74 @@ def test_a_batch_bam_error_with_no_text_still_keeps_the_claim_folder(tmp_path, p
     assert result.get("batch_bam_error"), result
     (claim_dir,) = glob.glob(os.path.join(sample_dir, "_staging", "_batch_*"))
     assert os.path.exists(os.path.join(claim_dir, "incomplete.txt")), "the kept claim folder does not say why"
+
+
+@pytest.mark.parametrize("case", ["took_effect", "merged_meanwhile", "did_not"])
+def test_a_batch_bam_move_that_reports_an_error_is_judged_by_where_the_bam_is(tmp_path, panel, bams, monkeypatch, case):
+    """C15 (the third code review's finding): the batch BAM's move raises an error. Over NFS a
+    rename can take effect and still report one (rename(2), BUGS). Where the BAM is decides:
+    - took_effect: the BAM and its index are in the sample folder, so finalize merges its
+      reads. Nothing is reported, the claim folder goes, and this finalize and a later one
+      let the SNP check through;
+    - merged_meanwhile: as took_effect, but before the error comes back a finalize merges
+      the batch BAMs and deletes them (it merges under its own lock, not the accumulation's).
+      target.bam lists it as merged: the same outcome;
+    - did_not: the BAM stays in the claim folder, with its index. BAM 1 is reported, the
+      claim folder is kept and listed, and the SNP check refuses, at every finalize."""
+    work = tmp_path / "work"
+    sample_dir = os.path.join(str(work), SAMPLE)
+    _ledger_with_ended_target_steps(work, bams)
+    assert _add(work, bams[0])["status"] == "success"
+    _stage(work, bams[1])
+    real_replace = os.replace
+    moves = []
+
+    def replace(src, dst, *args, **kwargs):
+        if not moves and _in(src, "_batch_") and not _in(dst, "_batch_") and str(src).endswith(".bam"):
+            moves.append((str(src), str(dst)))
+            if case != "did_not":
+                real_replace(src, dst, *args, **kwargs)
+            if case == "merged_meanwhile":  # as C8's merged case
+                done = sorted(glob.glob(os.path.join(sample_dir, "batch_*.bam")))
+                ta_mod._merge_into_target_bam(
+                    done, os.path.join(sample_dir, "target.bam"), [os.path.basename(b) for b in done]
+                )
+                for b in done:
+                    os.remove(b)
+                    os.remove(f"{b}.bai")
+            raise OSError(errno.ENOENT, "synthetic: the reply to a rename was lost", str(src))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", replace)
+    added = _analysis(work).accumulate_staged_files(SAMPLE, force=True)
+    monkeypatch.setattr(os, "replace", real_replace)
+    assert moves, "the batch BAM was not moved"
+    (src, dst), = moves
+    claims = glob.glob(os.path.join(sample_dir, "_staging", "_batch_*"))
+    if case != "did_not":
+        in_place = (os.path.exists(dst), os.path.exists(f"{dst}.bai"))  # finalize merges and deletes it
+        first = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+        assert _agreement(tmp_path, panel, work, {0}, 1, first, must_include=True) == []
+        assert ta_mod._merge_missed_reads(first) is None, ta_mod._merge_missed_reads(first)
+        again = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+        assert ta_mod._merge_missed_reads(again) is None, ta_mod._merge_missed_reads(again)
+        assert not added.get("file_failures") and not added.get("batch_bam_error"), added
+        if case == "took_effect":
+            assert in_place == (True, True), "the BAM or its index was not in place"
+        assert claims == [], f"the claim folder was kept: {claims}"
+        assert _rows_at_next_start(work, bams[1]) == []
+    else:
+        assert [f["file"] for f in added.get("file_failures") or []] == [bams[1]], added
+        assert os.path.exists(src) and os.path.exists(f"{src}.bai"), "the claim folder lost the BAM or its index"
+        assert not os.path.exists(dst) and not os.path.exists(f"{dst}.bai")
+        (claim_dir,) = claims
+        assert os.path.exists(os.path.join(claim_dir, "incomplete.txt"))
+        assert _rows_at_next_start(work, bams[1]) == [("target", "failed_before")]
+        first = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+        assert os.path.basename(claim_dir) in (first.get("claims_left") or []), first
+        assert ta_mod._merge_missed_reads(first) is not None, "the SNP check would call on missing reads"
+        again = finalize_accumulation_for_sample(SAMPLE, str(work), PANEL_NAME)
+        assert ta_mod._merge_missed_reads(again) is not None, "a later finalize lets the SNP calls through"
 
 
 # ----------------------------------------------------------------------------- what reaches the disk

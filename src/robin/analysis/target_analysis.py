@@ -3014,13 +3014,22 @@ def _claim_of(steps: List[dict]) -> Optional[str]:
     return None
 
 
+def _batch_bam_in_place(sample_dir: str, step: dict) -> bool:
+    """The batch_bam step's BAM is in the sample folder, or target.bam lists it as merged (a
+    finalize merges and deletes batch BAMs under its own lock, not the accumulation's, so it
+    can do so before the list is deleted)."""
+    return os.path.exists(os.path.join(sample_dir, step["to"])) or step["to"] in _merged_batch_names(
+        os.path.join(sample_dir, "target.bam")
+    )
+
+
 def _install_batch_bam(sample_dir: str, step: dict) -> Optional[str]:
     """The install list's batch_bam step: move the index, then the BAM, from the claim folder
     to where finalize looks (finalize globs *.bam). Returns what went wrong, or None.
 
-    A BAM already gone from the claim folder is in place when it is in the sample folder, or
-    when target.bam lists it as merged (a finalize merges and deletes batch BAMs under its
-    own lock, so it can do so before the list is deleted). Otherwise it is lost."""
+    Whether the BAM is in place is judged by where it is (_batch_bam_in_place), not by
+    whether its move reported an error: over NFS a rename can take effect and still report
+    one (rename(2), BUGS). A BAM gone from the claim folder and not in place is lost."""
     src, dst = os.path.join(sample_dir, step["from"]), os.path.join(sample_dir, step["to"])
     if os.path.exists(src):
         try:
@@ -3028,6 +3037,11 @@ def _install_batch_bam(sample_dir: str, step: dict) -> Optional[str]:
                 os.replace(f"{src}.bai", f"{dst}.bai")
             os.replace(src, dst)
         except Exception as e:
+            if _batch_bam_in_place(sample_dir, step):
+                logging.getLogger("robin.target").warning(
+                    f"Moving {step['from']} into place reported an error, but it is in place: {e}"
+                )
+                return None
             if os.path.exists(f"{dst}.bai") and not os.path.exists(f"{src}.bai"):
                 try:  # the claim folder keeps both
                     os.replace(f"{dst}.bai", f"{src}.bai")
@@ -3035,7 +3049,7 @@ def _install_batch_bam(sample_dir: str, step: dict) -> Optional[str]:
                     pass
             return f"the batch BAM could not be moved into place ({e})"
         return None
-    if os.path.exists(dst) or step["to"] in _merged_batch_names(os.path.join(sample_dir, "target.bam")):
+    if _batch_bam_in_place(sample_dir, step):
         return None
     return "the batch BAM is gone: it is neither in the sample folder nor merged into target.bam"
 
