@@ -37,6 +37,12 @@ _ST_TAG = "st"
 _BASECALL_MODEL_PREFIX = "basecall_model="
 _RUNID_PREFIX = "runid="
 
+
+class UnreadableBam(Exception):
+    """A BAM that can't be read to its end (damaged or cut off). Preprocessing fails with this
+    error, naming the file, so the BAM is reported and not analysed. It is never counted as a
+    BAM with zero reads, and never turned into an ``unknown_sample_<file>`` sample."""
+
 # Optional: configure BAM read threads via environment variable (pysam/htslib BGZF threads)
 # Set LJ_BAM_THREADS=4 (or higher) to enable multi-threaded decompression when reading BAMs.
 # Defaults to single-threaded when unset or invalid to maintain behavior.
@@ -226,7 +232,10 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
 
     Returns:
         Optional[Dict[str, Any]]: A dictionary containing aggregated read information,
-                                  or None if processing fails.
+                                  or None if the header has no read group.
+
+    Raises:
+        UnreadableBam: the file can't be opened or read to its end.
     """
     if not bam_file:
         return None
@@ -445,8 +454,12 @@ def process_bam_reads(bam_file: str) -> Optional[Dict[str, Any]]:
 
             return bam_read
 
-    except (IOError, ValueError):
-        return None
+    except (IOError, ValueError) as e:
+        # Was "return None": the BAM then counted as zero reads under unknown_sample_<file>
+        raise UnreadableBam(
+            f"{os.path.basename(bam_file)} can't be read to its end ({type(e).__name__}: {e}). "
+            "It is damaged or cut off, and is not analysed."
+        ) from e
 
 
 # ============================================================================
